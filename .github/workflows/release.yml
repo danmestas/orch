@@ -27,16 +27,18 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Upgrade npm (trusted-publishing OIDC auth requires 11.5+)
-        run: npm install -g npm@latest
+      - name: Show npm version (must be 11.5+ for trusted-publishing OIDC auth)
+        run: |
+          npm install -g npm@latest
+          npm --version
 
       - name: Verify package contents (dry-run pack)
         run: npm pack --dry-run
 
       - name: Publish (dry-run)
         if: ${{ inputs.dry_run == true }}
-        run: npm publish --dry-run --access public --provenance
+        run: npm publish --dry-run --access public --provenance --verbose
 
       - name: Publish
         if: ${{ inputs.dry_run != true }}
-        run: npm publish --access public --provenance
+        run: npm publish --access public --provenance --verbose
