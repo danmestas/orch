@@ -30,7 +30,7 @@ while [ $# -gt 0 ]; do
 done
 
 say() { [ $QUIET -eq 0 ] && echo "$@" || true; }
-warn() { echo "orch-up: WARN $@" >&2; }
+warn() { echo "orch-up: WARN" "$@" >&2; }
 
 # Locate package root from this binary's path.
 BIN_PATH=$(perl -MCwd=realpath -le 'print realpath shift' "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")

@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: shellcheck — bin scripts (bash only)
+        # orch-relayout is python; filter inputs by shebang so non-shell files don't trip SC1071.
+        # SC2034 (unused vars) excluded for now; tracked separately for Phase 1.5 cleanup.
+        run: |
+          files=()
+          for f in bin/orch*; do
+            head -1 "$f" | grep -qE '\b(ba)?sh\b' && files+=("$f")
+          done
+          shellcheck --severity=warning --exclude=SC2034 "${files[@]}"
+
+      - name: shellcheck — hooks
+        run: shellcheck --severity=warning --exclude=SC2034 hooks/*.sh
+
+      - name: shellcheck — install.sh
+        run: shellcheck --severity=warning --exclude=SC2034 install.sh
+
+      - name: node --check — scripts
+        run: |
+          for f in scripts/*.js; do
+            node --check "$f"
+          done
+
+      - name: jq — validate JSON manifests
+        run: |
+          jq -e . package.json > /dev/null
+          jq -e . settings-snippet.json > /dev/null
+
+      - name: "npm pack — dry run (catches files: + bin-path regressions)"
+        run: npm pack --dry-run

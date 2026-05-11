@@ -136,9 +136,12 @@ else
     # resolves back to $PKG_ROOT.
     sweep_dir() {
         local src=$1 dst=$2
+        local entry name target link_target
         [ -d "$src" ] && [ -d "$dst" ] || return 0
-        for entry in $(ls "$src" 2>/dev/null); do
-            target="$dst/$entry"
+        for entry in "$src"/*; do
+            [ -e "$entry" ] || continue
+            name=$(basename "$entry")
+            target="$dst/$name"
             [ -L "$target" ] || continue
             link_target=$(readlink "$target" 2>/dev/null || true)
             case "$link_target" in
