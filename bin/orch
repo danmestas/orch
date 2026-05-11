@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# orch — subcommand dispatcher.
+#
+# Lets the operator type 'orch up' / 'orch down' rather than 'orch-up' /
+# 'orch-down'. Forwards any `orch <subcommand> [args...]` to the
+# corresponding `orch-<subcommand>` binary.
+#
+# 'orch' with no args, '--help', or 'help' prints this dispatcher's help.
+set -euo pipefail
+
+if [ $# -eq 0 ] || [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "help" ]; then
+    cat <<'EOT'
+orch — lightweight, extensible substrate for autonomous long-running
+multi-agent coordination on tmux.
+
+Usage:
+  orch <subcommand> [args...]
+  orch up         complete the install on this machine (verifies deps,
+                  symlinks hooks/skills, merges hooks into settings.json)
+  orch down       tear down install state on this machine (preserves the
+                  npm package itself — use `npm uninstall -g @agent-ops/orch`
+                  for that)
+  orch version    binary version + drift report
+
+Operators rarely need to invoke other orch-* binaries by hand. The
+orch-driver skill (loaded into Claude Code) calls them on your behalf.
+
+Run 'orch <subcommand> --help' for subcommand details.
+EOT
+    exit 0
+fi
+
+cmd=$1; shift
+target="orch-$cmd"
+
+if ! command -v "$target" >/dev/null 2>&1; then
+    echo "orch: unknown subcommand '$cmd'" >&2
+    echo "       (looked for binary named '$target' on PATH; not found)" >&2
+    echo "       run 'orch --help' for available subcommands" >&2
+    exit 1
+fi
+
+exec "$target" "$@"

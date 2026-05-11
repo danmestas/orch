@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# orch-down — tear down orch's install state on this machine.
+#
+# Reverses what `orch up` (and the npm postinstall) put in place:
+#   1. Remove orch hook entries from ~/.claude/settings.json
+#   2. Sweep symlinks orch owns (hooks, skills, pi-extensions)
+#   3. Remove the fleet-prompt cache
+#   4. Remove runtime state (registry, stop markers, send log, subs, claim)
+#
+# What it does NOT do:
+#   - Uninstall the npm package — that's `npm uninstall -g @agent-ops/orch`
+#     (which would re-run preuninstall + remove the binaries; orch-down
+#     handles the residue npm uninstall doesn't touch)
+#   - Remove runtime deps (tmux, fswatch, jq) — other tools may use them
+#   - Strip injected fleet doctrine from ~/.codex/AGENTS.md / ~/.gemini/GEMINI.md
+#     (orch-up doesn't add those automatically; if you added them manually,
+#     remove the marker block manually)
+#
+# Flags:
+#   --yes / -y    skip the confirmation prompt
+#   --dry-run     show what would be removed without doing it
+#   --keep-state  preserve runtime state caches (registry, send log, etc.)
+#   --quiet       suppress all output except errors
+set -euo pipefail
+
+YES=0
+DRY_RUN=0
+KEEP_STATE=0
+QUIET=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --yes|-y) YES=1; shift ;;
+        --dry-run) DRY_RUN=1; shift ;;
+        --keep-state) KEEP_STATE=1; shift ;;
+        --quiet) QUIET=1; shift ;;
+        --help|-h) sed -n '2,21p' "$0"; exit 0 ;;
+        *) echo "orch-down: unknown flag: $1" >&2; exit 1 ;;
+    esac
+done
+
+say() { [ $QUIET -eq 0 ] && echo "$@" || true; }
+do_rm() {
+    # Args: path. Removes if not in dry-run; logs either way.
+    local p=$1
+    if [ $DRY_RUN -eq 1 ]; then
+        say "  would remove: $p"
+    else
+        rm -rf "$p"
+        say "  removed: $p"
+    fi
+}
+
+BIN_PATH=$(perl -MCwd=realpath -le 'print realpath shift' "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+PKG_ROOT=$(cd "$(dirname "$BIN_PATH")/.." && pwd)
+
+say "=== orch-down — package: $PKG_ROOT ==="
+[ $DRY_RUN -eq 1 ] && say "(dry-run mode — no changes will be made)"
+
+# ───────────────────────────────────────────────────────────────────
+# Show plan + confirm
+# ───────────────────────────────────────────────────────────────────
+say
+say "This will:"
+say "  - Remove orch hook entries from ~/.claude/settings.json (backup first)"
+say "  - Remove symlinks under ~/.claude/hooks/, ~/.claude/skills/,"
+say "    and ~/.pi/agent/extensions/ that point back to this package"
+say "  - Delete ~/.cache/orch-fleet-prompt.md"
+if [ $KEEP_STATE -eq 0 ]; then
+    say "  - Delete runtime state: ~/.cache/orch-registry/,"
+    say "    ~/.cache/orch-stop/, ~/.cache/orch-subs/,"
+    say "    ~/.cache/orch-send.log, ~/.cache/orch-operator.json"
+else
+    say "  - Preserve runtime state (--keep-state)"
+fi
+say
+say "This will NOT:"
+say "  - Uninstall the npm package (run: npm uninstall -g @agent-ops/orch)"
+say "  - Touch hook commands you've added yourself in settings.json"
+say "  - Strip fleet doctrine from ~/.codex/AGENTS.md or ~/.gemini/GEMINI.md"
+say
+
+if [ $YES -eq 0 ] && [ $DRY_RUN -eq 0 ]; then
+    read -r -p "Continue? [y/N] " ans
+    case "$ans" in
+        y|Y|yes|YES) ;;
+        *) echo "aborted"; exit 0 ;;
+    esac
+    say
+fi
+
+# ───────────────────────────────────────────────────────────────────
+# 1. Remove orch hooks from settings.json
+# ───────────────────────────────────────────────────────────────────
+say "[1/4] removing orch hooks from ~/.claude/settings.json"
+SETTINGS="$HOME/.claude/settings.json"
+if [ -f "$SETTINGS" ]; then
+    if [ $DRY_RUN -eq 0 ]; then
+        BACKUP="$SETTINGS.orch-bak.$(date +%Y%m%d-%H%M%S)"
+        cp "$SETTINGS" "$BACKUP"
+        say "  backup: $BACKUP"
+    fi
+    # Walk every event type; for each, filter out matcher entries whose
+    # hooks all reference orch-{stop,notify}-marker. If a matcher has
+    # mixed hooks (some orch, some not), drop only the orch ones.
+    new=$(jq '
+        if .hooks then
+            .hooks |= with_entries(
+                .value |= map(
+                    .hooks |= map(select(.command | test("orch-(stop|notify)-marker") | not))
+                ) | map(select(.hooks | length > 0))
+            )
+            | .hooks |= with_entries(select(.value | length > 0))
+            | if (.hooks | length) == 0 then del(.hooks) else . end
+        else . end
+    ' "$SETTINGS")
+
+    if [ $DRY_RUN -eq 1 ]; then
+        say "  would update $SETTINGS (stripped orch hook entries)"
+    else
+        echo "$new" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+        say "  updated $SETTINGS"
+    fi
+else
+    say "  $SETTINGS does not exist; nothing to remove"
+fi
+say
+
+# ───────────────────────────────────────────────────────────────────
+# 2. Sweep package-owned symlinks
+# ───────────────────────────────────────────────────────────────────
+say "[2/4] removing package-owned symlinks"
+if [ $DRY_RUN -eq 0 ] && [ -f "$PKG_ROOT/scripts/preuninstall.js" ] && command -v node >/dev/null 2>&1; then
+    node "$PKG_ROOT/scripts/preuninstall.js" 2>&1 | sed 's/^/  /'
+else
+    # Inline fallback: sweep symlinks under each target dir whose readlink
+    # resolves back to $PKG_ROOT.
+    sweep_dir() {
+        local src=$1 dst=$2
+        [ -d "$src" ] && [ -d "$dst" ] || return 0
+        for entry in $(ls "$src" 2>/dev/null); do
+            target="$dst/$entry"
+            [ -L "$target" ] || continue
+            link_target=$(readlink "$target" 2>/dev/null || true)
+            case "$link_target" in
+                "$PKG_ROOT"/*) do_rm "$target" ;;
+            esac
+        done
+    }
+    sweep_dir "$PKG_ROOT/hooks"          "$HOME/.claude/hooks"
+    sweep_dir "$PKG_ROOT/skills"         "$HOME/.claude/skills"
+    sweep_dir "$PKG_ROOT/pi-extensions"  "$HOME/.pi/agent/extensions"
+fi
+say
+
+# ───────────────────────────────────────────────────────────────────
+# 3. Remove fleet-prompt cache
+# ───────────────────────────────────────────────────────────────────
+say "[3/4] removing fleet-prompt cache"
+do_rm "$HOME/.cache/orch-fleet-prompt.md"
+say
+
+# ───────────────────────────────────────────────────────────────────
+# 4. Remove runtime state (unless --keep-state)
+# ───────────────────────────────────────────────────────────────────
+say "[4/4] removing runtime state"
+if [ $KEEP_STATE -eq 1 ]; then
+    say "  --keep-state — preserving runtime caches"
+else
+    do_rm "$HOME/.cache/orch-registry"
+    do_rm "$HOME/.cache/orch-stop"
+    do_rm "$HOME/.cache/orch-subs"
+    do_rm "$HOME/.cache/orch-send.log"
+    do_rm "$HOME/.cache/orch-operator.json"
+fi
+say
+
+# ───────────────────────────────────────────────────────────────────
+# Summary
+# ───────────────────────────────────────────────────────────────────
+say "orch-down complete."
+say
+say "Next steps:"
+say "  - To remove the npm package itself: npm uninstall -g @agent-ops/orch"
+say "  - If you injected fleet doctrine into ~/.codex/AGENTS.md or"
+say "    ~/.gemini/GEMINI.md (orch-up doesn't do this automatically), strip"
+say "    the marker blocks manually."

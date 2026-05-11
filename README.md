@@ -14,13 +14,26 @@ A lightweight, extensible substrate for autonomous long-running multi-agent coor
 ## Install
 
 ```bash
+# 1. Install the package (binaries on PATH; postinstall symlinks hooks + skills):
 npm install -g @agent-ops/orch
+
+# 2. Complete setup — verifies deps, registers hooks in ~/.claude/settings.json:
+orch up
 
 # Optional — outfit support (config-as-code for workers):
 npm install -g @agent-ops/suit
 ```
 
-If you've set `--ignore-scripts`, run `orch-setup` afterwards to wire hooks and skills. `npm uninstall -g @agent-ops/orch` cleans up.
+`orch up` is idempotent. It checks runtime deps, runs the postinstall symlink farm (in case `--ignore-scripts` was used), and merges Claude Code's Stop/Notification hook registrations into `~/.claude/settings.json` (with a timestamped backup).
+
+To tear it down:
+
+```bash
+orch down                            # remove install state on this machine
+npm uninstall -g @agent-ops/orch     # remove the package itself
+```
+
+`orch down` confirms before destructive ops, backs up `settings.json`, accepts `--dry-run` / `--keep-state` / `--yes` flags.
 
 ## Driving it
 

@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# orch-up — complete the orch install on this machine.
+#
+# Idempotent. Safe to re-run any time. Does what `npm install -g @agent-ops/orch`
+# can't do on its own:
+#   1. Verifies runtime deps (tmux, fswatch, jq) and reports missing
+#   2. Runs the postinstall symlink farm (in case --ignore-scripts was used)
+#   3. Merges hook registrations into ~/.claude/settings.json (with backup)
+#
+# What it does NOT do:
+#   - Install the npm package itself (that's `npm install -g @agent-ops/orch`)
+#   - Install runtime deps (uses your package manager; prints the right command)
+#   - Inject fleet doctrine into ~/.codex/AGENTS.md / ~/.gemini/GEMINI.md
+#     (opinion you adopt deliberately; not bundled into 'up')
+#
+# Flags:
+#   --dry-run    show what would change, do nothing
+#   --quiet      suppress all output except errors
+set -euo pipefail
+
+QUIET=0
+DRY_RUN=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run) DRY_RUN=1; shift ;;
+        --quiet)   QUIET=1; shift ;;
+        --help|-h) sed -n '2,21p' "$0"; exit 0 ;;
+        *) echo "orch-up: unknown flag: $1" >&2; exit 1 ;;
+    esac
+done
+
+say() { [ $QUIET -eq 0 ] && echo "$@" || true; }
+warn() { echo "orch-up: WARN $@" >&2; }
+
+# Locate package root from this binary's path.
+BIN_PATH=$(perl -MCwd=realpath -le 'print realpath shift' "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+PKG_ROOT=$(cd "$(dirname "$BIN_PATH")/.." && pwd)
+
+say "=== orch-up — package: $PKG_ROOT ==="
+[ $DRY_RUN -eq 1 ] && say "(dry-run mode — no changes will be made)"
+say
+
+# ───────────────────────────────────────────────────────────────────
+# 1. Verify runtime deps
+# ───────────────────────────────────────────────────────────────────
+say "[1/3] checking runtime deps"
+missing=()
+for cmd in tmux fswatch jq; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        missing+=("$cmd")
+    fi
+done
+
+if [ ${#missing[@]} -gt 0 ]; then
+    case "$(uname -s)" in
+        Darwin) hint="brew install ${missing[*]}" ;;
+        Linux)
+            if command -v apt >/dev/null 2>&1; then hint="sudo apt install ${missing[*]}"
+            elif command -v dnf >/dev/null 2>&1; then hint="sudo dnf install ${missing[*]}"
+            elif command -v pacman >/dev/null 2>&1; then hint="sudo pacman -S ${missing[*]}"
+            else hint="install ${missing[*]} via your package manager"
+            fi ;;
+        *) hint="install ${missing[*]} via your platform package manager" ;;
+    esac
+    warn "missing: ${missing[*]}"
+    warn "install with:  $hint"
+    warn "re-run 'orch up' once deps are installed"
+    exit 2
+fi
+say "  ok: tmux, fswatch, jq all present"
+say
+
+# ───────────────────────────────────────────────────────────────────
+# 2. Symlink farm (idempotent — postinstall handles this; here as fallback)
+# ───────────────────────────────────────────────────────────────────
+say "[2/3] symlinking hooks + skills + pi-extensions into Claude Code tree"
+if [ $DRY_RUN -eq 1 ]; then
+    say "  would run: node $PKG_ROOT/scripts/postinstall.js"
+elif [ -f "$PKG_ROOT/scripts/postinstall.js" ]; then
+    if command -v node >/dev/null 2>&1; then
+        node "$PKG_ROOT/scripts/postinstall.js" 2>&1 | sed 's/^/  /'
+    else
+        warn "node not on PATH; can't run postinstall.js. Install node and re-run."
+        exit 2
+    fi
+else
+    warn "scripts/postinstall.js not found at $PKG_ROOT/scripts/postinstall.js"
+    warn "your install may be incomplete; reinstall via npm install -g @agent-ops/orch"
+    exit 2
+fi
+say
+
+# ───────────────────────────────────────────────────────────────────
+# 3. Register hooks in ~/.claude/settings.json
+# ───────────────────────────────────────────────────────────────────
+say "[3/3] registering hooks in ~/.claude/settings.json"
+SETTINGS="$HOME/.claude/settings.json"
+SNIPPET="$PKG_ROOT/settings-snippet.json"
+
+if [ ! -f "$SNIPPET" ]; then
+    warn "settings-snippet.json not found at $SNIPPET"
+    exit 2
+fi
+
+mkdir -p "$HOME/.claude"
+
+# The settings.json hook shape:
+#   { "hooks": { "Stop": [{"hooks": [...]}], "Notification": [{"hooks": [...]}] } }
+# We want to add orch's stop + notify entries to the existing arrays, but only
+# if not already present (detect by command-string containing "orch-stop-marker"
+# or "orch-notify-marker").
+
+# Strip the _INSTRUCTIONS comment from snippet before merging.
+SNIPPET_CLEAN=$(jq 'del(._INSTRUCTIONS)' "$SNIPPET")
+
+# Expand $HOME in the snippet command strings — Claude Code doesn't expand vars.
+SNIPPET_CLEAN=$(echo "$SNIPPET_CLEAN" | sed "s|\\\$HOME|$HOME|g")
+
+merge_hooks() {
+    # Args: existing settings JSON (string), event name (Stop / Notification).
+    # Returns merged settings on stdout. If orch's hook is already present
+    # (detected by command containing "orch-${EVENT_LOWER}-marker"),
+    # passes through unchanged.
+    local existing=$1 event=$2 marker_name
+    marker_name=$(echo "$event" | tr '[:upper:]' '[:lower:]')
+
+    local already_present
+    already_present=$(echo "$existing" | jq -r --arg ev "$event" --arg mark "orch-${marker_name}-marker" \
+        '[(.hooks // {})[$ev][]?.hooks[]?.command | select(. != null)] | any(test($mark))' 2>/dev/null || echo "false")
+
+    if [ "$already_present" = "true" ]; then
+        say "  $event: orch-${marker_name}-marker already registered, skipping"
+        echo "$existing"
+        return
+    fi
+
+    say "  $event: appending orch-${marker_name}-marker hook"
+    local orch_hook
+    orch_hook=$(echo "$SNIPPET_CLEAN" | jq --arg ev "$event" '.hooks[$ev][0].hooks[0]')
+
+    # If event array exists with at least one matcher, append our hook to
+    # the FIRST matcher's hooks array. Otherwise create a new event entry.
+    echo "$existing" | jq \
+        --arg ev "$event" \
+        --argjson new "$orch_hook" \
+        'if (.hooks // {})[$ev]? and ((.hooks[$ev] | length) > 0) then
+            .hooks[$ev][0].hooks += [$new]
+         else
+            .hooks //= {} | .hooks[$ev] = [{"hooks": [$new]}]
+         end'
+}
+
+if [ $DRY_RUN -eq 1 ]; then
+    say "  would merge orch-stop-marker + orch-notify-marker into $SETTINGS"
+else
+    if [ -f "$SETTINGS" ]; then
+        BACKUP="$SETTINGS.orch-bak.$(date +%Y%m%d-%H%M%S)"
+        cp "$SETTINGS" "$BACKUP"
+        say "  backup: $BACKUP"
+        existing=$(cat "$SETTINGS")
+    else
+        say "  creating new $SETTINGS"
+        existing='{}'
+    fi
+
+    # Merge Stop then Notification, sequentially.
+    after_stop=$(merge_hooks "$existing" Stop)
+    after_notify=$(merge_hooks "$after_stop" Notification)
+
+    echo "$after_notify" | jq '.' > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+fi
+say
+
+# ───────────────────────────────────────────────────────────────────
+# Summary
+# ───────────────────────────────────────────────────────────────────
+say "orch is ready."
+say
+say "Verify with:  orch-version"
+say "Tear down:    orch down"

@@ -1,6 +1,6 @@
 {
   "name": "@agent-ops/orch",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Lightweight, extensible substrate for autonomous long-running multi-agent coordination on tmux.",
   "license": "Apache-2.0",
   "author": "Daniel Mestas",
@@ -16,8 +16,10 @@
     "node": ">=18"
   },
   "bin": {
+    "orch": "bin/orch",
     "orch-ask": "bin/orch-ask",
     "orch-claim-operator": "bin/orch-claim-operator",
+    "orch-down": "bin/orch-down",
     "orch-hide": "bin/orch-hide",
     "orch-listen": "bin/orch-listen",
     "orch-peek": "bin/orch-peek",
@@ -29,6 +31,7 @@
     "orch-spy": "bin/orch-spy",
     "orch-subscribe": "bin/orch-subscribe",
     "orch-tell": "bin/orch-tell",
+    "orch-up": "bin/orch-up",
     "orch-version": "bin/orch-version",
     "orch-wait": "bin/orch-wait"
   },
