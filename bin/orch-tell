@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# orch-tell — inject a prompt into a tmux pane running an interactive agent.
+#
+# Usage:
+#   orch-tell <pane_id|alias> <prompt words...>
+#   orch-tell <pane_id|alias> -                 # read prompt from stdin
+#   orch-tell [--force] <pane_id|alias> <prompt>
+#   orch-tell --list                            # list panes + commands
+#
+# Aliases: one per line "name=%pane_id" in ~/.config/orch-aliases.
+# Pane ids start with "%" — anything else is looked up as an alias.
+#
+# Observer-target policy (A1): a worker pane (ORCH_PANE_ID set in env) is
+# refused when telling an observer-class target unless --force is passed.
+# Observers exist to watch, not to be redirected by workers. Operator panes
+# (no ORCH_PANE_ID) are unrestricted.
+#
+# Idle detection: capture-pane twice with a small delay; if the screen is
+# unchanged the agent is considered idle. If it never settles within
+# ORCH_TELL_MAX_WAIT seconds, exit non-zero.
+set -euo pipefail
+
+ALIAS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/orch-aliases"
+MAX_WAIT="${ORCH_TELL_MAX_WAIT:-30}"
+IDLE_DELAY="${ORCH_TELL_IDLE_DELAY:-0.3}"
+
+die() { printf 'orch-tell: %s\n' "$*" >&2; exit 1; }
+
+if [ "${1:-}" = "--list" ]; then
+    tmux list-panes -a -F '#{pane_id}  #{session_name}:#{window_index}.#{pane_index}  #{pane_current_command}  #{pane_current_path}'
+    exit 0
+fi
+
+# Strip --force from anywhere in the arg list so it composes cleanly with the
+# positional <pane> <prompt...> shape.
+FORCE=0
+ARGS=()
+for arg in "$@"; do
+    if [ "$arg" = "--force" ]; then FORCE=1; else ARGS+=("$arg"); fi
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
+[ "$#" -ge 2 ] || die "usage: orch-tell [--force] <pane_id|alias> <prompt> | --list"
+
+target=$1; shift
+case $target in
+    %*) pane=$target ;;
+    *)  [ -f "$ALIAS_FILE" ] || die "no alias file at $ALIAS_FILE; pass a pane id like %35"
+        pane=$(awk -F= -v k="$target" '$1==k {print $2; exit}' "$ALIAS_FILE")
+        [ -n "$pane" ] || die "alias '$target' not found in $ALIAS_FILE"
+        ;;
+esac
+
+tmux list-panes -a -F '#{pane_id}' | grep -qx "$pane" \
+    || die "pane $pane does not exist"
+
+# Worker→observer guard: a worker (ORCH_PANE_ID set) cannot redirect an
+# observer-class target unless --force.
+if [ -n "${ORCH_PANE_ID:-}" ] && [ $FORCE -eq 0 ]; then
+    REG_DIR="${ORCH_REGISTRY_DIR:-$HOME/.cache/orch-registry}"
+    REG_FILE="$REG_DIR/$pane.json"
+    if [ -f "$REG_FILE" ] && command -v jq >/dev/null 2>&1; then
+        target_role=$(jq -r '.role // "worker"' "$REG_FILE" 2>/dev/null || echo worker)
+        if [ "$target_role" = "observer" ]; then
+            die "refusing to tell observer pane $pane (sender is worker $ORCH_PANE_ID); pass --force to override"
+        fi
+    fi
+fi
+
+if [ "$1" = "-" ]; then
+    prompt=$(cat)
+else
+    prompt="$*"
+fi
+
+deadline=$(( $(date +%s) + MAX_WAIT ))
+prev=""
+prev_set=0
+while :; do
+    cur=$(tmux capture-pane -t "$pane" -p)
+    if [ $prev_set -eq 1 ] && [ "$prev" = "$cur" ]; then
+        break
+    fi
+    [ "$(date +%s)" -gt "$deadline" ] && die "pane $pane never went idle within ${MAX_WAIT}s"
+    prev=$cur
+    prev_set=1
+    sleep "$IDLE_DELAY"
+done
+
+# Inject as literal keystrokes (-l): each char is a typed key, no bracketed-paste
+# wrapping. Then a separate Enter that's interpreted as the special key.
+# A brief sleep is necessary — without it, the Enter often arrives before the
+# TUI has finished consuming the literal stream and the submit is dropped.
+# 50ms is empirically enough; 100ms is safer for slow machines.
+tmux send-keys -t "$pane" -l "$prompt"
+sleep "${ORCH_TELL_SUBMIT_DELAY:-0.1}"
+tmux send-keys -t "$pane" Enter
+
+# Append to send-log so a parent that returns from a session restart can
+# distinguish prompts the orchestrator sent (here) from prompts the user typed.
+SEND_LOG="${ORCH_SEND_LOG:-$HOME/.cache/orch-send.log}"
+if command -v jq >/dev/null 2>&1; then
+    preview=$(printf '%s' "$prompt" | head -c 200)
+    jq -nc \
+        --argjson ts_ns "$(date +%s%N)" \
+        --arg pane "$pane" \
+        --arg sender "${ORCH_PANE_ID:-orchestrator-${PPID:-?}}" \
+        --arg prompt_preview "$preview" \
+        --arg prompt_len "${#prompt}" \
+        '{ts_ns:$ts_ns, pane:$pane, sender:$sender, prompt_preview:$prompt_preview, prompt_len:($prompt_len|tonumber)}' \
+        >> "$SEND_LOG" 2>/dev/null || true
+fi

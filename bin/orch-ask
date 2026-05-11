@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# orch-ask — send a prompt to a tmux pane, wait for the agent to settle,
+# return only the new content the agent emitted (stdout).
+#
+# Usage:
+#   orch-ask <pane_id|alias> <prompt words...>
+#   orch-ask <pane_id|alias> -                      # prompt from stdin
+#   orch-ask <pane_id|alias> --stable N --timeout S <prompt...>
+#
+# Stdout: just the new chunk of pane history that appeared after we sent the
+# prompt. Use this for scripting agent calls — pipe into a file, jq, whatever.
+#
+# Stderr: status lines ("sent", "settled after Ns") unless --quiet.
+#
+# Exit codes:
+#   0  prompt sent and pane settled
+#   1  bad usage / pane missing
+#   2  timeout reached
+set -euo pipefail
+
+ALIAS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/orch-aliases"
+STABLE_NEEDED=5
+TIMEOUT=600
+INTERVAL=2
+QUIET=0
+SCROLLBACK_DEPTH=4000   # rows to capture from history each side; bump for very long replies
+
+die() { printf 'orch-ask: %s\n' "$*" >&2; exit 1; }
+
+[ "$#" -ge 2 ] || die "usage: orch-ask <pane_id|alias> <prompt> [--stable N] [--timeout S] [--quiet]"
+
+target=$1; shift
+
+# Parse flags before / after the prompt — flags can come anywhere
+prompt_args=()
+while [ "$#" -gt 0 ]; do
+    case $1 in
+        --stable)   STABLE_NEEDED=$2; shift 2 ;;
+        --interval) INTERVAL=$2; shift 2 ;;
+        --timeout)  TIMEOUT=$2; shift 2 ;;
+        --quiet)    QUIET=1; shift ;;
+        *)          prompt_args+=("$1"); shift ;;
+    esac
+done
+set -- "${prompt_args[@]}"
+[ "$#" -ge 1 ] || die "no prompt provided"
+
+case $target in
+    %*) pane=$target ;;
+    *)  [ -f "$ALIAS_FILE" ] || die "no alias file at $ALIAS_FILE; pass a pane id like %35"
+        pane=$(awk -F= -v k="$target" '$1==k {print $2; exit}' "$ALIAS_FILE")
+        [ -n "$pane" ] || die "alias '$target' not found in $ALIAS_FILE"
+        ;;
+esac
+
+tmux list-panes -a -F '#{pane_id}' | grep -qx "$pane" \
+    || die "pane $pane does not exist"
+
+if [ "$1" = "-" ]; then
+    prompt=$(cat)
+else
+    prompt="$*"
+fi
+
+# Snapshot scrollback BEFORE sending. We'll diff against it after.
+before=$(mktemp -t orch-ask-before.XXXXXX)
+trap 'rm -f "$before" "$after" 2>/dev/null' EXIT
+tmux capture-pane -t "$pane" -pS "-${SCROLLBACK_DEPTH}" > "$before"
+before_lines=$(wc -l < "$before")
+
+[ "$QUIET" = 1 ] || printf 'orch-ask: sending to %s\n' "$pane" >&2
+orch-tell "$pane" "$prompt"
+[ "$QUIET" = 1 ] || printf 'orch-ask: sent at %s\n' "$(date +%H:%M:%S)" >&2
+
+# Brief settle so the prompt-echo and "thinking..." indicator land before we start
+# sampling for stability.
+sleep 3
+
+quiet_arg=()
+[ "$QUIET" = 1 ] && quiet_arg+=(--quiet)
+orch-wait "$pane" --stable "$STABLE_NEEDED" --interval "$INTERVAL" --timeout "$TIMEOUT" "${quiet_arg[@]}" 1>&2 || rc=$?
+rc=${rc:-0}
+
+after=$(mktemp -t orch-ask-after.XXXXXX)
+tmux capture-pane -t "$pane" -pS "-${SCROLLBACK_DEPTH}" > "$after"
+
+# The "new content" is everything in the after-snapshot that came after where
+# the before-snapshot ended. tmux scrollback rolls forward, so the simplest
+# robust way is: skip lines 1..(before_lines - shared-tail), print the rest.
+#
+# Easier and good enough: print the diff using `diff` and grab only added lines.
+# Even simpler: if before's last non-empty line is L, skip past L in after and
+# print everything after. We use the latter — robust to scrollback eviction.
+# Last non-empty line of the before-snapshot. Done with awk so we don't depend
+# on GNU `tac` (not in macOS BSD by default).
+last_before_line=$(awk 'NF { last = $0 } END { print last }' "$before")
+
+if [ -n "$last_before_line" ]; then
+    # Find the LAST occurrence in $after of $last_before_line and print everything
+    # after it. (First-occurrence is wrong — repeating footer lines match too early
+    # and we end up dumping the whole scrollback.)
+    last_match=$(grep -nF -- "$last_before_line" "$after" | tail -1 | cut -d: -f1 || true)
+    if [ -n "$last_match" ]; then
+        tail -n +"$((last_match + 1))" "$after"
+    else
+        cat "$after"
+    fi
+else
+    cat "$after"
+fi
+
+exit "$rc"

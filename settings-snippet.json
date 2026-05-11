@@ -1,0 +1,27 @@
+{
+  "_INSTRUCTIONS": "Merge this fragment into ~/.claude/settings.json under the top-level 'hooks' key. The 'Stop' entry can be added as a new key. The 'Notification' entry should be APPENDED to the existing Notification[0].hooks[] array if you have other Notification hooks (e.g. notify-tts.sh). Replace $HOME with your actual home path — Claude Code does NOT expand env vars in the command string. Remove this _INSTRUCTIONS field after merging.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/hooks/orch-stop-marker.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/hooks/orch-notify-marker.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

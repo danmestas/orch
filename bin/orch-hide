@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# orch-hide — move a visible pane into the detached orch-headless session.
+#
+# Usage:
+#   orch-hide <pane_id>
+#
+# Pane keeps running; it just isn't visible in the orchestrator's window anymore.
+# Bring it back with `orch-show <pane_id>`.
+set -euo pipefail
+[ $# -ge 1 ] || { echo "usage: orch-hide <pane_id>" >&2; exit 1; }
+SRC=$1
+SESSION=${ORCH_HEADLESS_SESSION:-orch-headless}
+
+if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    # Long-sleep placeholder so the session has at least one live window for
+    # break-pane to land into. We kill the placeholder right after, leaving
+    # only the moved pane.
+    tmux new-session -d -s "$SESSION" -n placeholder 'sleep 86400'
+fi
+
+tmux break-pane -d -s "$SRC" -t "$SESSION:"
+tmux kill-window -t "$SESSION:placeholder" 2>/dev/null || true
+echo "$SRC moved to $SESSION (detached)"

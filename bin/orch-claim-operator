@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# orch-claim-operator — record this pane as the operator's pane so other
+# harness tools (orch-peek, future orch-spy, monitoring-the-operator
+# spies) can find the operator's transcript JSONL without asking.
+#
+# Run once from the operator's pane:
+#   $ orch-claim-operator
+#
+# Writes ~/.cache/orch-operator.json with:
+#   {pane_id, claimed_at_ts_ns, transcript_jsonl, cwd}
+#
+# Refuses to run from a worker pane (ORCH_PANE_ID set) — workers must not
+# claim themselves operator. Use --pane <id> to override (e.g., when the
+# operator is running this from a non-default pane).
+#
+# Output contract: stdout is the cache path on success; stderr carries
+# diagnostics. Pass --quiet to suppress stderr too.
+set -euo pipefail
+
+QUIET=0
+PANE_OVERRIDE=""
+
+usage() {
+    cat <<'EOT' >&2
+usage: orch-claim-operator [--quiet] [--pane <pane_id>]
+  --quiet         suppress stderr
+  --pane <id>     claim the named pane (default: current tmux pane)
+EOT
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --quiet) QUIET=1; shift ;;
+        --pane)  PANE_OVERRIDE=${2:-}; shift 2 ;;
+        --help|-h) usage; exit 0 ;;
+        *) echo "orch-claim-operator: unknown flag: $1" >&2; usage; exit 1 ;;
+    esac
+done
+
+[ $QUIET -eq 1 ] && exec 2>/dev/null
+
+command -v jq   >/dev/null 2>&1 || { echo "orch-claim-operator: jq required" >&2; exit 1; }
+command -v tmux >/dev/null 2>&1 || { echo "orch-claim-operator: tmux required" >&2; exit 1; }
+
+# Workers should never claim — they have ORCH_PANE_ID set by the spawn wrap.
+if [ -n "${ORCH_PANE_ID:-}" ] && [ -z "$PANE_OVERRIDE" ]; then
+    echo "orch-claim-operator: refusing — ORCH_PANE_ID=$ORCH_PANE_ID is set, this looks like a worker pane" >&2
+    echo "  (use --pane <id> to override if you really mean it)" >&2
+    exit 1
+fi
+
+if [ -n "$PANE_OVERRIDE" ]; then
+    PANE=$PANE_OVERRIDE
+else
+    PANE=$(tmux display -p '#{pane_id}' 2>/dev/null) || {
+        echo "orch-claim-operator: not inside tmux; pass --pane explicitly" >&2; exit 1; }
+fi
+[[ "$PANE" =~ ^%[0-9]+$ ]] || { echo "orch-claim-operator: invalid pane id: $PANE" >&2; exit 1; }
+
+tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx "$PANE" || {
+    echo "orch-claim-operator: pane $PANE not currently live in tmux" >&2; exit 1; }
+
+CWD=$(tmux display-message -t "$PANE" -p '#{pane_current_path}' 2>/dev/null || echo "")
+[ -n "$CWD" ] || { echo "orch-claim-operator: could not resolve cwd for $PANE" >&2; exit 1; }
+
+PROJECTS_DIR="${ORCH_PROJECTS_DIR:-$HOME/.claude/projects}"
+RESOLVED_CWD=$(cd "$CWD" 2>/dev/null && pwd -P) || RESOLVED_CWD=$CWD
+ENCODED=$(printf '%s' "$RESOLVED_CWD" | sed 's|/|-|g; s|_|-|g')
+SESSION_DIR="$PROJECTS_DIR/$ENCODED"
+[ -d "$SESSION_DIR" ] || {
+    echo "orch-claim-operator: no Claude session dir for $RESOLVED_CWD" >&2
+    echo "  expected: $SESSION_DIR" >&2
+    exit 1; }
+
+JSONL=""; BEST_MT=0
+for f in "$SESSION_DIR"/*.jsonl; do
+    [ -e "$f" ] || continue
+    mt=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+    if [ "$mt" -gt "$BEST_MT" ]; then BEST_MT=$mt; JSONL=$f; fi
+done
+[ -n "$JSONL" ] || { echo "orch-claim-operator: no *.jsonl in $SESSION_DIR" >&2; exit 1; }
+
+CACHE_FILE="${ORCH_OPERATOR_CACHE:-$HOME/.cache/orch-operator.json}"
+mkdir -p "$(dirname "$CACHE_FILE")"
+
+NS=$(date +%s%N)
+TMP="$CACHE_FILE.$$.tmp"
+jq -nc \
+    --arg pane_id        "$PANE" \
+    --argjson claimed_at "$NS" \
+    --arg transcript     "$JSONL" \
+    --arg cwd            "$RESOLVED_CWD" \
+    '{pane_id:$pane_id, claimed_at_ts_ns:$claimed_at, transcript_jsonl:$transcript, cwd:$cwd}' \
+    > "$TMP" && mv -f "$TMP" "$CACHE_FILE"
+
+echo "$CACHE_FILE"

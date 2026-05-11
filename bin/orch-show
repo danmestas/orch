@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# orch-show — bring a (typically headless) pane into the orchestrator's window.
+#
+# Usage:
+#   orch-show <pane_id> [target_pane_id]
+#
+# If target is omitted, joins into the current pane's window. Splits horizontally
+# by default — pass ORCH_SHOW_DIRECTION=v for a vertical split.
+set -euo pipefail
+[ $# -ge 1 ] || { echo "usage: orch-show <pane_id> [target=current]" >&2; exit 1; }
+SRC=$1
+TARGET=${2:-$(tmux display -p '#{pane_id}')}
+DIR=${ORCH_SHOW_DIRECTION:-h}
+case $DIR in
+    h) tmux join-pane -h -s "$SRC" -t "$TARGET" ;;
+    v) tmux join-pane -v -s "$SRC" -t "$TARGET" ;;
+    *) echo "ORCH_SHOW_DIRECTION must be h or v (got: $DIR)" >&2; exit 1 ;;
+esac
+echo "$SRC joined into $TARGET's window"

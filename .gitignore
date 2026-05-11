@@ -1,0 +1,26 @@
+# Tool dressing artifacts (when suit-dressed for engineering work)
+.agent-config/
+.claude/
+.codex/
+.gemini/
+.pi/
+.suit/
+CLAUDE.md
+GEMINI.md
+copilot-instructions.md
+ci-watch/
+hipp/
+norman/
+ousterhout/
+ship-issue/
+tigerstyle/
+rules-bundle/
+scripts/
+.github/
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/

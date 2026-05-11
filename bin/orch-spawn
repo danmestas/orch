@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# orch-spawn — unified worker spawn with headed/headless toggle.
+#
+# Usage:
+#   orch-spawn <agent> [--cwd <path>] [--project <name>] [--headless] [--no-fleet]
+#                         [--quiet] [--role <worker|observer>]
+#                         [--outfit <name>] [--cut <name>] [--accessory <name>]...
+#
+# Examples:
+#   orch-spawn claude --project gonvex
+#   orch-spawn pi --cwd ~/projects/bones
+#   orch-spawn codex --project dagnats --headless
+#   orch-spawn claude --project bones --outfit engineer --cut focused
+#   orch-spawn claude --outfit stasi --cut wait-watch       # auto role=observer
+#   orch-spawn claude --role observer --outfit engineer     # explicit override
+#
+# Role: panes are tagged role=worker by default; role=observer when the outfit
+# or cut indicates a meta/spy class (stasi outfit, wait-watch cut, spy-on-* cut)
+# OR when --role is passed. orch-listen default-excludes observers; explicit
+# --role wins over auto-detection.
+#
+# Default: spawns in the orchestrator's tmux window (headed).
+# With --headless, spawns in the detached `orch-headless` session — the agent
+# runs identically (TTY provided by tmux, hooks fire normally) but isn't visible
+# until promoted with `orch-show <pane_id>`.
+#
+# With --outfit (claude only for now), runs `suit prepare` to generate an
+# isolated config bundle in a tempdir, then spawns claude with the project
+# as cwd (so the project's CLAUDE.md auto-loads) and the bundle as `--add-dir`
+# for skills/agents/hooks. Because `--add-dir` does NOT auto-load
+# `<dir>/CLAUDE.md`, the bundle's CLAUDE.md is merged with the fleet doctrine
+# into a single `--append-system-prompt-file`. The wrap traps EXIT so the
+# bundle (and merged file inside it) is auto-removed when the pane dies. This
+# gives per-worker outfit isolation even when multiple workers share the same
+# project.
+#
+# Output contract: stdout is exactly one line — the new pane id. All
+# informational and error output goes to stderr. Pass --quiet to suppress
+# stderr too (caller signs up for silent failure on non-zero exit).
+# Auto-registers in the harness registry.
+#
+# suit interop: prefers `suit prepare --quiet` (v0.10+) for clean bundle-path
+# capture; falls back to legacy stdout-tail capture on older suit so the
+# spawn keeps working without forcing a suit upgrade.
+set -euo pipefail
+
+AGENT=${1:-}
+shift 2>/dev/null || true
+[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--project n] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--outfit X] [--cut Y] [--accessory A]..." >&2; exit 1; }
+
+CWD=""
+PROJECT=""
+HEADLESS=0
+NO_FLEET=0
+QUIET=0
+ROLE_OVERRIDE=""
+OUTFIT=""
+CUT=""
+ACCESSORIES=()
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --cwd) CWD=$2; shift 2 ;;
+        --project) PROJECT=$2; shift 2 ;;
+        --headless) HEADLESS=1; shift ;;
+        --no-fleet) NO_FLEET=1; shift ;;
+        --quiet) QUIET=1; exec 2>/dev/null; shift ;;
+        --role)
+            ROLE_OVERRIDE=${2:-}
+            case "$ROLE_OVERRIDE" in
+                worker|observer) ;;
+                *) echo "orch-spawn: --role must be worker or observer (got: $ROLE_OVERRIDE)" >&2; exit 1 ;;
+            esac
+            shift 2 ;;
+        --outfit) OUTFIT=$2; shift 2 ;;
+        --cut) CUT=$2; shift 2 ;;
+        --accessory) ACCESSORIES+=("$2"); shift 2 ;;
+        *) echo "orch-spawn: unknown flag: $1" >&2; exit 1 ;;
+    esac
+done
+
+[ $QUIET -eq 1 ] && exec 2>/dev/null
+
+# Resolve role: explicit --role wins; otherwise auto-detect from outfit/cut.
+# Observer-class outfits/cuts are meta panes (spies, auditors) — they watch
+# rather than do work, and orch-listen excludes them from default events.
+ROLE="$ROLE_OVERRIDE"
+if [ -z "$ROLE" ]; then
+    case "$OUTFIT" in
+        stasi) ROLE=observer ;;
+    esac
+fi
+if [ -z "$ROLE" ]; then
+    case "$CUT" in
+        wait-watch|spy-on-*) ROLE=observer ;;
+    esac
+fi
+[ -z "$ROLE" ] && ROLE=worker
+
+# Resolve --project to a directory:
+#   1. zoxide query (if zoxide is installed and the name is indexed)
+#   2. ~/projects/<name> (fallback for users without zoxide, or projects
+#      not yet indexed in zoxide)
+# Override the fallback root via ORCH_PROJECTS_ROOT (default: ~/projects).
+if [ -n "$PROJECT" ] && [ -z "$CWD" ]; then
+    if command -v zoxide >/dev/null 2>&1; then
+        CWD=$(zoxide query "$PROJECT" 2>/dev/null || true)
+    fi
+    if [ -z "$CWD" ]; then
+        FALLBACK="${ORCH_PROJECTS_ROOT:-$HOME/projects}/$PROJECT"
+        if [ -d "$FALLBACK" ]; then
+            CWD=$FALLBACK
+        else
+            echo "orch-spawn: cannot resolve --project $PROJECT — not in zoxide and not at $FALLBACK" >&2
+            exit 1
+        fi
+    fi
+fi
+[ -z "$CWD" ] && CWD=$(pwd)
+
+# Outfit support: only claude has been verified end-to-end (test-suit-integration.sh).
+# For other agents, suit's adapters emit different content per --target; wiring
+# them up needs its own verification round.
+BUNDLE=""
+if [ -n "$OUTFIT" ]; then
+    [ "$AGENT" = claude ] || { echo "orch-spawn: --outfit currently only supported for agent=claude (saw: $AGENT)" >&2; exit 1; }
+    command -v suit >/dev/null 2>&1 || { echo "orch-spawn: suit not on PATH — install @agent-ops/suit" >&2; exit 1; }
+    SUIT_CMD=(suit prepare --outfit "$OUTFIT" --target claude-code)
+    [ -n "$CUT" ] && SUIT_CMD+=(--cut "$CUT")
+    for a in "${ACCESSORIES[@]}"; do SUIT_CMD+=(--accessory "$a"); done
+    # Prefer --quiet (suit v0.10+) for clean stdout=bundle-path; fall back to
+    # legacy stdout-tail capture if suit doesn't recognize the flag.
+    if BUNDLE=$("${SUIT_CMD[@]}" --quiet 2>/dev/null); then
+        :
+    elif LEGACY_OUT=$("${SUIT_CMD[@]}" 2>/dev/null); then
+        BUNDLE=$(printf '%s\n' "$LEGACY_OUT" | tail -1)
+    else
+        BUNDLE=""
+    fi
+    [ -d "$BUNDLE" ] || { echo "orch-spawn: suit prepare failed (no bundle path returned)" >&2; exit 1; }
+fi
+
+# Per-agent wrap. Codex/gemini get fleet doctrine via global instructions files
+# (injected by install.sh into ~/.codex/AGENTS.md and ~/.gemini/GEMINI.md), so
+# no per-spawn flag needed for those.
+case $AGENT in
+    claude)
+        if [ -n "$BUNDLE" ]; then
+            # Bundle-based, cwd-inverted: project is cwd (project's CLAUDE.md
+            # auto-loads), bundle is --add-dir (skills/agents/hooks accessible).
+            # `--add-dir` does NOT load <dir>/CLAUDE.md, so merge the bundle's
+            # CLAUDE.md with fleet doctrine into one appended system prompt.
+            # Trap removes the bundle (and the merged file inside it) on pane
+            # death.
+            MERGED="$BUNDLE/.orch-merged-prompt.md"
+            : > "$MERGED"
+            [ -f "$BUNDLE/CLAUDE.md" ] && cat "$BUNDLE/CLAUDE.md" >> "$MERGED"
+            if [ $NO_FLEET -eq 0 ] && [ -f "$HOME/.cache/orch-fleet-prompt.md" ]; then
+                [ -s "$MERGED" ] && printf '\n\n' >> "$MERGED"
+                cat "$HOME/.cache/orch-fleet-prompt.md" >> "$MERGED"
+            fi
+            WRAP="trap 'rm -rf \"$BUNDLE\"' EXIT; export ORCH_PANE_ID=\$TMUX_PANE; cd \"$CWD\" && claude --dangerously-skip-permissions --add-dir \"$BUNDLE\""
+            [ -s "$MERGED" ] && WRAP="$WRAP --append-system-prompt-file \"$MERGED\""
+        else
+            WRAP="export ORCH_PANE_ID=\$TMUX_PANE; cd \"$CWD\" && claude --dangerously-skip-permissions"
+            [ $NO_FLEET -eq 0 ] && WRAP="$WRAP --append-system-prompt-file $HOME/.cache/orch-fleet-prompt.md"
+        fi
+        ;;
+    pi)
+        WRAP="export ORCH_PANE_ID=\$TMUX_PANE; cd \"$CWD\" && pi"
+        [ $NO_FLEET -eq 0 ] && WRAP="$WRAP --append-system-prompt $HOME/.cache/orch-fleet-prompt.md"
+        ;;
+    codex)
+        WRAP="export ORCH_PANE_ID=\$TMUX_PANE; cd \"$CWD\" && codex --dangerously-bypass-approvals-and-sandbox"
+        ;;
+    gemini)
+        WRAP="export ORCH_PANE_ID=\$TMUX_PANE; cd \"$CWD\" && gemini --yolo"
+        ;;
+    *)
+        echo "orch-spawn: unknown agent: $AGENT (expected claude|pi|codex|gemini)" >&2; exit 1 ;;
+esac
+
+WRAP="$WRAP; echo; echo '[$AGENT exited — press enter]'; read; exec \$SHELL -l"
+
+if [ $HEADLESS -eq 1 ]; then
+    SESSION=${ORCH_HEADLESS_SESSION:-orch-headless}
+    if tmux has-session -t "$SESSION" 2>/dev/null; then
+        PANE=$(tmux new-window -d -t "$SESSION:" -n "$AGENT" -P -F '#{pane_id}' "$WRAP")
+    else
+        PANE=$(tmux new-session -d -s "$SESSION" -n "$AGENT" -P -F '#{pane_id}' "$WRAP")
+    fi
+else
+    CUR=$(tmux display -p '#{pane_id}')
+    PANE=$(tmux split-window -d -h -P -F '#{pane_id}' -t "$CUR" "$WRAP")
+fi
+
+# Brief settle so ORCH_PANE_ID is in the agent's env before the listener
+# might fire and so registry capture is meaningful.
+sleep 1
+orch-register "$PANE" "$AGENT" "$CWD" --role "$ROLE" >/dev/null || true
+
+echo "$PANE"

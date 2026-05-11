@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# orch-wait — block until a tmux pane's screen has been stable for a while
+# (i.e. the agent inside has stopped generating).
+#
+# Usage:
+#   orch-wait <pane_id|alias>                       # default 5 stable, 2s interval, 600s cap
+#   orch-wait <pane_id|alias> --stable N            # N consecutive identical samples
+#   orch-wait <pane_id|alias> --interval SEC        # seconds between samples
+#   orch-wait <pane_id|alias> --timeout SEC         # max wall time before giving up
+#   orch-wait <pane_id|alias> --quiet               # don't print "settled after Ns"
+#
+# Volatile-line stripping: lines matching common "agent is still working" patterns
+# (spinner chars, "Thinking", "Working", "esc to cancel", "esc to interrupt", token
+# counters) are removed before the snapshots are compared. Without this, agents
+# that animate a counter line keep STABLE pinned at zero forever.
+#
+# Exit codes:
+#   0  pane settled
+#   1  bad usage / pane missing
+#   2  timeout reached without settling
+set -euo pipefail
+
+ALIAS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/orch-aliases"
+STABLE_NEEDED=5
+INTERVAL=2
+TIMEOUT=600
+QUIET=0
+
+die() { printf 'orch-wait: %s\n' "$*" >&2; exit 1; }
+
+[ "$#" -ge 1 ] || die "usage: orch-wait <pane_id|alias> [--stable N] [--interval S] [--timeout S] [--quiet]"
+
+target=$1; shift
+while [ "$#" -gt 0 ]; do
+    case $1 in
+        --stable)   STABLE_NEEDED=$2; shift 2 ;;
+        --interval) INTERVAL=$2; shift 2 ;;
+        --timeout)  TIMEOUT=$2; shift 2 ;;
+        --quiet)    QUIET=1; shift ;;
+        *) die "unknown flag: $1" ;;
+    esac
+done
+
+case $target in
+    %*) pane=$target ;;
+    *)  [ -f "$ALIAS_FILE" ] || die "no alias file at $ALIAS_FILE; pass a pane id like %35"
+        pane=$(awk -F= -v k="$target" '$1==k {print $2; exit}' "$ALIAS_FILE")
+        [ -n "$pane" ] || die "alias '$target' not found in $ALIAS_FILE"
+        ;;
+esac
+
+tmux list-panes -a -F '#{pane_id}' | grep -qx "$pane" \
+    || die "pane $pane does not exist"
+
+# Strip volatile / animating lines so they don't break stability detection.
+strip_volatile() {
+    grep -aviE '⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⡿|⣟|⣯|⣷|⣾|⣽|⣻|⢿|Thinking\.\.\.|Working|esc to (cancel|interrupt)|tokens|tok/s' || true
+}
+
+start=$(date +%s)
+prev=""
+stable=0
+while [ "$stable" -lt "$STABLE_NEEDED" ]; do
+    elapsed=$(( $(date +%s) - start ))
+    if [ "$elapsed" -gt "$TIMEOUT" ]; then
+        [ "$QUIET" = 1 ] || printf 'orch-wait: timeout after %ss (pane %s never settled)\n' "$TIMEOUT" "$pane" >&2
+        exit 2
+    fi
+    cur=$(tmux capture-pane -t "$pane" -p | strip_volatile)
+    if [ -n "$prev" ] && [ "$cur" = "$prev" ]; then
+        stable=$((stable+1))
+    else
+        stable=0
+        prev=$cur
+    fi
+    sleep "$INTERVAL"
+done
+
+[ "$QUIET" = 1 ] || printf 'settled after %ss\n' "$(( $(date +%s) - start ))"

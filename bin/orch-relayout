@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""orch-relayout — apply a precise custom tmux layout.
+
+Default shape: orchestrator on the left as a full-height column, agents arranged
+in a grid (2 columns by default) on the right. Tmux preset layouts (main-vertical,
+tiled, etc.) can't express this exactly; this tool generates the layout string
+explicitly and computes the checksum tmux requires.
+
+Usage:
+    orch-relayout                              # use current pane as orch
+    orch-relayout %27                          # explicit orch
+    orch-relayout --orch-width 90 %27
+    orch-relayout --cols 3 %27                 # 3-column agent grid
+    orch-relayout --print-only                 # don't apply, just print
+
+The script is idempotent and pure — it queries tmux for current panes and
+window dimensions, builds the layout tree, computes the FNV-style checksum
+tmux uses, and runs `tmux select-layout`.
+"""
+import argparse
+import subprocess
+import sys
+
+
+def tmux(*args, check=True):
+    return subprocess.run(["tmux", *args], capture_output=True, text=True, check=check).stdout.strip()
+
+
+def checksum(s: str) -> int:
+    """Tmux's layout-string checksum: rotate-right 1, add char, mask 16-bit."""
+    csum = 0
+    for ch in s.encode():
+        csum = ((csum >> 1) | ((csum & 1) << 15)) & 0xFFFF
+        csum = (csum + ch) & 0xFFFF
+    return csum
+
+
+def pid_num(pane_id: str) -> int:
+    """%27 -> 27"""
+    return int(pane_id.lstrip("%"))
+
+
+def leaf(w: int, h: int, x: int, y: int, pane_id: str) -> str:
+    return f"{w}x{h},{x},{y},{pid_num(pane_id)}"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("orch_pane", nargs="?", default=None,
+                    help="orchestrator pane id (e.g. %%27). default: current pane.")
+    ap.add_argument("--orch-width", type=int, default=80,
+                    help="orch column width in cols (default 80)")
+    ap.add_argument("--cols", type=int, default=2,
+                    help="columns in the agent grid (default 2)")
+    ap.add_argument("--print-only", action="store_true",
+                    help="print the layout string instead of applying it")
+    args = ap.parse_args()
+
+    orch = args.orch_pane or tmux("display", "-p", "#{pane_id}")
+    win_id = tmux("display", "-p", "-t", orch, "#{window_id}")
+    W, H = map(int, tmux("display", "-p", "-t", win_id, "#{window_width}x#{window_height}").split("x"))
+
+    pane_ids = [p for p in tmux("list-panes", "-t", win_id, "-F", "#{pane_id}").splitlines() if p]
+    agents = [p for p in pane_ids if p != orch]
+    if not agents:
+        print(f"only orch pane found — nothing to lay out", file=sys.stderr)
+        return 1
+
+    n = len(agents)
+    cols = args.cols
+    rows = (n + cols - 1) // cols
+
+    # Geometry: orch_w + 1 (gap) + right_w == W
+    orch_w = args.orch_width
+    right_w = W - orch_w - 1
+    right_h = H
+    if right_w < cols * 10:
+        print(f"right area width {right_w} too narrow for {cols} columns", file=sys.stderr)
+        return 1
+
+    cell_w = (right_w - (cols - 1)) // cols  # gaps subtracted
+    cell_h = (right_h - (rows - 1)) // rows
+
+    # Build agent rows
+    row_strings = []
+    for r in range(rows):
+        y = r * (cell_h + 1)
+        cells_in_row = agents[r * cols:(r + 1) * cols]
+        cells = []
+        for c, agent in enumerate(cells_in_row):
+            x = orch_w + 1 + c * (cell_w + 1)
+            cells.append(leaf(cell_w, cell_h, x, y, agent))
+        if len(cells) == 1:
+            row_strings.append(cells[0])  # single cell, no wrapper
+        else:
+            row_strings.append(f"{right_w}x{cell_h},{orch_w + 1},{y}{{{','.join(cells)}}}")
+
+    if len(row_strings) == 1:
+        right_block = row_strings[0]
+    else:
+        right_block = f"{right_w}x{right_h},{orch_w + 1},0[{','.join(row_strings)}]"
+
+    orch_block = leaf(orch_w, H, 0, 0, orch)
+    body = f"{W}x{H},0,0{{{orch_block},{right_block}}}"
+
+    csum = checksum(body)
+    layout = f"{csum:04x},{body}"
+
+    if args.print_only:
+        print(layout)
+        return 0
+
+    tmux("select-layout", "-t", win_id, layout)
+    print(f"applied: {layout}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

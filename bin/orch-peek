@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+# orch-peek — status report for live worker harnesses.
+#
+# Usage:
+#   orch-peek                    # all live workers from the registry
+#   orch-peek %114 %115          # specific panes only
+#   orch-peek --json             # machine-readable output
+#   orch-peek --since 5m         # only workers that moved in the last duration
+#   orch-peek --all              # include dead-pane registry entries
+#
+# "Live" = the pane id from ~/.cache/orch-registry/<pane>.json appears in
+# `tmux list-panes -a`. Dead-pane entries are stale registry remnants and are
+# filtered out by default.
+#
+# Per-worker fields come from the registry plus the worker's CC JSONL
+# transcript at ~/.claude/projects/<encoded-cwd>/<session>.jsonl. Encoding
+# rule: take the worker's tmux pane_current_path, resolve symlinks via
+# `(cd <p> && pwd -P)`, then replace each "/" and "_" with "-".
+#
+# Operator pane: if ~/.cache/orch-operator.json exists (written by
+# `orch-claim-operator`), peek includes a row with agent="operator" using
+# the claim record's transcript_jsonl directly. Operator stays out of the
+# worker registry — claim record is the bridge.
+set -euo pipefail
+
+command -v tmux >/dev/null 2>&1 || { echo "orch-peek: tmux not on PATH" >&2; exit 1; }
+command -v jq   >/dev/null 2>&1 || { echo "orch-peek: jq not on PATH" >&2; exit 1; }
+
+REG="${ORCH_REGISTRY_DIR:-$HOME/.cache/orch-registry}"
+PROJECTS_DIR="${ORCH_PROJECTS_DIR:-$HOME/.claude/projects}"
+
+JSON=0
+ALL=0
+SINCE_S=0
+PANES_ARG=()
+
+usage() { sed -n '2,16p' "$0"; }
+
+parse_dur() {
+    local d=$1
+    case $d in
+        *s) printf '%s\n' "${d%s}" ;;
+        *m) printf '%s\n' "$(( ${d%m} * 60 ))" ;;
+        *h) printf '%s\n' "$(( ${d%h} * 3600 ))" ;;
+        *d) printf '%s\n' "$(( ${d%d} * 86400 ))" ;;
+        ''|*[!0-9]*) echo "orch-peek: bad --since value: $d" >&2; exit 1 ;;
+        *)  printf '%s\n' "$d" ;;
+    esac
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --json) JSON=1; shift ;;
+        --all)  ALL=1;  shift ;;
+        --since)
+            [ -n "${2:-}" ] || { echo "orch-peek: --since needs an argument" >&2; exit 1; }
+            SINCE_S=$(parse_dur "$2"); shift 2 ;;
+        --help|-h) usage; exit 0 ;;
+        --*) echo "orch-peek: unknown flag: $1" >&2; exit 1 ;;
+        *)
+            if [[ "$1" =~ ^%[0-9]+$ ]]; then
+                PANES_ARG+=("$1"); shift
+            else
+                echo "orch-peek: invalid pane id: $1" >&2; exit 1
+            fi ;;
+    esac
+done
+
+# Color (TTY + text mode only).
+if [ "$JSON" -eq 0 ] && [ -t 1 ]; then
+    C_RST=$'\033[0m'
+    C_GREEN=$'\033[32m'
+    C_YEL=$'\033[33m'
+    C_DIM=$'\033[2m'
+    C_CYAN=$'\033[36m'
+    C_RED=$'\033[31m'
+else
+    C_RST=""; C_GREEN=""; C_YEL=""; C_DIM=""; C_CYAN=""; C_RED=""
+fi
+
+NOW=$(date +%s)
+
+# Snapshot live panes once.
+LIVE_PANES=$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null) || {
+    echo "orch-peek: tmux list-panes failed" >&2; exit 1
+}
+is_live() { printf '%s\n' "$LIVE_PANES" | grep -qx "$1"; }
+
+# Resolve target pane list.
+TARGETS=()
+if [ ${#PANES_ARG[@]} -gt 0 ]; then
+    for p in "${PANES_ARG[@]}"; do
+        if [ ! -f "$REG/$p.json" ]; then
+            echo "orch-peek: $p not in registry — skipping" >&2
+            continue
+        fi
+        TARGETS+=("$p")
+    done
+else
+    if [ -d "$REG" ]; then
+        for f in "$REG"/*.json; do
+            [ -e "$f" ] || continue
+            p=$(basename "$f" .json)
+            if [ "$ALL" -eq 0 ] && ! is_live "$p"; then
+                continue
+            fi
+            TARGETS+=("$p")
+        done
+    fi
+fi
+
+encode_cwd() {
+    local cwd=$1 r
+    if r=$(cd "$cwd" 2>/dev/null && pwd -P); then :; else r=$cwd; fi
+    printf '%s' "$r" | sed 's|/|-|g; s|_|-|g'
+}
+
+age_human() {
+    local s=$1
+    if   [ "$s" -lt 60 ];    then printf '%ss\n' "$s"
+    elif [ "$s" -lt 3600 ];  then printf '%sm\n' "$((s / 60))"
+    elif [ "$s" -lt 86400 ]; then printf '%sh\n' "$((s / 3600))"
+    else                          printf '%sd\n' "$((s / 86400))"
+    fi
+}
+
+bucket_for() {
+    local s=$1
+    if   [ "$s" -lt 30 ];  then echo ACTIVE
+    elif [ "$s" -lt 300 ]; then echo recent
+    else                        echo idle
+    fi
+}
+
+bucket_color() {
+    case $1 in
+        ACTIVE)  printf '%s' "$C_GREEN" ;;
+        recent)  printf '%s' "$C_YEL" ;;
+        idle)    printf '%s' "$C_DIM" ;;
+        booting) printf '%s' "$C_DIM" ;;
+        dead)    printf '%s' "$C_RED" ;;
+        *)       printf '' ;;
+    esac
+}
+
+# Find newest *.jsonl in a directory by mtime. Portable across BSD/GNU stat.
+# Prints "<path>|<mtime>" or nothing.
+latest_jsonl_in() {
+    local dir=$1 best="" mt=0 cur f
+    [ -d "$dir" ] || return 0
+    for f in "$dir"/*.jsonl; do
+        [ -e "$f" ] || continue
+        cur=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+        if [ "$cur" -gt "$mt" ]; then
+            mt=$cur; best=$f
+        fi
+    done
+    [ -n "$best" ] && printf '%s|%s\n' "$best" "$mt"
+}
+
+# Read the operator-claim record (A2). Sets OP_PANE/OP_JSONL if present and
+# the named pane is currently live; empty strings otherwise.
+OP_PANE=""; OP_JSONL=""
+read_operator_claim() {
+    local cache="${ORCH_OPERATOR_CACHE:-$HOME/.cache/orch-operator.json}"
+    [ -f "$cache" ] || return 0
+    local p j
+    p=$(jq -r '.pane_id // empty' "$cache" 2>/dev/null || true)
+    j=$(jq -r '.transcript_jsonl // empty' "$cache" 2>/dev/null || true)
+    if [ -n "$p" ] && [ -n "$j" ] && [ -f "$j" ] && is_live "$p"; then
+        OP_PANE=$p; OP_JSONL=$j
+    fi
+}
+
+# Probe the operator pane using the claim record's transcript JSONL directly
+# (operator is not in the worker registry).
+probe_operator() {
+    local pane=$1 jsonl=$2 mtime age_s events bucket said tool last_text_json
+    mtime=$(stat -f %m "$jsonl" 2>/dev/null || stat -c %Y "$jsonl" 2>/dev/null || echo 0)
+    age_s=$((NOW - mtime))
+    [ "$age_s" -lt 0 ] && age_s=0
+    events=$(awk 'END{print NR}' "$jsonl" 2>/dev/null || echo 0)
+    [ -z "$events" ] && events=0
+    bucket=$(bucket_for "$age_s")
+    last_text_json=$(jq -c 'select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text' "$jsonl" 2>/dev/null | tail -1 || true)
+    if [ -n "$last_text_json" ]; then
+        said=$(printf '%s' "$last_text_json" | jq -r .)
+    else
+        said=""
+    fi
+    tool=$(jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name' "$jsonl" 2>/dev/null | tail -1 || true)
+    [ -z "$tool" ] && tool="-"
+    jq -n \
+        --arg p    "$pane" \
+        --arg a    "operator" \
+        --arg r    "operator" \
+        --arg b    "$bucket" \
+        --argjson age "$age_s" \
+        --argjson ev  "$events" \
+        --arg said "$said" \
+        --arg tool "$tool" \
+        '{pane_id:$p, agent:$a, role:$r, bucket:$b, age_seconds:$age, events:$ev, said:$said, tool:$tool}'
+}
+
+# Probe a single worker, emit one JSON object describing it.
+probe_json() {
+    local pane=$1
+    local regf="$REG/$pane.json"
+    local agent role cwd encoded jsonl_mt jsonl mtime age_s events bucket said tool last_text_json
+
+    agent=$(jq -r '.agent // .outfit // "?"' "$regf" 2>/dev/null || echo "?")
+    if [ -z "$agent" ] || [ "$agent" = "null" ]; then agent="?"; fi
+    role=$(jq -r '.role // "worker"' "$regf" 2>/dev/null || echo "worker")
+    if [ -z "$role" ] || [ "$role" = "null" ]; then role="worker"; fi
+
+    if ! is_live "$pane"; then
+        jq -n --arg p "$pane" --arg a "$agent" --arg r "$role" \
+            '{pane_id:$p, agent:$a, role:$r, bucket:"dead", age_seconds:null, events:null, said:"", tool:"-"}'
+        return 0
+    fi
+
+    cwd=$(tmux display-message -t "$pane" -p '#{pane_current_path}' 2>/dev/null || echo "")
+    if [ -z "$cwd" ]; then
+        jq -n --arg p "$pane" --arg a "$agent" --arg r "$role" \
+            '{pane_id:$p, agent:$a, role:$r, bucket:"booting", age_seconds:null, events:null, said:"", tool:"-"}'
+        return 0
+    fi
+
+    encoded=$(encode_cwd "$cwd")
+    jsonl_mt=$(latest_jsonl_in "$PROJECTS_DIR/$encoded" || true)
+    if [ -z "$jsonl_mt" ]; then
+        jq -n --arg p "$pane" --arg a "$agent" --arg r "$role" \
+            '{pane_id:$p, agent:$a, role:$r, bucket:"booting", age_seconds:null, events:null, said:"", tool:"-"}'
+        return 0
+    fi
+    jsonl=${jsonl_mt%|*}
+    mtime=${jsonl_mt##*|}
+
+    age_s=$((NOW - mtime))
+    [ "$age_s" -lt 0 ] && age_s=0
+    events=$(awk 'END{print NR}' "$jsonl" 2>/dev/null || echo 0)
+    [ -z "$events" ] && events=0
+    bucket=$(bucket_for "$age_s")
+
+    # Latest assistant text block (each block emitted as one JSON-encoded line
+    # so embedded newlines don't split records; tail -1 picks the most recent).
+    last_text_json=$(jq -c 'select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text' "$jsonl" 2>/dev/null | tail -1 || true)
+    if [ -n "$last_text_json" ]; then
+        said=$(printf '%s' "$last_text_json" | jq -r .)
+    else
+        said=""
+    fi
+
+    tool=$(jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name' "$jsonl" 2>/dev/null | tail -1 || true)
+    [ -z "$tool" ] && tool="-"
+
+    jq -n \
+        --arg p    "$pane" \
+        --arg a    "$agent" \
+        --arg r    "$role" \
+        --arg b    "$bucket" \
+        --argjson age "$age_s" \
+        --argjson ev  "$events" \
+        --arg said "$said" \
+        --arg tool "$tool" \
+        '{pane_id:$p, agent:$a, role:$r, bucket:$b, age_seconds:$age, events:$ev, said:$said, tool:$tool}'
+}
+
+render_text() {
+    local j=$1
+    local pane agent role bucket age_s events said tool agehum bcolor said_one
+    pane=$(  printf '%s' "$j" | jq -r '.pane_id')
+    agent=$( printf '%s' "$j" | jq -r '.agent')
+    role=$(  printf '%s' "$j" | jq -r '.role // "worker"')
+    bucket=$(printf '%s' "$j" | jq -r '.bucket')
+    age_s=$( printf '%s' "$j" | jq -r '.age_seconds // empty')
+    events=$(printf '%s' "$j" | jq -r '.events // empty')
+    said=$(  printf '%s' "$j" | jq -r '.said')
+    tool=$(  printf '%s' "$j" | jq -r '.tool')
+
+    if [ -n "$age_s" ]; then
+        agehum=$(age_human "$age_s")
+    else
+        agehum="?"
+    fi
+    [ -z "$events" ] && events="?"
+
+    said_one=$(printf '%s' "$said" | tr '\n\t' '  ')
+    if [ ${#said_one} -gt 60 ]; then
+        said_one="${said_one:0:57}..."
+    fi
+
+    bcolor=$(bucket_color "$bucket")
+
+    printf '%b%-5s%b  %-8s %-10s %b%-7s%b (%-4s ago)  %-5s events  said: "%-60s"  tool: %s\n' \
+        "$C_CYAN" "$pane"  "$C_RST" \
+        "$role" \
+        "$agent" \
+        "$bcolor" "$bucket" "$C_RST" \
+        "$agehum" \
+        "$events" \
+        "$said_one" \
+        "$tool"
+}
+
+# Probe every target.
+RESULTS=()
+for p in "${TARGETS[@]+"${TARGETS[@]}"}"; do
+    j=$(probe_json "$p")
+    RESULTS+=("$j")
+done
+
+# Prepend operator row when no specific panes were requested and a claim
+# record exists for a live pane.
+if [ ${#PANES_ARG[@]} -eq 0 ]; then
+    read_operator_claim
+    if [ -n "$OP_PANE" ]; then
+        op_j=$(probe_operator "$OP_PANE" "$OP_JSONL")
+        RESULTS=("$op_j" "${RESULTS[@]+"${RESULTS[@]}"}")
+    fi
+fi
+
+# --since filter (booting/dead have null age, so they're dropped).
+if [ "$SINCE_S" -gt 0 ] && [ "${#RESULTS[@]}" -gt 0 ]; then
+    FILTERED=()
+    for j in "${RESULTS[@]}"; do
+        a=$(printf '%s' "$j" | jq -r '.age_seconds // empty')
+        if [ -n "$a" ] && [ "$a" -le "$SINCE_S" ]; then
+            FILTERED+=("$j")
+        fi
+    done
+    RESULTS=("${FILTERED[@]+"${FILTERED[@]}"}")
+fi
+
+# Output.
+if [ "$JSON" -eq 1 ]; then
+    if [ "${#RESULTS[@]}" -eq 0 ]; then
+        echo "[]"
+    else
+        printf '%s\n' "${RESULTS[@]}" | jq -s '.'
+    fi
+else
+    for j in "${RESULTS[@]+"${RESULTS[@]}"}"; do
+        render_text "$j"
+    done
+fi

@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# orch-register — record a worker pane's metadata so a parent that comes back
+# from a session restart can re-discover what's running.
+#
+# Hooked agents (claude, codex) get registered automatically by the Stop hook
+# (lazy registration on first event). Non-hooked agents (pi, gemini-quota'd)
+# need explicit registration after spawn.
+#
+# Usage:
+#   orch-register <pane_id> <agent> <cwd> [session_id] [--role <worker|observer>]
+#
+# Examples:
+#   orch-register %44 pi /Users/dmestas/projects/bones
+#   orch-register %46 gemini /Users/dmestas/projects
+#   orch-register %50 claude /tmp --role observer
+#
+# Role policy: --role overwrites any existing role on the entry. If --role is
+# absent, the existing role is preserved (so a hook-side lazy register won't
+# clobber a prior spawn-side observer tag). New entries with no --role default
+# to "worker".
+#
+# Storage: one JSON file per pane at ~/.cache/orch-registry/<pane_id>.json
+set -euo pipefail
+
+usage() { echo "usage: orch-register <pane_id> <agent> <cwd> [session_id] [--role worker|observer]" >&2; exit 1; }
+
+[ "$#" -ge 3 ] || usage
+command -v jq >/dev/null 2>&1 || { echo "orch-register: jq required" >&2; exit 1; }
+
+PANE=$1; AGENT=$2; CWD=$3; shift 3
+SESSION_ID=""
+ROLE_OVERRIDE=""
+while [ $# -gt 0 ]; do
+    case $1 in
+        --role)
+            ROLE_OVERRIDE=${2:-}
+            case "$ROLE_OVERRIDE" in
+                worker|observer) ;;
+                *) echo "orch-register: --role must be worker or observer (got: $ROLE_OVERRIDE)" >&2; exit 1 ;;
+            esac
+            shift 2 ;;
+        --*) echo "orch-register: unknown flag: $1" >&2; exit 1 ;;
+        *)
+            if [ -z "$SESSION_ID" ]; then
+                SESSION_ID=$1; shift
+            else
+                echo "orch-register: extra positional argument: $1" >&2; exit 1
+            fi ;;
+    esac
+done
+
+NS=$(date +%s%N)
+
+REG_DIR="${ORCH_REGISTRY_DIR:-$HOME/.cache/orch-registry}"
+mkdir -p "$REG_DIR"
+
+REG_FILE="$REG_DIR/$PANE.json"
+TMP="$REG_FILE.$$.tmp"
+
+# Preserve spawn_ts_ns and existing role on update; --role wins when given.
+SPAWN_TS_NS="$NS"
+EXISTING_ROLE=""
+if [ -f "$REG_FILE" ]; then
+    existing_spawn=$(jq -r '.spawn_ts_ns // empty' "$REG_FILE" 2>/dev/null || true)
+    [ -n "$existing_spawn" ] && SPAWN_TS_NS=$existing_spawn
+    EXISTING_ROLE=$(jq -r '.role // empty' "$REG_FILE" 2>/dev/null || true)
+fi
+ROLE="${ROLE_OVERRIDE:-${EXISTING_ROLE:-worker}}"
+
+jq -nc \
+    --arg pane_id "$PANE" \
+    --arg agent "$AGENT" \
+    --arg cwd "$CWD" \
+    --arg session_id "$SESSION_ID" \
+    --arg role "$ROLE" \
+    --argjson spawn_ts_ns "$SPAWN_TS_NS" \
+    --argjson last_seen_ts_ns "$NS" \
+    '{pane_id:$pane_id, agent:$agent, cwd:$cwd, session_id:$session_id, role:$role, spawn_ts_ns:$spawn_ts_ns, last_seen_ts_ns:$last_seen_ts_ns}' \
+    > "$TMP" && mv -f "$TMP" "$REG_FILE"
+
+echo "$REG_FILE"

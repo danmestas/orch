@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# orch-listen — block until a worker pane fires a Stop / Notification event.
+#
+# Two modes:
+#
+# 1) ONE-SHOT (default): print one event block to stdout and exit. Caller is
+#    expected to re-launch after processing — but humans and agents forget,
+#    leaving the operator deaf. Backward-compatible legacy mode.
+#
+#      Bash(orch-listen, run_in_background=true)   # one notification
+#
+# 2) STREAM (`--stream`): print one JSON object per event, never exit on
+#    event. Designed to be wrapped in a Monitor so each line is a push
+#    notification. Survives many events without manual re-arming.
+#
+#      Monitor(command="orch-listen --stream", persistent=true,
+#              description="harness events")
+#
+# Pick stream mode unless you specifically need the bash-bg one-shot shape.
+#
+# Usage:
+#   orch-listen [timeout_seconds] [--stream] [--include-notify]
+#                  [--include-observers] [--exclude <pane[,pane,...]>]
+#                  [--exclude-self]
+#
+# --exclude-self filters out events from the calling pane (resolved via
+# `tmux display -p '#{pane_id}'`). Useful when the orchestrator is itself a CC
+# session that fires Stop hooks on every turn — without filtering, the listener
+# wakes on its own events.
+#
+# Observer panes (registry role=="observer", e.g., stasi/wait-watch spies) are
+# excluded by default. Pass --include-observers to include them. Workers
+# (registry role=="worker" or absent) are always included.
+#
+# One-shot stdout (single block on success):
+#   EVENT_FILE=<path>
+#   <key=value lines from the marker file>
+#
+# Stream stdout (one JSON object per line, until timeout):
+#   {"event_file":"<path>","ts_ns":N,"pane_id":"%X","ext":"event","kv":{...}}
+#
+# Exit codes:
+#   0  event received (one-shot) / clean stream end (no events seen, signal)
+#   1  bad usage / fswatch missing
+#   2  timeout
+set -euo pipefail
+
+command -v fswatch >/dev/null 2>&1 || { echo "fswatch missing — brew install fswatch" >&2; exit 1; }
+
+DIR="${ORCH_STOP_DIR:-$HOME/.cache/orch-stop}"
+mkdir -p "$DIR"
+
+TIMEOUT=3600
+INCLUDE_NOTIFY=0
+INCLUDE_OBSERVERS=0
+STREAM=0
+declare -A EXCLUDE
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --stream) STREAM=1; shift ;;
+        --include-notify) INCLUDE_NOTIFY=1; shift ;;
+        --include-observers) INCLUDE_OBSERVERS=1; shift ;;
+        --exclude) IFS=',' read -ra PS <<<"$2"; for p in "${PS[@]}"; do EXCLUDE["$p"]=1; done; shift 2 ;;
+        --exclude-self)
+            self=$(tmux display -p '#{pane_id}' 2>/dev/null) || self=""
+            [ -n "$self" ] && EXCLUDE["$self"]=1
+            shift ;;
+        --help|-h) sed -n '2,46p' "$0"; exit 0 ;;
+        --*) echo "orch-listen: unknown flag: $1" >&2; exit 1 ;;
+        *) TIMEOUT="$1"; shift ;;
+    esac
+done
+
+# --stream wants jq for JSON emission. Refuse early if missing.
+if [ $STREAM -eq 1 ] && ! command -v jq >/dev/null 2>&1; then
+    echo "orch-listen: --stream requires jq" >&2; exit 1
+fi
+
+REG_DIR="${ORCH_REGISTRY_DIR:-$HOME/.cache/orch-registry}"
+
+is_observer() {
+    local pane=$1
+    local reg="$REG_DIR/$pane.json"
+    [ -f "$reg" ] || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    local role
+    role=$(jq -r '.role // "worker"' "$reg" 2>/dev/null || echo worker)
+    [ "$role" = "observer" ]
+}
+
+# Watched extensions
+if [ "$INCLUDE_NOTIFY" = 1 ]; then
+    EXTS=(event notify)
+else
+    EXTS=(event)
+fi
+
+# Snapshot existing marker mtimes so we ignore stale events on startup.
+declare -A SEEN
+for ext in "${EXTS[@]}"; do
+    for f in "$DIR"/*."$ext"; do
+        [ -e "$f" ] || continue
+        SEEN["$f"]=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null)
+    done
+done
+
+# Watchdog: force fswatch to wake at TIMEOUT so the deadline check runs even
+# when the only events seen are skipped (e.g., observer events when default
+# excluded). Without this, fswatch -1 blocks forever after a skip-iteration.
+WATCHDOG_FILE="$DIR/.orch-listen-watchdog-$$"
+( sleep "$TIMEOUT" && touch "$WATCHDOG_FILE" 2>/dev/null ) &
+WATCHDOG_PID=$!
+cleanup() { kill "$WATCHDOG_PID" 2>/dev/null || true; rm -f "$WATCHDOG_FILE"; }
+trap cleanup EXIT
+
+emit_oneshot() {
+    local f=$1
+    echo "EVENT_FILE=$f"
+    cat "$f"
+}
+
+emit_stream() {
+    local f=$1 pane=$2 ext=$3
+    # Build {key:value,...} object from the marker file's "k=v" lines.
+    local kv_json
+    kv_json=$(awk -F= '
+        BEGIN { printf "{" }
+        NF>=2 {
+            if (n++) printf ","
+            k=$1; sub(/^[ \t]+/, "", k); sub(/[ \t]+$/, "", k)
+            v=$0; sub(/^[^=]*=/, "", v)
+            gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v)
+            gsub(/\n/, "\\n", v); gsub(/\r/, "\\r", v); gsub(/\t/, "\\t", v)
+            printf "\"%s\":\"%s\"", k, v
+        }
+        END { printf "}" }
+    ' "$f" 2>/dev/null || echo "{}")
+    jq -nc \
+        --arg event_file "$f" \
+        --arg pane_id   "$pane" \
+        --arg ext       "$ext" \
+        --argjson ts_ns_emit "$(date +%s%N)" \
+        --argjson kv "$kv_json" \
+        '{event_file:$event_file, pane_id:$pane_id, ext:$ext, ts_ns_emit:$ts_ns_emit, kv:$kv}'
+}
+
+deadline=$(( $(date +%s) + TIMEOUT ))
+while :; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        if [ $STREAM -eq 1 ]; then
+            # Stream mode: clean exit on timeout (Monitor stops watching).
+            exit 0
+        else
+            echo "orch-listen: timeout after ${TIMEOUT}s" >&2
+            exit 2
+        fi
+    fi
+
+    # Block until any file in DIR is created/modified.
+    fswatch -1 "$DIR" > /dev/null 2>&1 || sleep 1
+
+    # Identify which watched file changed (new or mtime-bumped).
+    for ext in "${EXTS[@]}"; do
+        for f in "$DIR"/*."$ext"; do
+            [ -e "$f" ] || continue
+            cur=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null)
+            prev="${SEEN[$f]:-0}"
+            if [ "$cur" != "$prev" ]; then
+                # Filename pattern: <pane_id>.<ext> → strip ext to get pane_id.
+                pane_id=$(basename "$f" ".$ext")
+                if [ -n "${EXCLUDE[$pane_id]:-}" ]; then
+                    SEEN["$f"]=$cur  # mark seen so we don't loop on the same self-event
+                    continue
+                fi
+                if [ "$INCLUDE_OBSERVERS" = 0 ] && is_observer "$pane_id"; then
+                    SEEN["$f"]=$cur  # observer fired Stop; default policy is silent
+                    continue
+                fi
+                SEEN["$f"]=$cur
+                if [ $STREAM -eq 1 ]; then
+                    emit_stream "$f" "$pane_id" "$ext"
+                else
+                    emit_oneshot "$f"
+                    exit 0
+                fi
+            fi
+        done
+    done
+done

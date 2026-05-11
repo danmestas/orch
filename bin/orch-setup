@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# orch-setup — manual fallback for users who installed with --ignore-scripts.
+# Re-runs the postinstall logic from the installed package location.
+#
+# Usage:
+#   orch-setup
+#
+# Works by locating the orch install directory (the directory containing this
+# binary's parent) and invoking scripts/postinstall.js with node.
+set -euo pipefail
+
+BIN_PATH=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+PKG_ROOT=$(cd "$(dirname "$BIN_PATH")/.." && pwd)
+
+if [ ! -f "$PKG_ROOT/scripts/postinstall.js" ]; then
+    echo "orch-setup: cannot find $PKG_ROOT/scripts/postinstall.js" >&2
+    echo "orch-setup: this binary expects to live in <package>/bin/ next to scripts/" >&2
+    exit 1
+fi
+
+command -v node >/dev/null 2>&1 || { echo "orch-setup: node required" >&2; exit 1; }
+
+exec node "$PKG_ROOT/scripts/postinstall.js"

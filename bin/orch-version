@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# orch-version — drift detection between the orch project repo
+# and the live install (~/.local/bin/, ~/.claude/hooks/, ~/.claude/skills/).
+#
+# Surveys every orch-* binary, orch hook, and orch skill; compares
+# project-repo file vs live file; reports per-item state.
+#
+# Usage:
+#   orch-version              # human-readable text report
+#   orch-version --json       # machine-readable
+#   orch-version --quiet      # exit code only (0=sync, 1=drift, 2=error)
+#
+# Override the project repo location via ORCH_PROJECT_DIR (default:
+# ~/projects/orch). Override live targets via ORCH_LOCAL_BIN
+# (default ~/.local/bin), ORCH_CLAUDE_HOOKS (default ~/.claude/hooks),
+# ORCH_CLAUDE_SKILLS (default ~/.claude/skills).
+#
+# Exit codes:
+#   0  everything in sync (or --json/--quiet without drift)
+#   1  drift detected
+#   2  hard error (project repo missing, etc.)
+set -euo pipefail
+
+PROJECT_DIR=${ORCH_PROJECT_DIR:-$HOME/projects/orch}
+LOCAL_BIN=${ORCH_LOCAL_BIN:-$HOME/.local/bin}
+CLAUDE_HOOKS=${ORCH_CLAUDE_HOOKS:-$HOME/.claude/hooks}
+CLAUDE_SKILLS=${ORCH_CLAUDE_SKILLS:-$HOME/.claude/skills}
+
+JSON=0
+QUIET=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --json)  JSON=1; shift ;;
+        --quiet) QUIET=1; shift ;;
+        --help|-h) sed -n '2,21p' "$0"; exit 0 ;;
+        *) echo "orch-version: unknown flag: $1" >&2; exit 2 ;;
+    esac
+done
+
+[ -d "$PROJECT_DIR" ] || { echo "orch-version: project dir not found: $PROJECT_DIR" >&2; exit 2; }
+command -v jq >/dev/null 2>&1 || { echo "orch-version: jq required" >&2; exit 2; }
+
+# Color output for text mode + TTY only.
+if [ $JSON -eq 0 ] && [ $QUIET -eq 0 ] && [ -t 1 ]; then
+    C_RST=$'\033[0m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'; C_YEL=$'\033[33m'; C_DIM=$'\033[2m'; C_CYAN=$'\033[36m'
+else
+    C_RST=""; C_GREEN=""; C_RED=""; C_YEL=""; C_DIM=""; C_CYAN=""
+fi
+
+# State derivation: each item has a tri-state outcome.
+#   match    — project file exists, live file exists, contents identical
+#              (or live is symlink resolving to project file)
+#   drift    — both exist but contents differ
+#   missing  — project file exists but live file is absent
+#
+# Symlink-aware: if live is a symlink whose target equals (after readlink -f)
+# the project file, we report as match (skill-style symlink farm).
+
+ITEMS=()  # array of "kind|name|state|note" rows
+
+resolve_link() {
+    if command -v readlink >/dev/null 2>&1; then
+        # macOS readlink lacks -f; Python is too heavy. Walk by hand.
+        local p=$1 t
+        while [ -L "$p" ]; do
+            t=$(readlink "$p")
+            case "$t" in
+                /*) p=$t ;;
+                *)  p="$(dirname "$p")/$t" ;;
+            esac
+        done
+        printf '%s\n' "$p"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+compare_pair() {
+    # $1=project_path $2=live_path → echoes state and a note.
+    local proj=$1 live=$2
+    if [ ! -e "$live" ]; then
+        printf 'missing|live file absent\n'
+        return
+    fi
+    if [ -L "$live" ]; then
+        local resolved
+        resolved=$(resolve_link "$live")
+        if [ "$resolved" = "$proj" ]; then
+            printf 'match|symlink → project\n'
+            return
+        fi
+        # Symlink to elsewhere — compare actual contents.
+        if cmp -s "$resolved" "$proj"; then
+            printf 'match|symlink → matching content (target=%s)\n' "$resolved"
+        else
+            printf 'drift|symlink to non-project target: %s\n' "$resolved"
+        fi
+        return
+    fi
+    if cmp -s "$proj" "$live"; then
+        printf 'match|content identical\n'
+    else
+        # Provide a small hint about the size delta.
+        local proj_lines live_lines delta
+        proj_lines=$(awk 'END{print NR}' "$proj" 2>/dev/null || echo 0)
+        live_lines=$(awk 'END{print NR}' "$live" 2>/dev/null || echo 0)
+        delta=$(( live_lines - proj_lines ))
+        printf 'drift|content differs (live %+d lines vs project)\n' "$delta"
+    fi
+}
+
+# Survey binaries (everything in project bin/).
+if [ -d "$PROJECT_DIR/bin" ]; then
+    for f in "$PROJECT_DIR/bin"/*; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        live="$LOCAL_BIN/$name"
+        out=$(compare_pair "$f" "$live")
+        ITEMS+=("bin|$name|${out%%|*}|${out#*|}")
+    done
+fi
+
+# Survey hooks (everything in project hooks/, compared against ~/.claude/hooks/).
+if [ -d "$PROJECT_DIR/hooks" ]; then
+    for f in "$PROJECT_DIR/hooks"/*; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        live="$CLAUDE_HOOKS/$name"
+        out=$(compare_pair "$f" "$live")
+        ITEMS+=("hook|$name|${out%%|*}|${out#*|}")
+    done
+fi
+
+# Survey skills (each is a directory). For symlink-farm installs the live
+# entry is a symlink to the project skill dir; we treat that as match. For
+# copy-style installs we compare each file under the skill dir.
+compare_skill_dir() {
+    local proj=$1 live=$2
+    if [ ! -e "$live" ]; then
+        printf 'missing|live skill dir absent\n'
+        return
+    fi
+    if [ -L "$live" ]; then
+        local resolved
+        resolved=$(resolve_link "$live")
+        if [ "$resolved" = "$proj" ]; then
+            printf 'match|symlink → project\n'
+        else
+            printf 'drift|symlink to non-project target: %s\n' "$resolved"
+        fi
+        return
+    fi
+    # Both are directories. Compare via diff -rq.
+    if diff -rq "$proj" "$live" >/dev/null 2>&1; then
+        printf 'match|content identical (recursive)\n'
+    else
+        local n
+        n=$(diff -rq "$proj" "$live" 2>/dev/null | wc -l | awk '{print $1}')
+        printf 'drift|recursive diff reports %s differences\n' "$n"
+    fi
+}
+
+if [ -d "$PROJECT_DIR/skills" ]; then
+    for d in "$PROJECT_DIR/skills"/*/; do
+        [ -d "$d" ] || continue
+        name=$(basename "$d")
+        live="$CLAUDE_SKILLS/$name"
+        proj=${d%/}
+        out=$(compare_skill_dir "$proj" "$live")
+        ITEMS+=("skill|$name|${out%%|*}|${out#*|}")
+    done
+fi
+
+# Tally states.
+TOTAL=${#ITEMS[@]}
+N_MATCH=0; N_DRIFT=0; N_MISSING=0
+for row in "${ITEMS[@]+"${ITEMS[@]}"}"; do
+    state=$(printf '%s' "$row" | awk -F'|' '{print $3}')
+    case "$state" in
+        match)   N_MATCH=$((N_MATCH+1)) ;;
+        drift)   N_DRIFT=$((N_DRIFT+1)) ;;
+        missing) N_MISSING=$((N_MISSING+1)) ;;
+    esac
+done
+
+OVERALL_RC=0
+if [ $N_DRIFT -gt 0 ] || [ $N_MISSING -gt 0 ]; then
+    OVERALL_RC=1
+fi
+
+if [ $QUIET -eq 1 ]; then
+    exit $OVERALL_RC
+fi
+
+if [ $JSON -eq 1 ]; then
+    {
+        printf '['
+        first=1
+        for row in "${ITEMS[@]+"${ITEMS[@]}"}"; do
+            kind=$(printf '%s' "$row" | awk -F'|' '{print $1}')
+            name=$(printf '%s' "$row" | awk -F'|' '{print $2}')
+            state=$(printf '%s' "$row" | awk -F'|' '{print $3}')
+            note=$(printf '%s' "$row" | awk -F'|' '{print $4}')
+            [ $first -eq 0 ] && printf ','
+            first=0
+            jq -nc --arg kind "$kind" --arg name "$name" --arg state "$state" --arg note "$note" \
+                '{kind:$kind, name:$name, state:$state, note:$note}'
+        done
+        printf ']\n'
+    }
+    exit $OVERALL_RC
+fi
+
+# Text report.
+state_color() {
+    case $1 in
+        match)   printf '%s' "$C_GREEN" ;;
+        drift)   printf '%s' "$C_RED" ;;
+        missing) printf '%s' "$C_YEL" ;;
+        *)       printf '' ;;
+    esac
+}
+
+printf '%sorch%s drift report — project: %s%s%s\n\n' \
+    "$C_CYAN" "$C_RST" "$C_DIM" "$PROJECT_DIR" "$C_RST"
+
+# Group by kind so the report scans top-to-bottom.
+for kind in bin hook skill; do
+    any=0
+    for row in "${ITEMS[@]+"${ITEMS[@]}"}"; do
+        k=$(printf '%s' "$row" | awk -F'|' '{print $1}')
+        [ "$k" = "$kind" ] || continue
+        if [ $any -eq 0 ]; then
+            case $kind in
+                bin)   printf '%sbinaries%s (live=%s):\n'  "$C_CYAN" "$C_RST" "$LOCAL_BIN" ;;
+                hook)  printf '%shooks%s (live=%s):\n'     "$C_CYAN" "$C_RST" "$CLAUDE_HOOKS" ;;
+                skill) printf '%sskills%s (live=%s):\n'    "$C_CYAN" "$C_RST" "$CLAUDE_SKILLS" ;;
+            esac
+            any=1
+        fi
+        name=$(printf '%s' "$row" | awk -F'|' '{print $2}')
+        state=$(printf '%s' "$row" | awk -F'|' '{print $3}')
+        note=$(printf '%s' "$row" | awk -F'|' '{print $4}')
+        sc=$(state_color "$state")
+        printf '  %-26s %s%-7s%s  %s%s%s\n' "$name" "$sc" "$state" "$C_RST" "$C_DIM" "$note" "$C_RST"
+    done
+    [ $any -eq 1 ] && printf '\n'
+done
+
+# Summary line.
+printf 'summary: %s%d match%s, %s%d drift%s, %s%d missing%s  (total %d)\n' \
+    "$C_GREEN" "$N_MATCH" "$C_RST" \
+    "$C_RED"   "$N_DRIFT" "$C_RST" \
+    "$C_YEL"   "$N_MISSING" "$C_RST" \
+    "$TOTAL"
+
+exit $OVERALL_RC
