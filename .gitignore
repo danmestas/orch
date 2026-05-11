@@ -15,8 +15,10 @@ ousterhout/
 ship-issue/
 tigerstyle/
 rules-bundle/
-scripts/
-.github/
+
+# npm tarball + node_modules
+*.tgz
+node_modules/
 
 # OS / editor cruft
 .DS_Store
