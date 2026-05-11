@@ -60,7 +60,7 @@ That's it. Orch handles the spawning, addressing, prompting, listening, and esca
 - **Human-in-the-loop only when it matters.** Four-axes classification — taste / architecture / ethics / reversibility — surfaces the decisions you actually need to make. Everything else, the agents decide.
 - **Per-harness configuration.** Hooks for event-driven side effects, skills for loaded behavior, outfits for config-as-code, runtime redirection when a harness wanders.
 - **Any topology.** Direct pane-to-pane addressing supports orchestrator/worker, full mesh, hierarchical, ring, or ad-hoc. Topology is your policy, not the substrate's.
-- **Dark-mode capable.** The same primitives that drive you-in-the-loop work also run unattended once the classifier and audit log are calibrated.
+- **Dark-mode ready (roadmap).** The same primitives are designed to run unattended once a calibrated classifier and audit log are in place. Those pieces aren't shipped yet — today, orch is operator-in-the-loop.
 
 ## Why it's cool
 
@@ -71,19 +71,19 @@ That's it. Orch handles the spawning, addressing, prompting, listening, and esca
 
 ## How it works
 
-Behind the scenes, each worker is a tmux pane running a full agent CLI with an optional outfit — a config-as-code bundle that ships system prompt, tool allowlist, skills, hooks, and model choice as one versioned artifact. Workers are addressable by pane id; you (or any other harness with addressing rights) send prompts, wait for completion, and survey activity. Hooks fire on every Stop and Notification event, writing markers an always-on listener picks up. Each harness carries a role tag — worker / observer / operator — so the substrate knows who can interrupt whom.
+Behind the scenes, each worker is a tmux pane running a full agent CLI with an optional outfit — a config-as-code bundle that ships system prompt, tool allowlist, skills, hooks, and model choice as one versioned artifact. Workers are addressable by pane id; you (or any other harness with addressing rights) send prompts, wait for completion, and survey activity. Hooks fire on every Stop and Notification event, writing marker files that `orch-listen` (blocking wait) and `orch-subscribe` (peer push-notifications) consume on demand — no daemon, no always-on process. Each harness carries a role tag — worker / observer / operator — so the substrate knows who can interrupt whom.
 
 You don't drive any of this manually. You describe what you want; orch's installed skill suite handles the spawning, the addressing, the listening, and the escalation surface.
 
-## Dark factory automations
+## Dark factory automations (roadmap)
 
-The same primitives that drive you-in-the-loop work also run unattended. Calibrate three things:
+The same primitives that drive you-in-the-loop work are designed to also run unattended. Three calibration surfaces are planned:
 
 - **An escalation classifier** that fires only on the four axes
 - **An audit log** capturing every decision for replay
 - **A principal agent** trained on your past ratifications
 
-...and you drop out of the loop. Orch keeps running. The substrate is the same artifact whether you're in the loop or not — the difference is who signs each escalation.
+Once those land, you drop out of the loop. Orch keeps running, and the substrate is the same artifact whether you're in the loop or not — the difference is who signs each escalation. None of this ships in 0.1.x; today, orch is operator-in-the-loop.
 
 ## License
 
