@@ -46,5 +46,5 @@ jobs:
           jq -e . package.json > /dev/null
           jq -e . settings-snippet.json > /dev/null
 
-      - name: npm pack — dry run (catches files: + bin-path regressions)
+      - name: "npm pack — dry run (catches files: + bin-path regressions)"
         run: npm pack --dry-run
