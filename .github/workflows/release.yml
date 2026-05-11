@@ -30,10 +30,18 @@ jobs:
       - name: Verify package contents (dry-run pack)
         run: npm pack --dry-run
 
+      # NODE_AUTH_TOKEN is the bridge: npm CLI prefers OIDC when trusted
+      # publishing is configured on npmjs side. Token used only as fallback.
+      # Drop when 'npm trust list @agent-ops/orch' confirms the GitHub trust
+      # relationship is active and a publish run uses OIDC end-to-end.
       - name: Publish (dry-run)
         if: ${{ inputs.dry_run == true }}
         run: npm publish --dry-run --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish
         if: ${{ inputs.dry_run != true }}
         run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
