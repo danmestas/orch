@@ -118,23 +118,27 @@ SNIPPET_CLEAN=$(echo "$SNIPPET_CLEAN" | sed "s|\\\$HOME|$HOME|g")
 
 merge_hooks() {
     # Args: existing settings JSON (string), event name (Stop / Notification).
-    # Returns merged settings on stdout. If orch's hook is already present
-    # (detected by command containing "orch-${EVENT_LOWER}-marker"),
-    # passes through unchanged.
-    local existing=$1 event=$2 marker_name
-    marker_name=$(echo "$event" | tr '[:upper:]' '[:lower:]')
+    # Returns merged settings on stdout. Detects orch's hook by extracting the
+    # `orch-<name>-marker` token from the snippet's own command string for this
+    # event, so the lookup tracks the real filename instead of guessing from
+    # the lowercased event name (which silently fails for Notification, where
+    # the file is orch-notify-marker.sh — not orch-notification-marker).
+    local existing=$1 event=$2 mark
+    mark=$(echo "$SNIPPET_CLEAN" | jq -r --arg ev "$event" '.hooks[$ev][0].hooks[0].command' \
+        | grep -oE 'orch-[a-z]+-marker' | head -1)
+    [ -n "$mark" ] || { warn "could not derive marker name for event $event from snippet"; return 1; }
 
     local already_present
-    already_present=$(echo "$existing" | jq -r --arg ev "$event" --arg mark "orch-${marker_name}-marker" \
+    already_present=$(echo "$existing" | jq -r --arg ev "$event" --arg mark "$mark" \
         '[(.hooks // {})[$ev][]?.hooks[]?.command | select(. != null)] | any(test($mark))' 2>/dev/null || echo "false")
 
     if [ "$already_present" = "true" ]; then
-        say "  $event: orch-${marker_name}-marker already registered, skipping"
+        say "  $event: $mark already registered, skipping"
         echo "$existing"
         return
     fi
 
-    say "  $event: appending orch-${marker_name}-marker hook"
+    say "  $event: appending $mark hook"
     local orch_hook
     orch_hook=$(echo "$SNIPPET_CLEAN" | jq --arg ev "$event" '.hooks[$ev][0].hooks[0]')
 
