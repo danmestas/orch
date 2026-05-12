@@ -4,7 +4,12 @@
 # Usage:
 #   orch-spawn <agent> [--cwd <path>] [--project <name>] [--headless] [--no-fleet]
 #                         [--quiet] [--role <worker|observer>]
+#                         [--position <right|left|above|below>]
 #                         [--outfit <name>] [--cut <name>] [--accessory <name>]...
+#
+# --position controls where the new pane is split off the current pane in headed
+# mode. Default `right` preserves prior behavior (tmux split-window -h). Mapping:
+# right=`-h`, left=`-h -b`, above=`-v -b`, below=`-v`. Ignored in --headless.
 #
 # Examples:
 #   orch-spawn claude --project gonvex
@@ -46,7 +51,7 @@ set -euo pipefail
 
 AGENT=${1:-}
 shift 2>/dev/null || true
-[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--project n] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--outfit X] [--cut Y] [--accessory A]..." >&2; exit 1; }
+[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--project n] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--position right|left|above|below] [--outfit X] [--cut Y] [--accessory A]..." >&2; exit 1; }
 
 CWD=""
 PROJECT=""
@@ -54,6 +59,7 @@ HEADLESS=0
 NO_FLEET=0
 QUIET=0
 ROLE_OVERRIDE=""
+POSITION="right"
 OUTFIT=""
 CUT=""
 ACCESSORIES=()
@@ -70,6 +76,13 @@ while [ $# -gt 0 ]; do
             case "$ROLE_OVERRIDE" in
                 worker|observer) ;;
                 *) echo "orch-spawn: --role must be worker or observer (got: $ROLE_OVERRIDE)" >&2; exit 1 ;;
+            esac
+            shift 2 ;;
+        --position)
+            POSITION=${2:-}
+            case "$POSITION" in
+                right|left|above|below) ;;
+                *) echo "orch-spawn: --position must be right|left|above|below (got: $POSITION)" >&2; exit 1 ;;
             esac
             shift 2 ;;
         --outfit) OUTFIT=$2; shift 2 ;;
@@ -191,7 +204,13 @@ if [ $HEADLESS -eq 1 ]; then
     fi
 else
     CUR=$(tmux display -p '#{pane_id}')
-    PANE=$(tmux split-window -d -h -P -F '#{pane_id}' -t "$CUR" "$WRAP")
+    case "$POSITION" in
+        right) SPLIT_ARGS=(-h) ;;
+        left)  SPLIT_ARGS=(-h -b) ;;
+        above) SPLIT_ARGS=(-v -b) ;;
+        below) SPLIT_ARGS=(-v) ;;
+    esac
+    PANE=$(tmux split-window -d "${SPLIT_ARGS[@]}" -P -F '#{pane_id}' -t "$CUR" "$WRAP")
 fi
 
 # Brief settle so ORCH_PANE_ID is in the agent's env before the listener

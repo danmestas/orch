@@ -90,6 +90,23 @@ assert "quiet-error: stdout is empty" "" "$(cat "$TMP_OUT")"
 assert "quiet-error: stderr is empty" "" "$(cat "$TMP_ERR")"
 rm -f "$TMP_OUT" "$TMP_ERR"
 
+# --- contract 6: --position rejects invalid values at parse time ---
+TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
+"$SPAWN" pi --position sideways >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
+assert "bad-position: exits non-zero" 1 "$rc"
+assert "bad-position: stdout is empty" "" "$(cat "$TMP_OUT")"
+assert_contains "bad-position: stderr names valid values" "right|left|above|below" "$(cat "$TMP_ERR")"
+rm -f "$TMP_OUT" "$TMP_ERR"
+
+# --- contract 7: --position with valid value parses cleanly (downstream agent-validation still fires) ---
+# We pass a valid position with an invalid combo (--outfit on pi). If the parser
+# accepts --position, the failure point is the outfit-on-pi guard, not parse.
+TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
+"$SPAWN" pi --position above --outfit engineer >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
+assert "good-position: exits non-zero (caught by outfit-on-pi)" 1 "$rc"
+assert_contains "good-position: stderr is the outfit-on-pi message, not a position error" "claude" "$(cat "$TMP_ERR")"
+rm -f "$TMP_OUT" "$TMP_ERR"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ $FAIL -gt 0 ]; then
