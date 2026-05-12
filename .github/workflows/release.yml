@@ -18,6 +18,10 @@ permissions:
 jobs:
   publish:
     name: publish to npm
+    # npmjs trusted-publisher entry has environment="production" (the registry default
+    # when none is passed at trust-config time). The OIDC token's claims must match
+    # exactly, so this job must run under the "production" GitHub Environment.
+    environment: production
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
