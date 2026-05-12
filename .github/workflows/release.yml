@@ -42,3 +42,59 @@ jobs:
       - name: Publish
         if: ${{ inputs.dry_run != true }}
         run: npm publish --access public --provenance --verbose
+
+  smoke:
+    name: post-publish smoke
+    # Skip on dry-run dispatches — there's nothing to install from the registry.
+    if: ${{ github.event_name == 'push' || inputs.dry_run != true }}
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: install runtime deps (tmux, jq, fswatch)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tmux jq fswatch
+
+      - name: install just-published tarball
+        # Tag pushes set GITHUB_REF_NAME to the tag (e.g. v0.1.7); strip the leading v.
+        # workflow_dispatch on a branch falls back to package.json's version.
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION=$(node -p "require('./package.json').version" 2>/dev/null || \
+                      curl -s https://registry.npmjs.org/@agent-ops/orch/latest | jq -r .version)
+          fi
+          echo "installing @agent-ops/orch@$VERSION"
+          # Retry up to 5 times in case of registry propagation lag.
+          for i in 1 2 3 4 5; do
+            if npm install -g "@agent-ops/orch@$VERSION"; then break; fi
+            echo "install attempt $i failed; sleeping 10s and retrying..."
+            sleep 10
+          done
+          npm list -g --depth=0 | grep '@agent-ops/orch' || (echo "package not installed" && exit 1)
+
+      - name: bin shim probe
+        # Proves every declared bin entry actually resolves on PATH and is executable.
+        # Catches the bin-path regression class that bit v0.1.0.
+        run: |
+          set -e
+          for cmd in orch orch-up orch-down orch-spawn orch-ask orch-tell orch-peek orch-listen; do
+            which "$cmd"
+          done
+
+      - name: smoke — orch --help
+        # Proves the main dispatcher loads and prints its help text.
+        run: orch --help
+
+      - name: smoke — orch up --dry-run
+        # Exercises the up flow's import + dep-check path without mutating ~/.claude.
+        run: orch up --dry-run
+
+      - name: smoke — orch down --dry-run
+        # Same for the down flow.
+        run: orch down --dry-run --yes
