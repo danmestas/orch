@@ -70,6 +70,18 @@ cwd=/tmp
 EOT
 }
 
+write_notify() {
+    local pane=$1
+    cat > "$ORCH_STOP_DIR/$pane.notify" <<EOT
+ts_ns=$(date +%s%N)
+ts_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+pane_id=$pane
+session_id=test-fake
+cwd=/tmp
+message=needs-attention
+EOT
+}
+
 echo "=== --stream emits per-event JSON, doesn't exit on first event ==="
 
 # 1) Start --stream in bg with a 4s timeout. Write 3 worker markers spaced 0.5s
@@ -178,6 +190,59 @@ TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
 assert "stream: unknown flag → rc=1" 1 "$rc"
 assert_contains "stream: unknown flag → stderr names the flag" "--bogus-flag" "$(cat "$TMP_ERR")"
 rm -f "$TMP_OUT" "$TMP_ERR"
+
+echo
+echo "=== notify markers are included by default ==="
+
+# 9) Default behavior: notify markers should wake the listener (one-shot).
+rm -f "$ORCH_STOP_DIR"/*.event "$ORCH_STOP_DIR"/*.notify
+OUT="$SANDBOX/notify_default_out"
+ERR="$SANDBOX/notify_default_err"
+"$LISTEN" 5 >"$OUT" 2>"$ERR" &
+PID=$!
+sleep 0.5
+write_notify %900
+wait "$PID"; rc=$?
+
+assert "notify default-on: rc=0 on notify marker" 0 "$rc"
+assert_contains "notify default-on: stdout shows .notify EVENT_FILE" ".notify" "$(cat "$OUT")"
+assert_contains "notify default-on: stdout carries pane_id=%900" "pane_id=%900" "$(cat "$OUT")"
+
+echo
+echo "=== --exclude-notify suppresses notify markers ==="
+
+# 10) With --exclude-notify, notify-only fire → timeout (rc=2) for one-shot.
+rm -f "$ORCH_STOP_DIR"/*.event "$ORCH_STOP_DIR"/*.notify
+"$LISTEN" 2 --exclude-notify >"$SANDBOX/notify_excl_out" 2>"$SANDBOX/notify_excl_err" &
+PID=$!
+sleep 0.5
+write_notify %900
+wait "$PID" && rc=0 || rc=$?
+
+assert "exclude-notify: notify-only → rc=2 timeout" 2 "$rc"
+LINES_EXCL=$(awk 'END{print NR}' "$SANDBOX/notify_excl_out")
+assert "exclude-notify: no event emitted" 0 "$LINES_EXCL"
+
+# 11) --exclude-notify still wakes on .event markers.
+rm -f "$ORCH_STOP_DIR"/*.event "$ORCH_STOP_DIR"/*.notify
+"$LISTEN" 5 --exclude-notify >"$SANDBOX/notify_excl2_out" 2>"$SANDBOX/notify_excl2_err" &
+PID=$!
+sleep 0.5
+write_marker %900
+wait "$PID"; rc=$?
+
+assert "exclude-notify: .event still wakes (rc=0)" 0 "$rc"
+assert_contains "exclude-notify: stdout is the .event" ".event" "$(cat "$SANDBOX/notify_excl2_out")"
+
+# 12) Legacy --include-notify is accepted (no-op).
+rm -f "$ORCH_STOP_DIR"/*.event "$ORCH_STOP_DIR"/*.notify
+"$LISTEN" 5 --include-notify >"$SANDBOX/notify_legacy_out" 2>"$SANDBOX/notify_legacy_err" &
+PID=$!
+sleep 0.5
+write_notify %900
+wait "$PID"; rc=$?
+
+assert "legacy --include-notify: still accepted, notify wakes (rc=0)" 0 "$rc"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

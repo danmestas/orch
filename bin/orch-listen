@@ -19,9 +19,14 @@
 # Pick stream mode unless you specifically need the bash-bg one-shot shape.
 #
 # Usage:
-#   orch-listen [timeout_seconds] [--stream] [--include-notify]
+#   orch-listen [timeout_seconds] [--stream] [--exclude-notify]
 #                  [--include-observers] [--exclude <pane[,pane,...]>]
 #                  [--exclude-self]
+#
+# By default, both Stop-event (.event) and Notification (.notify) markers wake
+# the listener. Pass --exclude-notify to suppress notify markers and wake only
+# on Stop events. The legacy --include-notify flag is accepted as a no-op for
+# backward compat.
 #
 # --exclude-self filters out events from the calling pane (resolved via
 # `tmux display -p '#{pane_id}'`). Useful when the orchestrator is itself a CC
@@ -51,7 +56,7 @@ DIR="${ORCH_STOP_DIR:-$HOME/.cache/orch-stop}"
 mkdir -p "$DIR"
 
 TIMEOUT=3600
-INCLUDE_NOTIFY=0
+INCLUDE_NOTIFY=1
 INCLUDE_OBSERVERS=0
 STREAM=0
 declare -A EXCLUDE
@@ -60,13 +65,14 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --stream) STREAM=1; shift ;;
         --include-notify) INCLUDE_NOTIFY=1; shift ;;
+        --exclude-notify) INCLUDE_NOTIFY=0; shift ;;
         --include-observers) INCLUDE_OBSERVERS=1; shift ;;
         --exclude) IFS=',' read -ra PS <<<"$2"; for p in "${PS[@]}"; do EXCLUDE["$p"]=1; done; shift 2 ;;
         --exclude-self)
             self=$(tmux display -p '#{pane_id}' 2>/dev/null) || self=""
             [ -n "$self" ] && EXCLUDE["$self"]=1
             shift ;;
-        --help|-h) sed -n '2,46p' "$0"; exit 0 ;;
+        --help|-h) sed -n '2,50p' "$0"; exit 0 ;;
         --*) echo "orch-listen: unknown flag: $1" >&2; exit 1 ;;
         *) TIMEOUT="$1"; shift ;;
     esac
