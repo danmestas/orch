@@ -69,7 +69,10 @@ echo "orch-bundle-gc: $count match(es) older than ${AGE}m in $DIR"
 now=$(date +%s)
 for d in "${MATCHES[@]}"; do
     sz=$(du -sh "$d" 2>/dev/null | awk '{print $1}')
-    mt=$(stat -f %m "$d" 2>/dev/null || stat -c %Y "$d" 2>/dev/null || echo 0)
+    # GNU stat first (Linux/CI). BSD `stat -f` is filesystem-status, not
+    # format-mtime, and on Linux it succeeds with multi-line output that
+    # breaks the arithmetic below — so put -c %Y in front.
+    mt=$(stat -c %Y "$d" 2>/dev/null || stat -f %m "$d" 2>/dev/null || echo 0)
     age_min=$(( (now - mt) / 60 ))
     printf '  %-7s  %4dm  %s\n' "${sz:-?}" "$age_min" "$d"
 done
