@@ -54,6 +54,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: chown apt cache dirs so actions/cache can restore as the runner user
+        run: |
+          sudo mkdir -p /var/cache/apt/archives/partial /var/lib/apt/lists
+          sudo chown -R "$(whoami)" /var/cache/apt /var/lib/apt/lists
+
+      - name: cache apt downloads + lists
+        uses: actions/cache@v5
+        with:
+          path: |
+            /var/cache/apt/archives
+            /var/lib/apt/lists
+          key: apt-tmux-jq-fswatch-v1
+
       - name: install runtime deps (tmux, jq, fswatch)
         run: |
           sudo apt-get update -qq
