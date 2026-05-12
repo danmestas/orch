@@ -4,12 +4,23 @@
 # Usage:
 #   orch-spawn <agent> [--cwd <path>] [--project <name>] [--headless] [--no-fleet]
 #                         [--quiet] [--role <worker|observer>]
-#                         [--position <right|left|above|below>]
+#                         [--position <right|left|above|below>] [--verify]
 #                         [--outfit <name>] [--cut <name>] [--accessory <name>]...
 #
 # --position controls where the new pane is split off the current pane in headed
 # mode. Default `right` preserves prior behavior (tmux split-window -h). Mapping:
 # right=`-h`, left=`-h -b`, above=`-v -b`, below=`-v`. Ignored in --headless.
+#
+# --verify polls the new pane after the split, waiting for its
+# pane_current_command to become anything other than a known shell
+# (zsh|bash|sh|fish|dash|ksh) — agents like claude rename their process
+# title, so we treat "no longer a shell" as "agent launched". The pane
+# dying also counts as a failure. Default budget is 30s, overridable via
+# ORCH_VERIFY_TIMEOUT. On success, emits one stderr line "orch-spawn:
+# agent ready in pane %X". On failure, emits "orch-spawn: agent failed to
+# start in %X (pane died|timeout)" and exits non-zero — useful for
+# catching the silent-shell-pane failure mode where the agent CLI never
+# actually launches.
 #
 # Examples:
 #   orch-spawn claude --project gonvex
@@ -51,7 +62,7 @@ set -euo pipefail
 
 AGENT=${1:-}
 shift 2>/dev/null || true
-[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--project n] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--position right|left|above|below] [--outfit X] [--cut Y] [--accessory A]..." >&2; exit 1; }
+[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--project n] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A]..." >&2; exit 1; }
 
 CWD=""
 PROJECT=""
@@ -60,6 +71,7 @@ NO_FLEET=0
 QUIET=0
 ROLE_OVERRIDE=""
 POSITION="right"
+VERIFY=0
 OUTFIT=""
 CUT=""
 ACCESSORIES=()
@@ -85,6 +97,7 @@ while [ $# -gt 0 ]; do
                 *) echo "orch-spawn: --position must be right|left|above|below (got: $POSITION)" >&2; exit 1 ;;
             esac
             shift 2 ;;
+        --verify) VERIFY=1; shift ;;
         --outfit) OUTFIT=$2; shift 2 ;;
         --cut) CUT=$2; shift 2 ;;
         --accessory) ACCESSORIES+=("$2"); shift 2 ;;
@@ -215,7 +228,34 @@ fi
 
 # Brief settle so ORCH_PANE_ID is in the agent's env before the listener
 # might fire and so registry capture is meaningful.
-sleep 1
+if [ $VERIFY -eq 1 ]; then
+    VERIFY_TIMEOUT=${ORCH_VERIFY_TIMEOUT:-30}
+    deadline=$(( $(date +%s) + VERIFY_TIMEOUT ))
+    verify_state=""
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if ! tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx "$PANE"; then
+            verify_state="died"; break
+        fi
+        cur_cmd=$(tmux display -p -t "$PANE" '#{pane_current_command}' 2>/dev/null || echo "")
+        case "$cur_cmd" in
+            ""|zsh|bash|sh|fish|dash|ksh)
+                : ;;  # still a shell / not yet visible — keep polling
+            *)
+                verify_state="ready"; break ;;
+        esac
+        sleep 0.5
+    done
+    case "$verify_state" in
+        ready)
+            echo "orch-spawn: agent ready in pane $PANE" >&2 ;;
+        died)
+            echo "orch-spawn: agent failed to start in $PANE (pane died)" >&2; exit 1 ;;
+        *)
+            echo "orch-spawn: agent failed to start in $PANE (timeout)" >&2; exit 1 ;;
+    esac
+else
+    sleep 1
+fi
 orch-register "$PANE" "$AGENT" "$CWD" --role "$ROLE" >/dev/null || true
 
 echo "$PANE"
