@@ -21,19 +21,18 @@ jobs:
 
       - name: shellcheck — bin scripts (bash only)
         # orch-relayout is python; filter inputs by shebang so non-shell files don't trip SC1071.
-        # SC2034 (unused vars) excluded for now; tracked separately for Phase 1.5 cleanup.
         run: |
           files=()
           for f in bin/orch*; do
             head -1 "$f" | grep -qE '\b(ba)?sh\b' && files+=("$f")
           done
-          shellcheck --severity=warning --exclude=SC2034 "${files[@]}"
+          shellcheck --severity=warning "${files[@]}"
 
       - name: shellcheck — hooks
-        run: shellcheck --severity=warning --exclude=SC2034 hooks/*.sh
+        run: shellcheck --severity=warning hooks/*.sh
 
       - name: shellcheck — install.sh
-        run: shellcheck --severity=warning --exclude=SC2034 install.sh
+        run: shellcheck --severity=warning install.sh
 
       - name: node --check — scripts
         run: |
