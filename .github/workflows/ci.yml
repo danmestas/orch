@@ -80,6 +80,7 @@ jobs:
             test/test-orch-listen-stream.sh
             test/test-orch-project-resolution.sh
             test/test-orch-spawn-output.sh
+            test/test-orch-spawn-verify.sh
             test/test-orch-subscribe.sh
             test/test-orch-version.sh
             test/test-orch-observer-role.sh
