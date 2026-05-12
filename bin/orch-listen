@@ -110,7 +110,7 @@ declare -A SEEN
 for ext in "${EXTS[@]}"; do
     for f in "$DIR"/*."$ext"; do
         [ -e "$f" ] || continue
-        SEEN["$f"]=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null)
+        SEEN["$f"]=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)
     done
 done
 
@@ -145,11 +145,18 @@ emit_stream() {
         }
         END { printf "}" }
     ' "$f" 2>/dev/null || echo "{}")
+    # Portable per-event unique int. `date +%s%N` is GNU-only — on older
+    # macOS BSD `date` returns the literal "...N" which isn't valid JSON.
+    # Pad $RANDOM (0-32767) to 5 digits and concatenate to seconds for a
+    # 15-digit monotonic-ish int that satisfies jq --argjson on any POSIX
+    # shell.
+    local ts_unique
+    ts_unique="$(date +%s)$(printf '%05d' "$RANDOM")"
     jq -nc \
         --arg event_file "$f" \
         --arg pane_id   "$pane" \
         --arg ext       "$ext" \
-        --argjson ts_ns_emit "$(date +%s%N)" \
+        --argjson ts_ns_emit "$ts_unique" \
         --argjson kv "$kv_json" \
         '{event_file:$event_file, pane_id:$pane_id, ext:$ext, ts_ns_emit:$ts_ns_emit, kv:$kv}'
 }
@@ -173,7 +180,7 @@ while :; do
     for ext in "${EXTS[@]}"; do
         for f in "$DIR"/*."$ext"; do
             [ -e "$f" ] || continue
-            cur=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null)
+            cur=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)
             prev="${SEEN[$f]:-0}"
             if [ "$cur" != "$prev" ]; then
                 # Filename pattern: <pane_id>.<ext> → strip ext to get pane_id.
