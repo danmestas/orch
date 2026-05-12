@@ -29,7 +29,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-say() { [ $QUIET -eq 0 ] && echo "$@" || true; }
+say() { [ $QUIET -eq 0 ] && echo "$@" >&2 || true; }
 warn() { echo "orch-up: WARN" "$@" >&2; }
 
 # Locate package root from this binary's path.
