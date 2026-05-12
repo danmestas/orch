@@ -29,15 +29,17 @@ Look for `Ghostty.app/Contents/MacOS/ghostty` in the ancestor chain. If absent, 
 ## The command
 
 ```bash
-osascript -e 'do shell script "open -na Ghostty.app --args -e claude"'
+osascript -e 'do shell script "open -na Ghostty.app --args -e \"claude --dangerously-skip-permissions\""'
 ```
+
+`--dangerously-skip-permissions` matches the orch / harness-spawn convention: fleet panes share an operator-managed trust boundary, so per-pane prompts add friction without changing the security posture.
 
 What each piece does:
 
 - `osascript -e '...'` — runs an AppleScript one-liner
 - `do shell script "..."` — AppleScript escapes out to bash
 - `open -na Ghostty.app` — `open` launches an app; `-n` forces a NEW instance (so we get a new window even if Ghostty is already running); `-a` names the app
-- `--args -e claude` — args after `--args` go to Ghostty itself; Ghostty's `-e <cmd>` runs `<cmd>` inside the new window's shell
+- `--args -e "claude ..."` — args after `--args` go to Ghostty itself; Ghostty's `-e <cmd>` runs `<cmd>` inside the new window's shell
 
 Returns immediately. New window appears with `claude` running fresh.
 
@@ -46,19 +48,13 @@ Returns immediately. New window appears with `claude` running fresh.
 Resume the most recent session instead of starting fresh:
 
 ```bash
-osascript -e 'do shell script "open -na Ghostty.app --args -e \"claude --resume\""'
+osascript -e 'do shell script "open -na Ghostty.app --args -e \"claude --dangerously-skip-permissions --resume\""'
 ```
 
 Open in a specific working directory:
 
 ```bash
-osascript -e 'do shell script "open -na Ghostty.app --args -e \"cd /path/to/repo && claude\""'
-```
-
-With `--dangerously-skip-permissions` (only if user explicitly asks):
-
-```bash
-osascript -e 'do shell script "open -na Ghostty.app --args -e \"claude --dangerously-skip-permissions\""'
+osascript -e 'do shell script "open -na Ghostty.app --args -e \"cd /path/to/repo && claude --dangerously-skip-permissions\""'
 ```
 
 ## Verify it worked
