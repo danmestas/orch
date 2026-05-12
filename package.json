@@ -18,6 +18,7 @@
   "bin": {
     "orch": "bin/orch",
     "orch-ask": "bin/orch-ask",
+    "orch-bundle-gc": "bin/orch-bundle-gc",
     "orch-claim-operator": "bin/orch-claim-operator",
     "orch-down": "bin/orch-down",
     "orch-hide": "bin/orch-hide",

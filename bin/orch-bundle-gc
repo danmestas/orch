@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# orch-bundle-gc — list and (optionally) delete stale suit/orch-bundle dirs.
+#
+# Usage:
+#   orch-bundle-gc                       # dry-run list (mtime > 30m)
+#   orch-bundle-gc --age 60              # only dirs older than 60 min
+#   orch-bundle-gc --clean               # delete the listed dirs
+#   orch-bundle-gc --age 60 --clean
+#
+# Scans $TMPDIR (default /tmp) for directories whose name matches:
+#   - suit-*
+#   - orch-bundle-*
+#
+# Filters to dirs whose mtime is older than --age minutes (default 30).
+# The mtime threshold is the live-pane safety net: orch-spawn's EXIT
+# trap cleans up its own bundle when the pane dies, so the only bundles
+# that survive past 30 minutes are orphans (suit prepare ran but the
+# spawn never completed, or the trap was bypassed). If you run agents
+# longer than 30 minutes off a single bundle, raise --age accordingly.
+#
+# With --clean, runs `rm -rf` on the matched set. Without --clean, just
+# prints a `du -sh`-style listing with per-dir size and age.
+#
+# Exit codes:
+#   0  ran successfully (regardless of whether anything was found)
+#   1  bad usage
+#   2  $TMPDIR not a directory
+set -euo pipefail
+
+AGE=30
+CLEAN=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --age)
+            AGE=${2:-}
+            case "$AGE" in
+                ''|*[!0-9]*) echo "orch-bundle-gc: --age must be a non-negative integer (got: ${AGE:-<empty>})" >&2; exit 1 ;;
+            esac
+            shift 2 ;;
+        --clean) CLEAN=1; shift ;;
+        --help|-h) sed -n '2,27p' "$0"; exit 0 ;;
+        *) echo "orch-bundle-gc: unknown flag: $1" >&2; exit 1 ;;
+    esac
+done
+
+DIR=${TMPDIR:-/tmp}
+DIR=${DIR%/}
+[ -d "$DIR" ] || { echo "orch-bundle-gc: $DIR not a directory" >&2; exit 2; }
+
+# Collect matches: top-level dirs in $TMPDIR with the expected name pattern
+# and mtime older than $AGE minutes. mapfile would be cleaner but isn't on
+# bash 3.2 (macOS), so go via a while-read loop.
+MATCHES=()
+while IFS= read -r d; do
+    [ -n "$d" ] && MATCHES+=("$d")
+done < <(find "$DIR" -maxdepth 1 -mindepth 1 -type d \
+    \( -name 'suit-*' -o -name 'orch-bundle-*' \) \
+    -mmin +"$AGE" 2>/dev/null | sort)
+
+count=${#MATCHES[@]}
+
+if [ "$count" -eq 0 ]; then
+    echo "orch-bundle-gc: no matches in $DIR older than ${AGE}m"
+    exit 0
+fi
+
+echo "orch-bundle-gc: $count match(es) older than ${AGE}m in $DIR"
+now=$(date +%s)
+for d in "${MATCHES[@]}"; do
+    sz=$(du -sh "$d" 2>/dev/null | awk '{print $1}')
+    mt=$(stat -f %m "$d" 2>/dev/null || stat -c %Y "$d" 2>/dev/null || echo 0)
+    age_min=$(( (now - mt) / 60 ))
+    printf '  %-7s  %4dm  %s\n' "${sz:-?}" "$age_min" "$d"
+done
+
+if [ $CLEAN -eq 1 ]; then
+    echo
+    echo "orch-bundle-gc: deleting (--clean)..."
+    failures=0
+    for d in "${MATCHES[@]}"; do
+        if rm -rf "$d" 2>/dev/null; then
+            echo "  deleted $d"
+        else
+            echo "  failed:  $d" >&2
+            failures=$((failures + 1))
+        fi
+    done
+    [ "$failures" -eq 0 ] || exit 1
+fi

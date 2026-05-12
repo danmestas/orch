@@ -77,6 +77,7 @@ jobs:
           cd "$ORCH_ROOT"
           export PATH="$PWD/bin:$PATH"
           declare -a tests=(
+            test/test-orch-bundle-gc.sh
             test/test-orch-listen-stream.sh
             test/test-orch-project-resolution.sh
             test/test-orch-spawn-output.sh
