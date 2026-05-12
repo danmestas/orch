@@ -66,7 +66,6 @@ fi
 before=$(mktemp -t orch-ask-before.XXXXXX)
 trap 'rm -f "$before" "$after" 2>/dev/null' EXIT
 tmux capture-pane -t "$pane" -pS "-${SCROLLBACK_DEPTH}" > "$before"
-before_lines=$(wc -l < "$before")
 
 [ "$QUIET" = 1 ] || printf 'orch-ask: sending to %s\n' "$pane" >&2
 orch-tell "$pane" "$prompt"

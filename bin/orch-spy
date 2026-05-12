@@ -36,7 +36,6 @@ usage() {
     sed -n '2,30p' "$0" >&2
 }
 
-QUIET=0
 HEADLESS=1
 MISSION_FILE=""
 TARGET=""
@@ -48,7 +47,7 @@ DRY_RUN_BRIEF=0
 TARGET_SET=0
 while [ $# -gt 0 ]; do
     case "$1" in
-        --quiet) QUIET=1; exec 2>/dev/null; shift ;;
+        --quiet) exec 2>/dev/null; shift ;;
         --headless) HEADLESS=1; shift ;;
         --headed) HEADLESS=0; shift ;;
         --mission-file) MISSION_FILE=${2:-}; shift 2 ;;
