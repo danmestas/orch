@@ -48,3 +48,92 @@ jobs:
 
       - name: "npm pack — dry run (catches files: + bin-path regressions)"
         run: npm pack --dry-run
+
+  integration:
+    name: integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install runtime deps (tmux, jq, fswatch)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tmux jq fswatch
+
+      - name: PR-safe integration suite
+        # Tests assert $TMUX is set + a real tmux session exists, so we wrap the
+        # runner inside `tmux new-session -d`, poll until it closes, and surface
+        # its exit code.
+        # A-list runs unconditionally; B-list runs with SKIP_REAL_OUTFIT=1 to bypass
+        # the real-claude e2e portions and exercise only the mocked layers.
+        env:
+          SKIP_REAL_OUTFIT: "1"
+        run: |
+          set -e
+
+          cat > /tmp/orch-ci-runner.sh <<'RUNNER'
+          #!/usr/bin/env bash
+          set -e
+          cd "$ORCH_ROOT"
+          export PATH="$PWD/bin:$PATH"
+          declare -a tests=(
+            test/test-orch-listen-stream.sh
+            test/test-orch-project-resolution.sh
+            test/test-orch-spawn-output.sh
+            test/test-orch-subscribe.sh
+            test/test-orch-version.sh
+            test/test-orch-observer-role.sh
+            test/test-orch-spy.sh
+          )
+          for t in "${tests[@]}"; do
+            echo "=== $t ==="
+            bash "$t"
+          done
+          RUNNER
+          chmod +x /tmp/orch-ci-runner.sh
+
+          rm -f /tmp/orch-ci.log /tmp/orch-ci.rc
+          ORCH_ROOT="$PWD" tmux -L ci new-session -d -s ci -x 200 -y 50 \
+            "/tmp/orch-ci-runner.sh > /tmp/orch-ci.log 2>&1; echo \$? > /tmp/orch-ci.rc"
+
+          while tmux -L ci has-session -t ci 2>/dev/null; do
+            sleep 1
+          done
+
+          cat /tmp/orch-ci.log
+          test "$(cat /tmp/orch-ci.rc)" = "0"
+
+      - name: real-harness suite (workflow_dispatch only)
+        # These need a live claude/pi/transcript and can't run on a clean Ubuntu runner.
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -e
+
+          cat > /tmp/orch-ci-runner-real.sh <<'RUNNER'
+          #!/usr/bin/env bash
+          set -e
+          cd "$ORCH_ROOT"
+          export PATH="$PWD/bin:$PATH"
+          declare -a tests=(
+            test/test-orch-claim-operator.sh
+            test/test-orch-peek.sh
+            test/test-orch-subscribe-real.sh
+            test/test-suit-integration.sh
+          )
+          for t in "${tests[@]}"; do
+            echo "=== $t ==="
+            bash "$t"
+          done
+          RUNNER
+          chmod +x /tmp/orch-ci-runner-real.sh
+
+          rm -f /tmp/orch-ci-real.log /tmp/orch-ci-real.rc
+          ORCH_ROOT="$PWD" tmux -L ci-real new-session -d -s ci-real -x 200 -y 50 \
+            "/tmp/orch-ci-runner-real.sh > /tmp/orch-ci-real.log 2>&1; echo \$? > /tmp/orch-ci-real.rc"
+
+          while tmux -L ci-real has-session -t ci-real 2>/dev/null; do
+            sleep 1
+          done
+
+          cat /tmp/orch-ci-real.log
+          test "$(cat /tmp/orch-ci-real.rc)" = "0"

@@ -135,7 +135,9 @@ resolve_via_registry() {
     best=""; mt=0
     for f in "$session_dir"/*.jsonl; do
         [ -e "$f" ] || continue
-        cur=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+        # GNU stat first (Linux); BSD stat fallback (macOS). The reverse fails on Linux
+        # because `stat -f` there means --file-system and "succeeds" with non-numeric output.
+        cur=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)
         if [ "$cur" -gt "$mt" ]; then mt=$cur; best=$f; fi
     done
     [ -n "$best" ] || return 1
