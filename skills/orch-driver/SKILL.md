@@ -76,6 +76,8 @@ Distinguishing "I sent the prompt" vs "user typed something": cross-check the ev
 
 ## Choosing the right wait primitive
 
+First: `ToolSearch(query: "select:Monitor")` to load Monitor's schema. Monitor is a deferred tool; without this you'll cycle through bash-polling alternatives before remembering you have a better option.
+
 When you need to wait for a future state — workflow finish, deploy completion, periodic status check, long build — pick the right Claude Code persistence primitive instead of bash-polling inside `Bash(run_in_background=true)`.
 
 | Primitive | Right for | Survives session end? |
