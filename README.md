@@ -57,6 +57,7 @@ That's it. Orch handles the spawning, addressing, prompting, listening, and esca
 
 - **Full harnesses, not subagents.** Each worker is an independent Claude Code (or pi / codex / gemini) instance with its own context, lifecycle, and configuration. Subagents share their parent's turn and budget; full harnesses run independently for hours.
 - **Long-running discipline.** Autonomous agents drift. Tell + listen + ask cycles keep them on task across many turns.
+- **Long-horizon goals via sesh substrate.** Optional goal-management integration (`orch-goal-pursue`, `orch-goal-status`, Stop/SessionStart hooks, `goal-complete` skill) wraps sesh's goal protocol so a single objective survives turn boundaries, conversation compaction, and cold starts. See the goal-harness section below.
 - **Human-in-the-loop only when it matters.** Four-axes classification — taste / architecture / ethics / reversibility — surfaces the decisions you actually need to make. Everything else, the agents decide.
 - **Per-harness configuration.** Hooks for event-driven side effects, skills for loaded behavior, outfits for config-as-code, runtime redirection when a harness wanders.
 - **Any topology.** Direct pane-to-pane addressing supports orchestrator/worker, full mesh, hierarchical, ring, or ad-hoc. Topology is your policy, not the substrate's.
@@ -74,6 +75,51 @@ That's it. Orch handles the spawning, addressing, prompting, listening, and esca
 Behind the scenes, each worker is a tmux pane running a full agent CLI with an optional outfit — a config-as-code bundle that ships system prompt, tool allowlist, skills, hooks, and model choice as one versioned artifact. Workers are addressable by pane id; you (or any other harness with addressing rights) send prompts, wait for completion, and survey activity. Hooks fire on every Stop and Notification event, writing marker files that `orch-listen` (blocking wait) and `orch-subscribe` (peer push-notifications) consume on demand — no daemon, no always-on process. Each harness carries a role tag — worker / observer / operator — so the substrate knows who can interrupt whom.
 
 You don't drive any of this manually. You describe what you want; orch's installed skill suite handles the spawning, the addressing, the listening, and the escalation surface.
+
+## Goal-harness (optional sesh integration)
+
+The goal-harness is orch's reference implementation of the [sesh goal-management spec](https://github.com/danmestas/sesh/blob/main/docs/goal-management.md). It wraps sesh's substrate-side goal records (token + wall-clock budgets, completion audit, hierarchical decomposition) with the harness-side discipline the spec calls out as non-substrate concerns: continuation, token accounting, context injection, completion verification.
+
+**Components shipped in this repo:**
+
+| Component | Path | Purpose |
+| --- | --- | --- |
+| `orch-goal-pursue` | `bin/` | bootstrap a long-horizon goal: create the record, print env exports |
+| `orch-goal-status` | `bin/` | inspect the current goal + linked tasks + budget burn |
+| `orch-goal-stop-account.sh` | `hooks/` | Stop hook: account ~5k tokens per turn while a goal is active |
+| `orch-goal-session-context.sh` | `hooks/` | SessionStart hook: inject goal state into context on resume |
+| `goal-complete` skill | `skills/` | model-facing audit checklist before submitting `goal complete` |
+| `orch-goal-continuation.md` | `references/` | reference prompt the spec calls "harness-side" |
+
+**Prerequisites** (beyond orch's defaults):
+- A running [sesh](https://github.com/danmestas/sesh) hub (auto-spawned by `sesh up` in a project worktree).
+- [`sesh-ops`](https://github.com/danmestas/sesh-ops) on `$PATH`.
+
+**Typical flow:**
+
+```bash
+# 1. Start a long-horizon goal in your project:
+orch-goal-pursue "Implement OAuth2 migration for the auth service" --budget=200000
+
+# 2. The command prints export lines. Run them (or paste into your shell):
+export SESH_GOAL_ID=01HXX...
+export SESH_GOAL_SCOPE=project
+export SESH_GOAL_SCOPE_ID=auth_service
+
+# 3. Open Claude Code. The SessionStart hook injects the goal state into
+#    your initial context. Every Stop hook accounts ~5k tokens.
+
+# 4. Work. Across many turns. Across session resumes. The goal record in
+#    sesh's hub remembers what you're pursuing.
+
+# 5. When the audit completes, Claude invokes the goal-complete skill,
+#    walks the 6-step checklist, then submits update_goal(complete).
+
+# 6. Inspect:
+orch-goal-status
+```
+
+The goal-harness is **opt-in**: hooks no-op silently when `SESH_GOAL_ID` is unset, so they don't affect normal orch sessions. Settings-snippet.json registers them under Stop and SessionStart automatically when you run `orch up`.
 
 ## Dark factory automations (roadmap)
 
