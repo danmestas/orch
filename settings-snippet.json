@@ -1,5 +1,5 @@
 {
-  "_INSTRUCTIONS": "Merge this fragment into ~/.claude/settings.json under the top-level 'hooks' key. The 'Stop' entry can be added as a new key. The 'Notification' entry should be APPENDED to the existing Notification[0].hooks[] array if you have other Notification hooks (e.g. notify-tts.sh). Replace $HOME with your actual home path — Claude Code does NOT expand env vars in the command string. Remove this _INSTRUCTIONS field after merging.",
+  "_INSTRUCTIONS": "Merge this fragment into ~/.claude/settings.json under the top-level 'hooks' key. The 'Stop', 'Notification', and 'SessionStart' entries each merge under their respective top-level keys. Where the user already has hooks for an event (e.g. notify-tts.sh under Notification), append to the existing hooks[] array. The orch-goal-* hooks no-op silently unless SESH_GOAL_ID is exported in the session (see orch-goal-pursue). Replace $HOME with your actual home path — Claude Code does NOT expand env vars in the command string. Remove this _INSTRUCTIONS field after merging.",
   "hooks": {
     "Stop": [
       {
@@ -7,6 +7,11 @@
           {
             "type": "command",
             "command": "bash $HOME/.claude/hooks/orch-stop-marker.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/hooks/orch-goal-stop-account.sh",
             "timeout": 5
           }
         ]
@@ -18,6 +23,17 @@
           {
             "type": "command",
             "command": "bash $HOME/.claude/hooks/orch-notify-marker.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/hooks/orch-goal-session-context.sh",
             "timeout": 5
           }
         ]

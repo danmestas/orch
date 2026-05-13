@@ -75,6 +75,7 @@ VERIFY=0
 OUTFIT=""
 CUT=""
 ACCESSORIES=()
+NO_GOAL_ACCESSORY=0
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -101,6 +102,7 @@ while [ $# -gt 0 ]; do
         --outfit) OUTFIT=$2; shift 2 ;;
         --cut) CUT=$2; shift 2 ;;
         --accessory) ACCESSORIES+=("$2"); shift 2 ;;
+        --no-goal-accessory) NO_GOAL_ACCESSORY=1; shift ;;
         *) echo "orch-spawn: unknown flag: $1" >&2; exit 1 ;;
     esac
 done
@@ -144,6 +146,22 @@ if [ -n "$PROJECT" ] && [ -z "$CWD" ]; then
 fi
 [ -z "$CWD" ] && CWD=$(pwd)
 
+# Auto-add the sesh-goal accessory when the operator is in an active goal
+# pursuit. The accessory's hooks no-op when SESH_GOAL_ID isn't set, so the
+# only cost of including it is a few extra files in the worker's bundle.
+# Skip if --no-goal-accessory was passed, or if the operator already added
+# it explicitly.
+if [ -n "${SESH_GOAL_ID:-}" ] && [ -n "$OUTFIT" ] && [ $NO_GOAL_ACCESSORY -eq 0 ]; then
+    HAVE_GOAL_ACC=0
+    for a in "${ACCESSORIES[@]}"; do
+        [ "$a" = "sesh-goal" ] && HAVE_GOAL_ACC=1
+    done
+    if [ $HAVE_GOAL_ACC -eq 0 ]; then
+        ACCESSORIES+=("sesh-goal")
+        echo "orch-spawn: SESH_GOAL_ID set in parent — auto-adding --accessory=sesh-goal (use --no-goal-accessory to opt out)" >&2
+    fi
+fi
+
 # Outfit support: only claude has been verified end-to-end (test-suit-integration.sh).
 # For other agents, suit's adapters emit different content per --target; wiring
 # them up needs its own verification round.
@@ -166,6 +184,18 @@ if [ -n "$OUTFIT" ]; then
     [ -d "$BUNDLE" ] || { echo "orch-spawn: suit prepare failed (no bundle path returned)" >&2; exit 1; }
 fi
 
+# Build the env-export prefix for the worker's WRAP. ORCH_PANE_ID always.
+# When the operator has an active goal pursuit, propagate the SESH_GOAL_*
+# vars so the sesh-goal hooks activate in the worker's session. Values are
+# inlined here (not referenced as \$VAR) because they must resolve in the
+# parent's context, not the new pane's fresh env.
+GOAL_EXPORTS=""
+if [ -n "${SESH_GOAL_ID:-}" ]; then
+    GOAL_EXPORTS=" export SESH_GOAL_ID='${SESH_GOAL_ID}';"
+    [ -n "${SESH_GOAL_SCOPE:-}" ]    && GOAL_EXPORTS="$GOAL_EXPORTS export SESH_GOAL_SCOPE='${SESH_GOAL_SCOPE}';"
+    [ -n "${SESH_GOAL_SCOPE_ID:-}" ] && GOAL_EXPORTS="$GOAL_EXPORTS export SESH_GOAL_SCOPE_ID='${SESH_GOAL_SCOPE_ID}';"
+fi
+
 # Per-agent wrap. Codex/gemini get fleet doctrine via global instructions files
 # (injected by install.sh into ~/.codex/AGENTS.md and ~/.gemini/GEMINI.md), so
 # no per-spawn flag needed for those.
@@ -185,22 +215,22 @@ case $AGENT in
                 [ -s "$MERGED" ] && printf '\n\n' >> "$MERGED"
                 cat "$HOME/.cache/orch-fleet-prompt.md" >> "$MERGED"
             fi
-            WRAP="trap 'rm -rf \"$BUNDLE\"' EXIT; export ORCH_PANE_ID=\$TMUX_PANE; cd \"$CWD\" && claude --dangerously-skip-permissions --add-dir \"$BUNDLE\""
+            WRAP="trap 'rm -rf \"$BUNDLE\"' EXIT; export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && claude --dangerously-skip-permissions --add-dir \"$BUNDLE\""
             [ -s "$MERGED" ] && WRAP="$WRAP --append-system-prompt-file \"$MERGED\""
         else
-            WRAP="export ORCH_PANE_ID=\$TMUX_PANE; cd \"$CWD\" && claude --dangerously-skip-permissions"
+            WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && claude --dangerously-skip-permissions"
             [ $NO_FLEET -eq 0 ] && WRAP="$WRAP --append-system-prompt-file $HOME/.cache/orch-fleet-prompt.md"
         fi
         ;;
     pi)
-        WRAP="export ORCH_PANE_ID=\$TMUX_PANE; cd \"$CWD\" && pi"
+        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && pi"
         [ $NO_FLEET -eq 0 ] && WRAP="$WRAP --append-system-prompt $HOME/.cache/orch-fleet-prompt.md"
         ;;
     codex)
-        WRAP="export ORCH_PANE_ID=\$TMUX_PANE; cd \"$CWD\" && codex --dangerously-bypass-approvals-and-sandbox"
+        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && codex --dangerously-bypass-approvals-and-sandbox"
         ;;
     gemini)
-        WRAP="export ORCH_PANE_ID=\$TMUX_PANE; cd \"$CWD\" && gemini --yolo"
+        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && gemini --yolo"
         ;;
     *)
         echo "orch-spawn: unknown agent: $AGENT (expected claude|pi|codex|gemini)" >&2; exit 1 ;;

@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# orch-goal-pursue — bootstrap a long-horizon goal pursuit.
+#
+# Wraps `sesh-ops goal create` with orch's harness conventions:
+#   - default scope = project, scope-id = cwd basename (sanitized)
+#   - default budget = 200000 tokens
+#   - emits export commands so the operator can wire SESH_GOAL_ID into
+#     their shell, activating the Stop and SessionStart hooks
+#
+# Usage:
+#   orch-goal-pursue "<objective>" [--budget=N] [--owner=role:id] [--scope=project|workflow|...]
+#   orch-goal-pursue --help
+#
+# After creation, the goal lives in sesh's KV; the hooks read SESH_GOAL_ID
+# from env. The operator pastes the printed `export` lines into their shell
+# (or the agent runs them) to activate the pursuit in this session.
+
+set -u
+
+usage() {
+  cat <<EOF
+Usage: orch-goal-pursue "<objective>" [flags]
+
+Flags:
+  --budget=N       token budget (default 200000)
+  --owner=role:id  goal owner string (default "orch:\$USER")
+  --scope=SCOPE    sesh scope (default "project")
+  --scope-id=ID    sesh scope-id (default cwd basename, dots/hyphens → underscore)
+  -h, --help       show this help
+
+Requires sesh-ops on PATH and a running sesh hub.
+EOF
+}
+
+OBJECTIVE=""
+BUDGET=200000
+OWNER="orch:${USER:-claude}"
+SCOPE="project"
+SCOPE_ID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --budget=*) BUDGET="${1#*=}"; shift ;;
+    --owner=*) OWNER="${1#*=}"; shift ;;
+    --scope=*) SCOPE="${1#*=}"; shift ;;
+    --scope-id=*) SCOPE_ID="${1#*=}"; shift ;;
+    --*) echo "unknown flag: $1" >&2; usage >&2; exit 2 ;;
+    *)
+      if [[ -z "$OBJECTIVE" ]]; then OBJECTIVE="$1"; else
+        echo "unexpected argument: $1" >&2; usage >&2; exit 2
+      fi
+      shift ;;
+  esac
+done
+
+if [[ -z "$OBJECTIVE" ]]; then
+  echo "error: <objective> required" >&2; usage >&2; exit 2
+fi
+
+if [[ -z "$SCOPE_ID" ]]; then
+  SCOPE_ID="$(basename "$PWD" | tr .- _)"
+fi
+
+SESH_OPS_BIN="${SESH_OPS_BIN:-sesh-ops}"
+if ! command -v "$SESH_OPS_BIN" >/dev/null 2>&1; then
+  echo "error: $SESH_OPS_BIN not on PATH" >&2; exit 3
+fi
+
+# Create the goal. sesh-ops emits the new record as JSON on stdout.
+RECORD="$("$SESH_OPS_BIN" --scope "$SCOPE" --scope-id "$SCOPE_ID" \
+  goal create \
+    --objective "$OBJECTIVE" \
+    --budget "$BUDGET" \
+    --owner "$OWNER")"
+
+if [[ -z "$RECORD" ]]; then
+  echo "error: goal create produced no output" >&2; exit 4
+fi
+
+GOAL_ID="$(echo "$RECORD" | jq -r .id)"
+if [[ -z "$GOAL_ID" || "$GOAL_ID" == "null" ]]; then
+  echo "error: could not parse goal id from sesh-ops output" >&2
+  echo "$RECORD" >&2
+  exit 5
+fi
+
+cat <<EOF
+Goal created: $GOAL_ID
+Objective:    $OBJECTIVE
+Scope:        $SCOPE / $SCOPE_ID
+Budget:       $BUDGET tokens
+Owner:        $OWNER
+
+Activate the pursuit in this session by exporting:
+
+  export SESH_GOAL_ID=$GOAL_ID
+  export SESH_GOAL_SCOPE=$SCOPE
+  export SESH_GOAL_SCOPE_ID=$SCOPE_ID
+
+The orch-goal-stop-account.sh and orch-goal-session-context.sh hooks
+fire once SESH_GOAL_ID is set. To inspect, run \`orch-goal-status\`.
+EOF

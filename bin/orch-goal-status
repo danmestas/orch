@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# orch-goal-status — show the current active goal, linked tasks, and budget.
+#
+# Reads SESH_GOAL_ID from env (set by orch-goal-pursue). Renders the goal
+# record and a one-line summary of each linked task.
+#
+# Usage:
+#   orch-goal-status [<goal-id>]
+#
+# If <goal-id> is omitted, uses $SESH_GOAL_ID.
+
+set -u
+
+GOAL_ID="${1:-${SESH_GOAL_ID:-}}"
+
+if [[ -z "$GOAL_ID" ]]; then
+  echo "no active goal in this session" >&2
+  echo "set SESH_GOAL_ID or pass <goal-id>; use \`orch-goal-pursue\` to start one" >&2
+  exit 2
+fi
+
+SESH_OPS_BIN="${SESH_OPS_BIN:-sesh-ops}"
+SCOPE="${SESH_GOAL_SCOPE:-project}"
+SCOPE_ID="${SESH_GOAL_SCOPE_ID:-$(basename "$PWD" | tr .- _)}"
+
+if ! command -v "$SESH_OPS_BIN" >/dev/null 2>&1; then
+  echo "error: $SESH_OPS_BIN not on PATH" >&2; exit 3
+fi
+
+# Render the goal record (human-readable from sesh-ops).
+"$SESH_OPS_BIN" --scope "$SCOPE" --scope-id "$SCOPE_ID" goal status "$GOAL_ID"
+
+# Then list linked tasks with their status.
+TASKS_JSON="$("$SESH_OPS_BIN" --scope "$SCOPE" --scope-id "$SCOPE_ID" goal get "$GOAL_ID" 2>/dev/null | jq -r '.tasks // [] | .[]')"
+if [[ -n "$TASKS_JSON" ]]; then
+  echo
+  echo "linked tasks:"
+  while IFS= read -r tid; do
+    [[ -z "$tid" ]] && continue
+    "$SESH_OPS_BIN" --scope "$SCOPE" --scope-id "$SCOPE_ID" task get "$tid" 2>/dev/null \
+      | jq -r '"  \(.id)  [\(.status)]  \(.title)"'
+  done <<<"$TASKS_JSON"
+fi
