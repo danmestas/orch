@@ -69,9 +69,13 @@ This:
 - Auto-spawns the hub if `~/.sesh/hub.nats.url` is absent.
 - Creates `<cwd>/.sesh/sessions/alpha.json` with the per-session NATS +
   Fossil endpoints.
-- On the first `sesh up` in a project, seeds the project's Fossil repo
-  at `<cwd>/.sesh/project.repo` from the git worktree (see `--seed`
-  modes in sesh's README).
+- On the first `sesh up` in a project, seeds the session's Fossil repo
+  at `<cwd>/.sesh/sessions/alpha.repo` from the git worktree (see
+  `--seed` modes in sesh's README). With `--scope=project`, the file
+  lives at `<cwd>/.sesh/project.repo` instead. Workers don't open
+  these files directly — they go through `$fossil_url`. The seed
+  honors `.gitignore`; untracked files won't appear in worker
+  checkouts.
 - Writes a per-session JetStream domain at
   `<cwd>/.sesh/sessions/alpha.messaging/`.
 
@@ -82,7 +86,7 @@ session_json="$(pwd)/.sesh/sessions/alpha.json"
 
 nats_url=$(jq -r .nats_url    "$session_json")    # session-local NATS
 leaf_url=$(jq -r .leaf_url    "$session_json")    # for sub-leaves
-fossil_url=$(jq -r .fossil_url "$session_json")   # for cloning the project repo
+fossil_url=$(jq -r .fossil_url "$session_json")   # HTTP xfer endpoint — workers clone/push here
 pid=$(jq      -r .pid          "$session_json")
 ```
 
@@ -303,43 +307,79 @@ canonical implementation per fleet is enough.
 
 ## Fossil substrate
 
-### Discovering the project repo
+### Discovering the session's Fossil endpoint
 
 ```sh
-project_repo="$(pwd)/.sesh/project.repo"      # shared across all sessions in this project
 session_label="alpha"
 fossil_url=$(jq -r .fossil_url "$(pwd)/.sesh/sessions/${session_label}.json")
 ```
 
-The project Fossil repo is created on the first `sesh up` and seeded
+The session's Fossil repo is created on the first `sesh up` and seeded
 from the git worktree as a single initial commit (see sesh's README on
-worktree seeding). Subsequent sessions open the existing repo — no
-re-seed.
+worktree seeding). The seed honors your `.gitignore` — files outside
+the git-tracked set are **not** in the worker's checkout. If a worker
+needs a locally-built tool or untracked scratch file, expose it via
+`PATH` (e.g. `export PATH=<absolute-tmp-path>:$PATH` in the worker's
+brief) or fetch it out-of-band rather than expecting it in cwd.
 
-### Per-session checkout (remote workers / executors)
+`$fossil_url` is the session's HTTP xfer endpoint. Workers — local,
+docker, ssh, or cloud — interact with Fossil by cloning from this URL
+and pushing commits back. Cross-process sync only fires for commits
+made through this path; see "Why clone-push" below.
 
-For workers that don't share the operator's filesystem (docker, ssh,
-cloud), clone via `fossil_url`:
+### Worker bootstrap (clone-push pattern)
+
+This is the supported pattern for all worker processes that need to
+read or write Fossil state, regardless of whether the worker shares
+the operator's filesystem:
 
 ```sh
-fossil clone "$fossil_url" /work/repo.fossil
-mkdir /work/checkout && cd /work/checkout
-fossil open /work/repo.fossil
+worker_label="agent-a"
+fossil clone "$fossil_url" /tmp/${worker_label}.repo
+fossil open /tmp/${worker_label}.repo --workdir /tmp/${worker_label}-work
+fossil user default "$worker_label" --repo /tmp/${worker_label}.repo
+fossil settings autosync on --repo /tmp/${worker_label}.repo
 ```
+
+The `fossil user default` step is required — without it, bare
+`fossil commit` fails with "Cannot figure out who you are". The
+`autosync on` step is what propagates each commit back to
+`$fossil_url`; without it the worker would need to `fossil push`
+after every commit.
 
 ### Commit + sync
 
 ```sh
+cd /tmp/${worker_label}-work
+echo "..." > notes.md
 fossil add notes.md
-fossil commit -m "research findings"
+fossil commit -m "research findings"        # autosync pushes to $fossil_url
 rev=$(fossil info | awk '/^checkout:/{print $2}')
 ```
 
-Cross-process sync is automatic — sesh threads a deterministic
-`ProjectCode` through EdgeSync's fossil-sync subject so the hub and all
-project sessions pick up new commits. Sub-leaves spawned via
+EdgeSync's auto-publish on the HTTP xfer push handler carries the
+commit onto the fossil-sync NATS subject (`fossil.<project-code>.sync`),
+and peer sessions subscribed to that subject pull it into their own
+repos. Sub-leaves spawned via
 `edgesync hub serve --leaf-upstream=... --seed-from-upstream=$fossil_url`
-clone the parent's state and inherit the same ProjectCode.
+clone the parent's state and inherit the same ProjectCode, so they
+stay in convergent state.
+
+### Why clone-push (and not `fossil open` against `.sesh/sessions/<label>.repo`)
+
+Workers must **not** `fossil open` the session repo file at
+`<cwd>/.sesh/sessions/<label>.repo` directly. EdgeSync's
+auto-publish on commit fires only for two paths:
+
+1. Commits made through its Go API (`Repo.Commit`) — used by sesh
+   itself when seeding, not by workers.
+2. Commits arriving via HTTP xfer push at `$fossil_url`.
+
+A bare `fossil commit` against the on-disk session repo file lands
+locally in that one file but never fires either hook, so peer
+sessions and the hub never hear about it. The clone-push pattern
+routes worker commits through (2), which is the gold path EdgeSync
+integration-tests (`TestCrossLeaf_HTTPPush_PropagatesCommit`).
 
 ### Announce the artifact on NATS (so consumers react now, not on poll)
 
