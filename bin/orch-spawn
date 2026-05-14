@@ -246,7 +246,9 @@ if [ $HEADLESS -eq 1 ]; then
         PANE=$(tmux new-session -d -s "$SESSION" -n "$AGENT" -P -F '#{pane_id}' "$WRAP")
     fi
 else
-    CUR=$(tmux display -p '#{pane_id}')
+    # Prefer $TMUX_PANE (the invoker's pane); tmux display returns the
+    # active client's focused pane which drifts on focus changes.
+    CUR=${TMUX_PANE:-$(tmux display -p '#{pane_id}')}
     case "$POSITION" in
         right) SPLIT_ARGS=(-h) ;;
         left)  SPLIT_ARGS=(-h -b) ;;

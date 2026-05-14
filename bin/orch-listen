@@ -72,7 +72,7 @@ while [ $# -gt 0 ]; do
         --include-observers) INCLUDE_OBSERVERS=1; shift ;;
         --exclude) IFS=',' read -ra PS <<<"$2"; for p in "${PS[@]}"; do EXCLUDE["$p"]=1; done; shift 2 ;;
         --exclude-self)
-            self=$(tmux display -p '#{pane_id}' 2>/dev/null) || self=""
+            self=${TMUX_PANE:-$(tmux display -p '#{pane_id}' 2>/dev/null || true)}
             [ -n "$self" ] && EXCLUDE["$self"]=1
             shift ;;
         --help|-h) sed -n '2,53p' "$0"; exit 0 ;;
