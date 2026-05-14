@@ -11,16 +11,19 @@
 # mode. Default `right` preserves prior behavior (tmux split-window -h). Mapping:
 # right=`-h`, left=`-h -b`, above=`-v -b`, below=`-v`. Ignored in --headless.
 #
-# --verify polls the new pane after the split, waiting for its
-# pane_current_command to become anything other than a known shell
-# (zsh|bash|sh|fish|dash|ksh) — agents like claude rename their process
-# title, so we treat "no longer a shell" as "agent launched". The pane
-# dying also counts as a failure. Default budget is 30s, overridable via
-# ORCH_VERIFY_TIMEOUT. On success, emits one stderr line "orch-spawn:
-# agent ready in pane %X". On failure, emits "orch-spawn: agent failed to
-# start in %X (pane died|timeout)" and exits non-zero — useful for
-# catching the silent-shell-pane failure mode where the agent CLI never
-# actually launches.
+# --verify polls the new pane after the split for either of two readiness
+# signals: (1) pane_current_command becomes anything other than a known
+# shell (zsh|bash|sh|fish|dash|ksh) — agents like claude rename their
+# process title once launched; or (2) the pane's visible buffer contains a
+# per-agent banner string. The second signal absorbs cold-start variance
+# when an agent's REPL is interactive before the title rename catches up
+# (heavy outfits with many MCP servers / hooks routinely cross the title
+# threshold late). The pane dying still counts as a failure. Default
+# budget is 60s, overridable via ORCH_VERIFY_TIMEOUT. On success, emits
+# one stderr line "orch-spawn: agent ready in pane %X". On failure, emits
+# "orch-spawn: agent failed to start in %X (pane died|timeout)" and exits
+# non-zero — useful for catching the silent-shell-pane failure mode where
+# the agent CLI never actually launches.
 #
 # Examples:
 #   orch-spawn claude --project gonvex
@@ -261,7 +264,23 @@ fi
 # Brief settle so ORCH_PANE_ID is in the agent's env before the listener
 # might fire and so registry capture is meaningful.
 if [ $VERIFY -eq 1 ]; then
-    VERIFY_TIMEOUT=${ORCH_VERIFY_TIMEOUT:-30}
+    VERIFY_TIMEOUT=${ORCH_VERIFY_TIMEOUT:-60}
+    # Banner: a distinctive substring of the agent's TUI startup. Used as a
+    # second readiness signal when the process-title rename lags behind the
+    # interactive REPL (large outfits + accessories load a sizable CLAUDE.md
+    # and MCP servers, which can push the rename past the title check).
+    # Empty BANNER → title-rename only (unchanged legacy behaviour). Only
+    # banners verified empirically against the agent's actual TUI go here —
+    # a too-generic string risks false-positive matches against the WRAP's
+    # cwd-prompt or error text. codex / pi banners are not yet verified
+    # past their first-run dialogs; they fall through to title-rename.
+    case "$AGENT" in
+        claude) BANNER="Claude Code" ;;
+        gemini) BANNER="Gemini CLI" ;;
+        codex)  BANNER="" ;;
+        pi)     BANNER="" ;;
+        *)      BANNER="" ;;
+    esac
     deadline=$(( $(date +%s) + VERIFY_TIMEOUT ))
     verify_state=""
     while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -271,7 +290,13 @@ if [ $VERIFY -eq 1 ]; then
         cur_cmd=$(tmux display -p -t "$PANE" '#{pane_current_command}' 2>/dev/null || echo "")
         case "$cur_cmd" in
             ""|zsh|bash|sh|fish|dash|ksh)
-                : ;;  # still a shell / not yet visible — keep polling
+                # Title-rename not yet — try banner-match as the cheap
+                # fallback. If BANNER is empty we skip and keep polling.
+                if [ -n "$BANNER" ] && \
+                   tmux capture-pane -p -t "$PANE" 2>/dev/null | grep -qF "$BANNER"; then
+                    verify_state="ready"; break
+                fi
+                ;;
             *)
                 verify_state="ready"; break ;;
         esac
