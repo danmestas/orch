@@ -9,7 +9,7 @@
 set -euo pipefail
 [ $# -ge 1 ] || { echo "usage: orch-show <pane_id> [target=current]" >&2; exit 1; }
 SRC=$1
-TARGET=${2:-$(tmux display -p '#{pane_id}')}
+TARGET=${2:-${TMUX_PANE:-$(tmux display -p '#{pane_id}')}}
 DIR=${ORCH_SHOW_DIRECTION:-h}
 case $DIR in
     h) tmux join-pane -h -s "$SRC" -t "$TARGET" ;;
