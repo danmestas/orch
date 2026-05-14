@@ -20,6 +20,7 @@
     "orch-ask": "bin/orch-ask",
     "orch-bundle-gc": "bin/orch-bundle-gc",
     "orch-claim-operator": "bin/orch-claim-operator",
+    "orch-current-jsonl": "bin/orch-current-jsonl",
     "orch-down": "bin/orch-down",
     "orch-goal-pursue": "bin/orch-goal-pursue",
     "orch-goal-status": "bin/orch-goal-status",

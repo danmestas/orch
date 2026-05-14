@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# orch-current-jsonl — resolve a claude session's transcript JSONL path
+# from a tmux pane id.
+#
+# Usage:
+#   orch-current-jsonl                  # uses $TMUX_PANE (or $ORCH_PANE_ID)
+#   orch-current-jsonl <pane-id>        # explicit lookup
+#   orch-current-jsonl --guess          # fall back to most-recently-modified
+#                                       # jsonl in the cwd's project dir
+#                                       # when no sidecar mapping exists
+#   orch-current-jsonl --gc             # prune mappings for dead panes
+#
+# Output: the transcript .jsonl path on stdout, exit 0. On any error
+# (no mapping, no pane id, no claude project dir), exits non-zero with a
+# diagnostic on stderr — never silently guesses unless --guess is set.
+#
+# The sidecar mappings are written by hooks/orch-session-jsonl.sh on
+# SessionStart; this helper is the read-side. They keep the spy / audit
+# flows from racing each other when multiple claude sessions share a cwd.
+set -euo pipefail
+
+PANE_ID=""
+GUESS=0
+GC=0
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --guess) GUESS=1; shift ;;
+        --gc)    GC=1; shift ;;
+        --help|-h) sed -n '2,17p' "$0"; exit 0 ;;
+        --*) echo "orch-current-jsonl: unknown flag: $1" >&2; exit 1 ;;
+        *)   PANE_ID=$1; shift ;;
+    esac
+done
+
+SESSIONS_DIR="${ORCH_SESSIONS_DIR:-$HOME/.orch/sessions}"
+
+if [ $GC -eq 1 ]; then
+    [ -d "$SESSIONS_DIR" ] || exit 0
+    # Refuse to prune when no tmux server is reachable — "no live panes"
+    # from a down server would otherwise wipe every sidecar.
+    if ! tmux info >/dev/null 2>&1; then
+        echo "orch-current-jsonl: --gc skipped — tmux server not reachable (would wrongly look like all panes are dead)" >&2
+        exit 0
+    fi
+    live=" $(tmux list-panes -a -F '#{pane_id}' 2>/dev/null | tr '\n' ' ') "
+    for f in "$SESSIONS_DIR"/*.json; do
+        [ -f "$f" ] || continue
+        id=$(basename "$f" .json)
+        case "$live" in
+            *" $id "*) ;;
+            *) rm -f "$f" ;;
+        esac
+    done
+    exit 0
+fi
+
+if [ -z "$PANE_ID" ]; then
+    PANE_ID="${TMUX_PANE:-${ORCH_PANE_ID:-}}"
+fi
+[ -n "$PANE_ID" ] || {
+    echo "orch-current-jsonl: no pane id (set TMUX_PANE / ORCH_PANE_ID, or pass <pane-id>)" >&2
+    exit 1
+}
+
+MAPPING="$SESSIONS_DIR/$PANE_ID.json"
+if [ -f "$MAPPING" ]; then
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.transcript_path' "$MAPPING"
+    else
+        # Defensive: parse the JSON without jq. The hook always writes the
+        # transcript_path field; grab it via sed.
+        sed -n 's/.*"transcript_path":"\([^"]*\)".*/\1/p' "$MAPPING"
+    fi
+    exit 0
+fi
+
+if [ $GUESS -eq 0 ]; then
+    echo "orch-current-jsonl: no mapping for pane $PANE_ID (hook not registered, session not yet started, or pane id wrong — pass --guess to fall back to most-recently-modified jsonl)" >&2
+    exit 1
+fi
+
+# `tmux display -p -t <bad-pane>` returns exit 0 with empty stdout (at
+# least in tmux 3.x), so an `|| pwd` fallback never fires. Test the
+# captured value explicitly.
+CWD=$(tmux display -p -t "$PANE_ID" '#{pane_current_path}' 2>/dev/null || true)
+[ -n "$CWD" ] || CWD=$(pwd)
+RESOLVED_CWD=$(cd "$CWD" 2>/dev/null && pwd -P) || RESOLVED_CWD=$CWD
+PROJECTS_DIR="${ORCH_PROJECTS_DIR:-$HOME/.claude/projects}"
+# Encoding matches orch-claim-operator and claude's own project-dir
+# convention: replace path separators and underscores with dashes.
+ENCODED=$(printf '%s' "$RESOLVED_CWD" | sed 's|/|-|g; s|_|-|g')
+SESSION_DIR="$PROJECTS_DIR/$ENCODED"
+
+[ -d "$SESSION_DIR" ] || {
+    echo "orch-current-jsonl: no claude project dir for $RESOLVED_CWD (looked for $SESSION_DIR)" >&2
+    exit 1
+}
+
+NEWEST=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)
+[ -n "$NEWEST" ] || {
+    echo "orch-current-jsonl: no .jsonl files under $SESSION_DIR" >&2
+    exit 1
+}
+printf '%s\n' "$NEWEST"
