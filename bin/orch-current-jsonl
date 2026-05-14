@@ -37,13 +37,18 @@ SESSIONS_DIR="${ORCH_SESSIONS_DIR:-$HOME/.orch/sessions}"
 
 if [ $GC -eq 1 ]; then
     [ -d "$SESSIONS_DIR" ] || exit 0
-    # Refuse to prune when no tmux server is reachable — "no live panes"
-    # from a down server would otherwise wipe every sidecar.
-    if ! tmux info >/dev/null 2>&1; then
-        echo "orch-current-jsonl: --gc skipped — tmux server not reachable (would wrongly look like all panes are dead)" >&2
+    # Refuse to prune when tmux reports zero live panes — could mean the
+    # server is genuinely down, or a transient ipc failure, or a brand-new
+    # tmux. Either way, treating "no panes" as "every mapping is dead" is
+    # too aggressive and would wipe sidecars for sessions that are still
+    # alive. With at least one live pane in the listing, the check works
+    # correctly (the mapping for any pane not in the listing is dead).
+    live_raw=$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null || true)
+    if [ -z "$live_raw" ]; then
+        echo "orch-current-jsonl: --gc skipped — tmux reports no live panes (server down? — refusing to prune all sidecars)" >&2
         exit 0
     fi
-    live=" $(tmux list-panes -a -F '#{pane_id}' 2>/dev/null | tr '\n' ' ') "
+    live=" $(printf '%s' "$live_raw" | tr '\n' ' ') "
     for f in "$SESSIONS_DIR"/*.json; do
         [ -f "$f" ] || continue
         id=$(basename "$f" .json)
