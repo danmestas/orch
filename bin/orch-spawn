@@ -149,6 +149,20 @@ if [ -n "$PROJECT" ] && [ -z "$CWD" ]; then
 fi
 [ -z "$CWD" ] && CWD=$(pwd)
 
+# Reject CWD values that would let a path craft shell injection into the
+# spawned pane. The WRAP runs via /bin/sh -c with $CWD interpolated into
+# `cd "$CWD"` and (for codex) a quoted -c argument. A path containing
+# quotes, dollar-paren, backticks, or backslashes can break out of the
+# quoting and execute arbitrary commands in the spawned shell. These
+# characters are pathologically rare in real project paths; refuse early
+# rather than ship an injection surface.
+case "$CWD" in
+    *[\"\'\$\\\`]*)
+        echo "orch-spawn: unsafe characters in cwd ($CWD) — refusing to build a shell-injection-prone WRAP" >&2
+        exit 1
+        ;;
+esac
+
 # Auto-add the sesh-goal accessory when the operator is in an active goal
 # pursuit. The accessory's hooks no-op when SESH_GOAL_ID isn't set, so the
 # only cost of including it is a few extra files in the worker's bundle.
@@ -230,7 +244,20 @@ case $AGENT in
         [ $NO_FLEET -eq 0 ] && WRAP="$WRAP --append-system-prompt $HOME/.cache/orch-fleet-prompt.md"
         ;;
     codex)
-        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && codex --dangerously-bypass-approvals-and-sandbox"
+        # Bypass codex's first-run prompts (#37) inline, without touching
+        # ~/.codex/config.toml:
+        #   * trust prompt — codex persists trust per-directory under
+        #     [projects."<path>"] trust_level. Pass it via -c so this
+        #     spawn's cwd is treated as trusted without modifying the
+        #     persisted config.
+        #   * migrate-from-claude prompt — gated by features.external_migration.
+        #     --enable is codex's documented sugar for -c features.<name>=true
+        #     and is equivalent.
+        # The periodic "Update available!" prompt is NOT bypassable via -c —
+        # codex stores the user's "skip until next version" choice in
+        # ~/.codex/config.toml after one interactive answer. Document
+        # that as a one-time manual step for new installs.
+        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && codex -c 'projects.\"$CWD\".trust_level=\"trusted\"' --enable external_migration --dangerously-bypass-approvals-and-sandbox"
         ;;
     gemini)
         WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && gemini --yolo"
