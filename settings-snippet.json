@@ -35,6 +35,11 @@
             "type": "command",
             "command": "bash $HOME/.claude/hooks/orch-goal-session-context.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/hooks/orch-session-jsonl.sh",
+            "timeout": 5
           }
         ]
       }
