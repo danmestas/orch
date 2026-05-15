@@ -240,27 +240,55 @@ case $AGENT in
         fi
         ;;
     pi)
-        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && pi"
+        # PI_TELEMETRY=0 suppresses pi's post-update install-telemetry ping
+        # (silent when enabled, no first-run dialog). --offline skips startup
+        # changelog / package-update HTTP probes so a fresh container boots
+        # without network round-trips before the operator's first prompt. pi
+        # has no blocking first-run dialogs (no trust gate, no telemetry
+        # consent, no model picker — source-confirmed in pi-coding-agent's
+        # interactive-mode init), so nothing else needs bypassing.
+        WRAP="export ORCH_PANE_ID=\$TMUX_PANE PI_TELEMETRY=0;${GOAL_EXPORTS} cd \"$CWD\" && pi --offline"
         [ $NO_FLEET -eq 0 ] && WRAP="$WRAP --append-system-prompt $HOME/.cache/orch-fleet-prompt.md"
         ;;
     codex)
-        # Bypass codex's first-run prompts (#37) inline, without touching
-        # ~/.codex/config.toml:
-        #   * trust prompt — codex persists trust per-directory under
-        #     [projects."<path>"] trust_level. Pass it via -c so this
-        #     spawn's cwd is treated as trusted without modifying the
-        #     persisted config.
-        #   * migrate-from-claude prompt — gated by features.external_migration.
-        #     --enable is codex's documented sugar for -c features.<name>=true
-        #     and is equivalent.
-        # The periodic "Update available!" prompt is NOT bypassable via -c —
+        # Bypass codex's blocking first-run dialogs (#37, #46) on fresh envs.
+        #
+        # The trust gate at codex-rs/tui/src/lib.rs reads
+        # active_project.trust_level, which the loader resolves by looking up
+        # the cwd as a DUNCE-canonicalised path key under [projects."<path>"].
+        # Our prior approach passed `-c projects."$CWD".trust_level="trusted"`
+        # inline, but that writes the override under the RAW $CWD; when the
+        # canonical form differs (e.g. macOS /tmp -> /private/tmp) the lookup
+        # misses and the trust dialog fires anyway. The reliable fix is to
+        # pre-stage the canonical key in ~/.codex/config.toml, idempotently.
+        #
+        # The migrate-from-claude prompt is gated by features.external_migration
+        # (codex-rs/tui/src/external_agent_config_migration_startup.rs). Our
+        # prior wrap used --enable, which is precisely what TURNS THE GATE ON
+        # — flipping to --disable suppresses the prompt at the gate.
+        #
+        # The periodic "Update available!" prompt is NOT bypassable via flags —
         # codex stores the user's "skip until next version" choice in
-        # ~/.codex/config.toml after one interactive answer. Document
-        # that as a one-time manual step for new installs.
-        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && codex -c 'projects.\"$CWD\".trust_level=\"trusted\"' --enable external_migration --dangerously-bypass-approvals-and-sandbox"
+        # ~/.codex/config.toml after one interactive answer. One-time manual
+        # step for new installs.
+        CANON_CWD=$(cd "$CWD" && pwd -P)
+        mkdir -p "$HOME/.codex"
+        touch "$HOME/.codex/config.toml"
+        if ! grep -qF "[projects.\"$CANON_CWD\"]" "$HOME/.codex/config.toml"; then
+            printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$CANON_CWD" >> "$HOME/.codex/config.toml"
+        fi
+        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && codex --disable external_migration --dangerously-bypass-approvals-and-sandbox"
         ;;
     gemini)
-        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && gemini --yolo"
+        # --skip-trust bypasses gemini's Folder Trust dialog (only active when
+        # security.folderTrust.enabled=true in ~/.gemini/settings.json) AND
+        # prevents --yolo from being silently downgraded to "default" approval
+        # mode in cwds the operator hasn't explicitly trusted. Documented in
+        # gemini-cli's bundle/docs/cli/trusted-folders.md under "Headless and
+        # automated environments". Auth / theme / IDE-nudge dialogs do not
+        # fire when ~/.gemini/{settings.json,oauth_creds.json} already exist
+        # with a selectedAuthType — true on any host signed in once.
+        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && gemini --yolo --skip-trust"
         ;;
     *)
         echo "orch-spawn: unknown agent: $AGENT (expected claude|pi|codex|gemini)" >&2; exit 1 ;;

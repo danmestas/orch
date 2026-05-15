@@ -1,17 +1,27 @@
 #!/usr/bin/env bash
 #
-# Regression test for orch-spawn's codex first-run-prompt bypass (#37).
+# Regression test for orch-spawn's first-run-prompt bypasses (#37, #46).
 #
-# Codex prompts on every new directory for trust ("Do you trust the
-# contents of this directory?") and once for migrate-from-claude. The
-# trust prompt is per-directory and is the recurring pain point. Both
-# bypasses are injected inline in orch-spawn's codex WRAP via `-c` and
-# `--enable`, with no global mutation of ~/.codex/config.toml.
+# Codex's per-directory trust prompt and migrate-from-claude prompt block
+# headless spawning. The prior fix (#45) attempted inline `-c` overrides
+# but missed the canonical-vs-raw cwd mismatch (e.g. /tmp vs /private/tmp
+# on macOS), and used --enable external_migration which is precisely the
+# trigger for the migrate dialog rather than its bypass. #46 documents
+# the docker repro that uncovered both regressions.
 #
-# This test asserts the bypass flags are present in the script. Full
-# integration would require codex installed in CI which isn't the case;
-# the bypass mechanism itself was verified manually by state-diffing a
-# fresh codex install.
+# Current approach (verified end-to-end in a fresh node:24-slim container):
+#   * trust prompt — pre-stage ~/.codex/config.toml with a canonical
+#     [projects."<canon>"] trust_level="trusted" block, idempotently.
+#   * migrate-from-claude prompt — flip --enable external_migration to
+#     --disable external_migration so the feature gate is OFF.
+#
+# Pi and gemini wraps were hardened in the same change: pi gains
+# PI_TELEMETRY=0 + --offline (cosmetic / network suppression, no blocking
+# dialogs exist); gemini gains --skip-trust which also prevents --yolo
+# from being silently downgraded in untrusted dirs.
+#
+# This test asserts each piece is wired correctly in the script. Full
+# end-to-end verification requires the docker harness in #46.
 
 set -uo pipefail
 
@@ -36,35 +46,56 @@ assert() {
 ORCH_SPAWN_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/bin/orch-spawn"
 [ -f "$ORCH_SPAWN_SCRIPT" ] || { echo "in-tree orch-spawn not found at $ORCH_SPAWN_SCRIPT"; exit 2; }
 
-echo "=== codex WRAP injects trust-level override ==="
+echo "=== codex: pre-stages canonical trust key in ~/.codex/config.toml ==="
 
-# Per #37: codex persists per-directory trust under [projects."<path>"].
-# The WRAP must pass -c with that key shape so codex skips the prompt
-# for the spawn's cwd without writing to the persisted config.
-if grep -qE '^[[:space:]]*WRAP=.*codex.*-c.*projects\.\\".*\\".trust_level=\\"trusted\\"' "$ORCH_SPAWN_SCRIPT"; then
-    trust_flag="present"
+if grep -qE 'CANON_CWD=\$\(cd "\$CWD" && pwd -P\)' "$ORCH_SPAWN_SCRIPT"; then
+    canon="present"
 else
-    trust_flag="missing"
+    canon="missing"
 fi
-assert "codex WRAP: -c trust_level override present" "present" "$trust_flag"
+assert "codex: CANON_CWD computed via pwd -P" "present" "$canon"
+
+if grep -qE 'grep -qF.*projects\.\\"\$CANON_CWD\\".*config\.toml' "$ORCH_SPAWN_SCRIPT"; then
+    idem="present"
+else
+    idem="missing"
+fi
+assert "codex: pre-stage write is idempotent (grep -qF guard)" "present" "$idem"
+
+if grep -qE 'printf.*projects.*trust_level.*trusted.*CANON_CWD.*config\.toml' "$ORCH_SPAWN_SCRIPT"; then
+    write="present"
+else
+    write="missing"
+fi
+assert "codex: pre-stage writes [projects.\"<canon>\"] trust_level=trusted" "present" "$write"
 
 echo
-echo "=== codex WRAP enables external_migration feature ==="
+echo "=== codex: --disable external_migration (was --enable, which TRIGGERED the dialog) ==="
 
-# Per codex's feature system, migrate-from-claude is gated by
-# features.external_migration. --enable is sugar for -c features.<name>=true.
+if grep -qE '^[[:space:]]*WRAP=.*codex.*--disable[[:space:]]+external_migration' "$ORCH_SPAWN_SCRIPT"; then
+    flip="present"
+else
+    flip="missing"
+fi
+assert "codex WRAP: --disable external_migration present" "present" "$flip"
+
 if grep -qE '^[[:space:]]*WRAP=.*codex.*--enable[[:space:]]+external_migration' "$ORCH_SPAWN_SCRIPT"; then
-    migration_flag="present"
+    legacy_enable="present"
 else
-    migration_flag="missing"
+    legacy_enable="absent"
 fi
-assert "codex WRAP: --enable external_migration present" "present" "$migration_flag"
+assert "codex WRAP: legacy --enable external_migration removed" "absent" "$legacy_enable"
+
+if grep -qE "^[[:space:]]*WRAP=.*codex.*-c[[:space:]]*'projects" "$ORCH_SPAWN_SCRIPT"; then
+    legacy_inline="present"
+else
+    legacy_inline="absent"
+fi
+assert "codex WRAP: legacy inline -c projects override removed" "absent" "$legacy_inline"
 
 echo
-echo "=== codex WRAP still passes --dangerously-bypass-approvals-and-sandbox ==="
+echo "=== codex: --dangerously-bypass-approvals-and-sandbox preserved ==="
 
-# Sanity: the existing approval-bypass flag must not have been dropped by
-# the trust/migration edit.
 if grep -qE '^[[:space:]]*WRAP=.*codex.*--dangerously-bypass-approvals-and-sandbox' "$ORCH_SPAWN_SCRIPT"; then
     approval_flag="present"
 else
@@ -73,17 +104,24 @@ fi
 assert "codex WRAP: --dangerously-bypass-approvals-and-sandbox preserved" "present" "$approval_flag"
 
 echo
-echo "=== codex WRAP expands \$CWD into the trust key ==="
+echo "=== pi: --offline + PI_TELEMETRY=0 ==="
 
-# The -c key includes the spawn's cwd as a TOML quoted key path. We
-# can't run codex in CI, but we can confirm the script literally
-# interpolates $CWD into the key rather than hard-coding a path.
-if grep -qE 'projects\.\\"\$CWD\\".trust_level' "$ORCH_SPAWN_SCRIPT"; then
-    cwd_interpolation="dynamic"
+if grep -qE '^[[:space:]]*WRAP=.*PI_TELEMETRY=0.*pi --offline' "$ORCH_SPAWN_SCRIPT"; then
+    pi_flags="present"
 else
-    cwd_interpolation="static-or-missing"
+    pi_flags="missing"
 fi
-assert "codex WRAP: trust key uses \$CWD (per-spawn), not a hard-coded path" "dynamic" "$cwd_interpolation"
+assert "pi WRAP: PI_TELEMETRY=0 + --offline present" "present" "$pi_flags"
+
+echo
+echo "=== gemini: --skip-trust ==="
+
+if grep -qE '^[[:space:]]*WRAP=.*gemini --yolo --skip-trust' "$ORCH_SPAWN_SCRIPT"; then
+    gem_flag="present"
+else
+    gem_flag="missing"
+fi
+assert "gemini WRAP: --yolo --skip-trust present" "present" "$gem_flag"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
