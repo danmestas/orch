@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# mock claude binary for orch Docker tests.
+#
+# Goals:
+#   - Print a banner containing "Claude Code" so `orch-spawn --verify`'s
+#     banner-match path succeeds.
+#   - Read stdin line by line (so `tmux send-keys` from orch-tell lands
+#     visibly in the pane).
+#   - On each line received, fire the orch CC hooks (orch-stop-marker.sh
+#     and orch-nats-publish-stop.sh) so the test can observe both the
+#     fs-marker side and the NATS substrate side of "turn end".
+#   - Exit cleanly on SIGTERM.
+#
+# Intentionally NOT modeled on real claude-code semantics — this just
+# satisfies the orch plumbing contract.
+set -uo pipefail
+
+cat <<'BANNER'
+╭─── Claude Code v0 (mock test harness) ─────────────────────────╮
+│                                                                  │
+│  This is a mock used by orch's Docker test bench. It echoes      │
+│  each prompt it receives via stdin and triggers the CC-side      │
+│  hooks installed by orch (stop marker + nats publisher).         │
+│                                                                  │
+│  Sending SIGTERM exits cleanly.                                  │
+│                                                                  │
+╰──────────────────────────────────────────────────────────────────╯
+
+BANNER
+
+trap 'exit 0' TERM INT
+
+# Build a minimal Stop hook payload — real CC ships richer JSON, but the
+# hooks only consume session_id + (optionally) cwd, so this is enough.
+build_payload() {
+    if command -v jq >/dev/null 2>&1; then
+        jq -nc --arg s "mock-session" --arg c "$PWD" \
+            '{session_id:$s, cwd:$c, transcript_path:"/tmp/mock-transcript.jsonl"}'
+    else
+        printf '{"session_id":"mock-session","cwd":"%s","transcript_path":"/tmp/mock-transcript.jsonl"}' "$PWD"
+    fi
+}
+
+fire_hooks() {
+    local payload
+    payload=$(build_payload)
+    for hook in "$HOME"/.claude/hooks/orch-stop-marker.sh "$HOME"/.claude/hooks/orch-nats-publish-stop.sh; do
+        [ -x "$hook" ] || continue
+        printf '%s' "$payload" | "$hook" >/dev/null 2>&1 || true
+    done
+}
+
+# Print a prompt-style cursor so capture-pane shows we're alive between turns
+echo "❯ ready"
+
+while IFS= read -r line; do
+    echo "[mock] received: $line"
+    fire_hooks
+    echo "❯ ready"
+done
