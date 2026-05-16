@@ -86,9 +86,10 @@ The goal-harness is orch's reference implementation of the [sesh goal-management
 
 | Component | Path | Purpose |
 | --- | --- | --- |
-| `orch-goal-pursue` | `bin/` | bootstrap a long-horizon goal: create the record, print env exports |
-| `orch-goal-status` | `bin/` | inspect the current goal + linked tasks + budget burn |
-| `orch-goal-stop-account.sh` | `hooks/` | Stop hook: account ~5k tokens per turn while a goal is active |
+| `orch-goal-pursue` | `bin/` | bootstrap a long-horizon goal: create the record, print env exports, launch daemon |
+| `orch-goal-status` | `bin/` | inspect the current goal + linked tasks + budget burn + daemon status |
+| `orch-goal-stop-account-daemon` | `cmd/` | long-running binary: account tokens via Synadia §6.5 terminators across all harnesses |
+| `orch-goal-stop-account.sh` | `hooks/` | **DEPRECATED** — Claude Code Stop hook; superseded by the daemon above |
 | `orch-goal-session-context.sh` | `hooks/` | SessionStart hook: inject goal state into context on resume |
 | `goal-complete` skill | `skills/` | model-facing audit checklist before submitting `goal complete` |
 | `orch-goal-continuation.md` | `references/` | reference prompt the spec calls "harness-side" |
@@ -103,25 +104,35 @@ The goal-harness is orch's reference implementation of the [sesh goal-management
 # 1. Start a long-horizon goal in your project:
 orch-goal-pursue "Implement OAuth2 migration for the auth service" --budget=200000
 
-# 2. The command prints export lines. Run them (or paste into your shell):
-export SESH_GOAL_ID=01HXX...
-export SESH_GOAL_SCOPE=project
-export SESH_GOAL_SCOPE_ID=auth_service
+# 2. The command prints export lines AND launches the token-accounting daemon:
+#
+#   Goal created: 01HXX...
+#   Daemon:       started (pid=12345, log=/tmp/orch-goal-daemon-01HXX....log)
+#
+#   export SESH_GOAL_ID=01HXX...
+#   export SESH_GOAL_SCOPE=project
+#   export SESH_GOAL_SCOPE_ID=auth_service
 
-# 3. Open Claude Code. The SessionStart hook injects the goal state into
-#    your initial context. Every Stop hook accounts ~5k tokens.
+# 3. Run the export lines in your shell (or let the agent run them).
 
-# 4. Work. Across many turns. Across session resumes. The goal record in
-#    sesh's hub remembers what you're pursuing.
+# 4. Open any harness — Claude Code, codex, pi, gemini, or any shim-wrapped
+#    agent. The daemon subscribes to Synadia §6.5 terminator events on
+#    agents.prompt.*.*.*.> and accounts ~5k tokens per turn automatically,
+#    across all four harnesses. No per-harness Stop hook required.
 
-# 5. When the audit completes, Claude invokes the goal-complete skill,
+# 5. Work. Across many turns. Across session resumes. Across harness switches.
+#    The goal record in sesh's hub remembers what you're pursuing.
+
+# 6. When the audit completes, Claude invokes the goal-complete skill,
 #    walks the 6-step checklist, then submits update_goal(complete).
 
-# 6. Inspect:
+# 7. Inspect goal + daemon status:
 orch-goal-status
 ```
 
-The goal-harness is **opt-in**: hooks no-op silently when `SESH_GOAL_ID` is unset, so they don't affect normal orch sessions. Settings-snippet.json registers them under Stop and SessionStart automatically when you run `orch up`.
+**Cross-harness coverage:** Token accounting is handled by `orch-goal-stop-account-daemon` — a long-running Go binary that subscribes to the NATS subject `agents.prompt.*.*.*.>` and detects §6.5 terminators (zero-byte, no-header messages). This fires once per turn regardless of which harness is running. The old `orch-goal-stop-account.sh` Stop hook was claude-code-specific and is now deprecated.
+
+The goal-harness is **opt-in**: the daemon no-ops silently when `SESH_GOAL_ID` is unset, and the SessionStart hook injects goal state on resume. Settings-snippet.json no longer registers a goal-specific Stop hook — the daemon replaces it.
 
 ## Dark factory automations (roadmap)
 

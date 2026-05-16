@@ -5,7 +5,10 @@
 #   - default scope = project, scope-id = cwd basename (sanitized)
 #   - default budget = 200000 tokens
 #   - emits export commands so the operator can wire SESH_GOAL_ID into
-#     their shell, activating the Stop and SessionStart hooks
+#     their shell
+#   - launches orch-goal-stop-account-daemon in the background so token
+#     accounting works across all harnesses (claude-code, codex, pi, gemini)
+#     via Synadia §6.5 terminator events, not Claude Code Stop hooks
 #
 # Usage:
 #   orch-goal-pursue "<objective>" [--budget=N] [--owner=role:id] [--scope=project|workflow|...]
@@ -85,12 +88,55 @@ if [[ -z "$GOAL_ID" || "$GOAL_ID" == "null" ]]; then
   exit 5
 fi
 
+# Launch the cross-harness token-accounting daemon. It subscribes to
+# agents.prompt.*.<owner>.*.> and accounts tokens for this goal on every
+# §6.5 terminator from a pane owned by this operator. PID is stored in
+# ~/.cache/orch-goal-daemon/<goal-id>.pid.
+DAEMON_BIN="${ORCH_DAEMON_BIN:-orch-goal-stop-account-daemon}"
+DAEMON_LOG="/tmp/orch-goal-daemon-${GOAL_ID}.log"
+# The daemon writes its own PID file under ~/.cache/orch-goal-daemon/<goal-id>.pid
+# (see cmd/orch-goal-stop-account-daemon/main.go writePID). orch-goal-status
+# reads that path directly — no need to track the directory here.
+
+# Subject-owner filter for the daemon: matches the same owner token
+# orch-agent-shim uses in agents.prompt.<token>.<owner>.<pane>. Resolution
+# mirrors the shim ($ORCH_OWNER → $USER). Distinct from the goal record's
+# $OWNER (a role:id pair like "orch:$USER").
+DAEMON_SUBJECT_OWNER="${ORCH_OWNER:-${USER:-claude}}"
+
+if command -v "$DAEMON_BIN" >/dev/null 2>&1; then
+  env \
+    SESH_GOAL_ID="$GOAL_ID" \
+    SESH_GOAL_SCOPE="$SCOPE" \
+    SESH_GOAL_SCOPE_ID="$SCOPE_ID" \
+    ORCH_GOAL_OWNER="$DAEMON_SUBJECT_OWNER" \
+    SESH_OPS_BIN="${SESH_OPS_BIN:-sesh-ops}" \
+    "$DAEMON_BIN" >>"$DAEMON_LOG" 2>&1 &
+  DAEMON_PID=$!
+  # disown detaches the daemon from this shell's job table so it survives
+  # SIGHUP when the operator closes their terminal. The daemon only traps
+  # SIGTERM/SIGINT; without disown, an operator who runs `orch-goal-pursue`
+  # then exits their shell would silently kill goal accounting. Matches
+  # the pattern used in bin/orch-spawn.
+  disown "$DAEMON_PID" 2>/dev/null || true
+  # Give the daemon a moment to write its own PID file, then verify it started.
+  sleep 0.2
+  if kill -0 "$DAEMON_PID" 2>/dev/null; then
+    DAEMON_STATUS="started (pid=$DAEMON_PID, log=$DAEMON_LOG)"
+  else
+    DAEMON_STATUS="failed to start — check $DAEMON_LOG"
+  fi
+else
+  DAEMON_STATUS="skipped ($DAEMON_BIN not on PATH)"
+fi
+
 cat <<EOF
 Goal created: $GOAL_ID
 Objective:    $OBJECTIVE
 Scope:        $SCOPE / $SCOPE_ID
 Budget:       $BUDGET tokens
 Owner:        $OWNER
+Daemon:       $DAEMON_STATUS
 
 Activate the pursuit in this session by exporting:
 
@@ -98,6 +144,8 @@ Activate the pursuit in this session by exporting:
   export SESH_GOAL_SCOPE=$SCOPE
   export SESH_GOAL_SCOPE_ID=$SCOPE_ID
 
-The orch-goal-stop-account.sh and orch-goal-session-context.sh hooks
-fire once SESH_GOAL_ID is set. To inspect, run \`orch-goal-status\`.
+The orch-goal-stop-account-daemon accounts tokens across all harnesses
+via Synadia §6.5 terminators. The orch-goal-session-context.sh hook
+injects goal state into context on session resume. To inspect, run
+\`orch-goal-status\`.
 EOF
