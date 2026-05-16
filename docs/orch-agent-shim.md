@@ -72,6 +72,7 @@ Synadia bus.
 | `internal/adapter/claudecode/cc.go`   | claude-code adapter: JSONL tail, marker watch, tmux send-keys.                          |
 | `internal/adapter/gemini/gemini.go`   | gemini adapter: marker watch (AfterAgent → terminator, Notification → query), tmux send-keys. Transcript emission deferred (see below). |
 | `internal/adapter/pi/pi.go`           | pi adapter: JSONL tail, stop-marker watch, synthetic query chunks, tmux send-keys.      |
+| `internal/adapter/codex/codex.go`     | codex adapter: rollout JSONL tail, stop-marker watch, synthetic idle-query chunks.      |
 
 ## Adapter matrix
 
@@ -79,6 +80,7 @@ Synadia bus.
 |-----------------|------------------------------------------------|------------------------|------------------------------|-------------------|
 | `claude-code` / `claude` | `~/.claude/projects/<enc>/<sid>.jsonl` tail | `~/.cache/orch-stop/<pane>.event` fsnotify | `~/.cache/orch-notify/<pane>.notify` fsnotify → §7 query | tmux send-keys |
 | `pi`            | `~/.pi/agent/sessions/<enc>/<ts>_<sid>.jsonl` tail | `~/.cache/orch-stop/<pane>.event` fsnotify | Synthetic §7 query at turn-end (Plan 11 idle heuristic — pi has no Notification event) | tmux send-keys |
+| `codex`         | `~/.codex/sessions/<Y>/<M>/<D>/rollout-<ts>-<uuid>.jsonl` | `~/.cache/orch-stop/<pane>.event` fsnotify | Synthetic: idle 5s + TUI prompt pattern → §7 query chunk | tmux send-keys |
 
 `<enc>` in both cases: replace `/` and `.` with `-` in the pane's CWD.
 
@@ -96,7 +98,7 @@ then resolved defaults.
 
 | Flag       | Env             | Fallback                                  | Notes                                                      |
 |------------|-----------------|-------------------------------------------|------------------------------------------------------------|
-| `--agent`  | —               | (required)                                | `claude-code` (or `claude`), `pi`, or `gemini`.            |
+| `--agent`  | —               | (required)                                | `claude-code` (or `claude`), `codex`, `pi`, or `gemini`.   |
 | `--pane`   | —               | (required)                                | Raw tmux pane id, e.g. `%37`.                              |
 | `--owner`  | `ORCH_OWNER`    | `$USER` / passwd lookup                   | Lands in metadata.owner.                                   |
 | `--session`| `SESH_SESSION`  | `""` (omitted from metadata)              | Marks the agent as session-aware per §3.2.                 |
@@ -143,7 +145,7 @@ record (§2.1), not construct it from identity (§12 caller checklist).
 | Heartbeats on `agents.hb.<agent>.<owner>.<name>` at configured cadence  | `heartbeatLoop` + `publishHeartbeat`.                   |
 | All §8.3 fields in heartbeat payload                                    | `buildHeartbeat` / `heartbeatPayload`.                  |
 | Responds to `$SRV.PING.agents` / `$SRV.INFO.agents`                     | Handled by `nats.go/micro` framework.                   |
-| Mid-stream queries conform to §7                                        | `claudecode/cc.go: markerLoop` → `shim.NewQueryChunk`.  |
+| Mid-stream queries conform to §7                                        | `claudecode/cc.go: markerLoop` → `shim.NewQueryChunk`; `codex/codex.go: idleQueryLoop` → synthetic query chunk. |
 | `Nats-Service-Error-Code` from §9.2 taxonomy on errors                  | `respondError` / `publishErrorOnReply` set code + body. |
 
 ## Lifecycle
@@ -232,6 +234,7 @@ The spawn integration test is `test/test-orch-spawn-shim.sh` — it
 starts a test NATS server, forks the shim, and asserts `$SRV.INFO.agents`
 returns the pane within 5 s.
 
+<<<<<<< HEAD
 ## Gemini adapter notes
 
 ### AfterAgent quirk
@@ -259,6 +262,18 @@ See the `TODO(transcript)` comment in `internal/adapter/gemini/gemini.go`.
 
 <<<<<<< HEAD
 - **codex / pi adapters.** Plans 11-12. Each is an
+=======
+## Adapter matrix
+
+| Agent value | Adapter | Transcript source | Stop detection | Notification gap |
+|---|---|---|---|---|
+| `claude-code` / `claude` | `claudecode/cc.go` | `~/.claude/projects/<enc-cwd>/<sid>.jsonl` | `~/.cache/orch-stop/<pane>.event` (fsnotify) | `~/.cache/orch-notify/<pane>.notify` (fsnotify) |
+| `codex` | `codex/codex.go` | `~/.codex/sessions/<Y>/<M>/<D>/rollout-<ts>-<uuid>.jsonl` | `~/.cache/orch-stop/<pane>.event` (fsnotify) | Synthetic: idle 5s + TUI prompt pattern → §7 query chunk |
+
+## Open work (out of scope for this PR)
+
+- **pi / gemini adapters.** Plans 12-13. Each is an
+>>>>>>> 99b3cac (feat(shim): codex adapter — synthetic query chunks for the Notification gap)
   `adapter/<name>/<name>.go` with the same three-method interface.
 =======
 - **codex / gemini adapters.** Plans 12-13. Each is an

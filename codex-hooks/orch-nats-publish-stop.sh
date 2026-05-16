@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# DEPRECATED: This script is superseded by the codex adapter in
+# internal/adapter/codex/codex.go (orch-agent-shim --agent codex).
+# Stop detection is now handled via fsnotify on ~/.cache/orch-stop/<pane>.event.
+# TODO(orch#61 follow-up): remove after orch-agent-shim --with-shim becomes the
+# default for codex spawns (tracked in orch#55 parent epic).
+#
 # codex Stop hook companion — publishes a NATS message when codex finishes a
 # turn, mirroring the claude-code-side hook at hooks/orch-nats-publish-stop.sh.
 #

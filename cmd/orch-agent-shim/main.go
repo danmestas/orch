@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/danmestas/orch/internal/adapter/claudecode"
+	"github.com/danmestas/orch/internal/adapter/codex"
 	"github.com/danmestas/orch/internal/adapter/gemini"
 	"github.com/danmestas/orch/internal/adapter/pi"
 	"github.com/danmestas/orch/internal/shim"
@@ -96,6 +97,10 @@ func buildAdapter(agent, pane, cwd string) (shim.Adapter, error) {
 		// Normalize: accept both "claude" (orch-spawn arg) and the
 		// canonical "claude-code" (Synadia §C identifier).
 		return claudecode.New(pane, cwd), nil
+	case "codex":
+		// codex adapter: tails ~/.codex/sessions rollout JSONL, watches the
+		// orch-stop marker, and emits synthetic query chunks on idle detection.
+		return codex.New(pane), nil
 	case "gemini":
 		// gemini-cli adapter. Uses AfterAgent (NOT Stop) for turn-end
 		// detection; native Notification events for query chunks.
@@ -105,8 +110,7 @@ func buildAdapter(agent, pane, cwd string) (shim.Adapter, error) {
 	case "pi":
 		return pi.New(pane, cwd), nil
 	default:
-		// codex adapter lands in Plan 12.
-		return nil, fmt.Errorf("no adapter for agent %q (supported: claude-code, gemini, pi; codex in Plan 12)", agent)
+		return nil, fmt.Errorf("no adapter for agent %q (supported: claude-code, codex, gemini, pi)", agent)
 	}
 }
 

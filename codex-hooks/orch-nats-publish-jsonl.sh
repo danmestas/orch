@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# DEPRECATED: This script is superseded by the codex adapter in
+# internal/adapter/codex/codex.go (orch-agent-shim --agent codex).
+# Transcript tailing is now handled directly by the shim's transcriptLoop.
+# TODO(orch#61 follow-up): remove after orch-agent-shim --with-shim becomes the
+# default for codex spawns (tracked in orch#55 parent epic).
+#
 # codex SessionStart hook companion — tails the current codex session's JSONL
 # rollout transcript and publishes each line to NATS. Mirrors the claude-side
 # hook at hooks/orch-nats-publish-jsonl.sh.
