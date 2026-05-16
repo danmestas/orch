@@ -20,25 +20,29 @@ Tracking issue: **#55** (parent epic for the Synadia integration campaign).
 | #70 | `orch-agent-shim` v1 — Synadia bridge in Go | **merged** |
 | #72 | `orch-spawn` launches shim by default | **merged** |
 | #57 / #68 | Docker test benches | **merged** |
-| #58 | New `orch` CLI verb for Synadia prompt | open |
-| #59 | `orch-listen` Synadia backend | open |
-| #60 | Registry retirement / service-discovery migration | open |
+| #58 | New `orch` CLI verb for Synadia prompt | merged |
+| #94 | Retire legacy bridge + fs-marker hooks + legacy listener | **merged** |
 
-The shim is live and every `orch-spawn`ed pane is registered on the Synadia bus.
-The legacy primitives (`orch-tell`, `orch-listen`, `orch-peek`, local registry files)
-are retired. Use the Synadia path exclusively.
+**Current state (as of #94):** The Synadia path is the only path. The legacy
+fs-marker hooks (`orch-stop-marker.sh`, `orch-notify-marker.sh`,
+`orch-session-jsonl.sh`), per-harness NATS-publish hooks
+(`orch-nats-publish-*.sh|ts`), the comms bridge daemon
+(`orch-nats-bridge-in`), and the fs-watch listener (`orch-listen`) have all
+been deleted. Skills that still reference them are obsolete — use the
+translation table below.
 
 ## Side-by-side translation table
 
 The five operator-facing primitives and their Synadia-native replacements.
 
-| Legacy primitive | What it did | Current equivalent | Notes |
+| Legacy primitive | What it did | Replacement | Notes |
 |---|---|---|---|
-| `orch-tell %NNN "hello"` | Injected prompt into tmux pane via `send-keys` | `nats req agents.prompt.cc.<owner>.pct<N> "hello"` (or new `orch` verb — see #58) | Subject token for `%NNN`: replace `%` with `pct`, e.g. `%37` → `pct37`. Caller MUST read the subject off the endpoint record (§4.3), not construct it from the pane id. |
-| `orch-listen [--stream]` | `fswatch` loop over `~/.cache/orch-stop/*.event` marker files | `nats sub 'agents.hb.>'` + chunk-stream sub (see #59) | Heartbeats fire on `agents.hb.cc.<owner>.pct<N>` every 15 s; Stop events are modelled as a status-chunk sequence. |
-| `orch-peek [pane...]` | Read `~/.cache/orch-registry/<pane>.json` | `nats req '$SRV.INFO.agents'` | Returns all live shim instances; filter by `metadata.pane_id` for a single worker. `nats micro info agents` is the human-readable alias. |
-| `~/.cache/orch-registry/<pane>.json` | Local JSON file per pane — source of truth for pane→agent→cwd→session | `nats req '$SRV.INFO.agents'` + `jq` on `metadata.pane_id` / `metadata.owner` | The shim publishes the same fields to `$SRV.INFO.agents` metadata. Local registry files are retired. |
-| `orch-tell --force <pane> "/rename foo"` | Sent harness-specific slash command via tmux | Routes through `metadata.session` once the session-control channel is defined — see #59 | |
+| `orch-tell %NNN "hello"` | Injected prompt via tmux `send-keys` | `orch-tell %NNN "hello"` (now publishes to `agents.prompt.cc.<owner>.pct<N>` via the shim) | The CLI name is unchanged — internals switched to bus publish. Caller MUST read the subject off the endpoint record (§4.3), not construct it from the pane id. |
+| `orch-listen [--stream]` | `fswatch` loop over `~/.cache/orch-stop/*.event` marker files | `nats sub 'agents.>' --raw` (wrap in Monitor for push-notifications) | Subscribe to `agents.events.>` for typed chunks, `agents.hb.>` for heartbeats. Subject namespacing: `<plugin>.<harness>.<owner>.pct<N>`. |
+| `orch-peek [pane...]` | Read `~/.cache/orch-registry/<pane>.json` | `nats req '$SRV.INFO.agents'` (CLI wrapper: `orch-peek`) | Returns all live shim instances; filter by `metadata.pane_id` for a single worker. `nats micro info agents` is the human-readable alias. |
+| `orch-subscribe <peer>` | Worker-side fswatch daemon that injected `[peer event]` prompts | Subscribe directly to the bus from the worker's wrap shell (recipe in `orch-driver`). No first-class CLI replacement. |
+| `orch-current-jsonl` | Read sidecar mapping `~/.orch/sessions/<pane>.json` written by the SessionStart hook | Read `metadata.transcript_path` from `$SRV.INFO.agents` — the shim's claudecode adapter advertises it. |
+| `orch-register <pane> ...` | Wrote `~/.cache/orch-registry/<pane>.json` | No-op stub (shim auto-registers on `$SRV.INFO.agents`). The stub remains so legacy callers don't error. |
 
 **Subjects quick-reference** (shim v1, §2.3 channel-plugin layout, `cc` token for claude-code):
 
@@ -65,7 +69,6 @@ INFO=$(nats req '$SRV.INFO.agents' '' 2>/dev/null | jq -r \
   ".services[].endpoints[] | select(.metadata.pane_id == \"$PANE\") | .subject")
 # prompt over NATS; response is a streamed chunk sequence
 nats req "$INFO" "summarize the auth module"
-# TBD — full streaming reply handling: see #58 for the new CLI verb
 ```
 
 ### Broadcast a question to all workers
@@ -74,15 +77,25 @@ nats req "$INFO" "summarize the auth module"
 # Discover all live panes, send in parallel
 nats req '$SRV.INFO.agents' '' | jq -r '.services[].endpoints[].subject' | \
   xargs -P0 -I{} nats req '{}' "what did you last complete?"
-# TBD — see #58 for the orch verb wrapper that handles streaming replies
 ```
 
-### Watch for a worker becoming idle (Stop event)
+### Watch for a worker becoming idle (turn-end)
+
+```python
+Monitor(
+    command="nats sub 'agents.>' --raw",
+    description="Synadia Agent Protocol events",
+    persistent=True,
+)
+# each line: a typed chunk JSON. Turn-end appears as
+# {"type":"status","data":"ack"} followed by an empty-body terminator.
+```
+
+For heartbeat-only liveness:
+
 
 ```sh
-# Heartbeat subscription — fires every 15 s per live pane
-nats sub 'agents.hb.>'
-# TBD — see #59 for the orch-listen Synadia backend that models Stop as a status chunk
+nats sub 'agents.hb.>'   # fires every 15s per live pane
 ```
 
 ### Spy on a session
@@ -90,40 +103,35 @@ nats sub 'agents.hb.>'
 ```sh
 orch-spy operator "audit operator session for the last hour"
 # spy pane is auto-registered on the bus; its own heartbeats appear on
-# agents.hb.cc.<owner>.pct<spy-N>; observable by any NATS subscriber
-# TBD — once #59 lands, spy Stop events arrive as chunk-stream terminations
+# agents.hb.cc.<owner>.pct<spy-N>; observable by any NATS subscriber.
 ```
 
 ## Skill update checklist
 
-For operators who maintain skills that embed legacy primitives:
+For operators who maintain skills that embed legacy primitives. Run this
+checklist against each skill body.
 
-1. **Grep for legacy primitives.** Search the skill body for `orch-tell`, `orch-listen`,
-   `orch-peek`, `orch-registry`, `orch-register`, `orch-subscribe`.
+1. **Grep for legacy primitives.** Search the skill body for `orch-listen`,
+   `orch-subscribe`, `orch-register`, `orch-current-jsonl`, `orch-nats-bridge-in`,
+   `orch-stop-marker`, `orch-notify-marker`, `orch-nats-publish`,
+   `~/.cache/orch-stop`, `~/.cache/orch-notify`, `fswatch ... orch-stop`,
+   `~/.cache/orch-registry`.
 
-2. **For each hit, apply the replacement:**
-   - `orch-tell <pane> <prompt>` → `nats req agents.prompt.cc.<owner>.pct<N> <prompt>`
-     (or new `orch` verb — see #58 announcement).
-   - `orch-listen [--stream]` → `nats sub 'agents.hb.>'` + chunk-stream sub (see #59);
-     Monitor wrapper stays — only the inner command changes.
-   - `orch-peek` → `nats micro info agents` or `nats req '$SRV.INFO.agents'`.
-   - Registry file reads → `nats req '$SRV.INFO.agents'` + `jq` filter
-     on `metadata.pane_id` / `metadata.owner`.
-   - `orch-register` calls → remove; the shim self-registers on spawn.
-   - `orch-subscribe` → TBD — see #59 (worker-side push).
+2. **For each hit, apply the replacement from the translation table.**
 
-3. **Update the "Tools" or cheat-sheet table** in the skill body to reflect the new subjects
-   and CLI verbs.
+3. **Update the "Tools" or cheat-sheet table** in the skill body to reflect
+   the new subjects and CLI verbs.
 
-4. **Verify** by reading the updated skill body and confirming no legacy primitive remains
-   without a fully resolved replacement.
+4. **Verify** by reading the updated skill body and confirming no legacy
+   primitive remains.
 
-5. **Commit** with `refactor(skills): update <skill-name> for Synadia cutover (#58 #59)`.
+5. **Commit** with `refactor(skills): update <skill-name> for Synadia cutover`.
 
 ## Cross-references
 
 - `docs/orch-agent-shim.md` — shim architecture, subject layout, §12 conformance map
 - `docs/synadia-comparison.md` — four-layer architectural rationale
+- `docs/nats-bridge.md` — historical record of the retired bridge (do not implement against this)
 - `~/references/synadia-agent-sdk-docs/core-protocol.md` — Synadia Agent Protocol spec (v0.3)
 - Tracking epic: **#55**
-- CLI shape: **#58** (new `orch` verb), **#59** (`orch-listen` backend), **#60** (registry retirement)
+- Retirement PR: **#94**

@@ -93,12 +93,9 @@ jobs:
           export PATH="$PWD/bin:$PATH"
           declare -a tests=(
             test/test-orch-bundle-gc.sh
-            test/test-orch-current-jsonl.sh
-            test/test-orch-listen-stream.sh
             test/test-orch-project-resolution.sh
             test/test-orch-spawn-output.sh
             test/test-orch-spawn-verify.sh
-            test/test-orch-subscribe.sh
             test/test-orch-version.sh
             test/test-orch-observer-role.sh
             test/test-orch-spy.sh
@@ -183,7 +180,7 @@ jobs:
           HEAD="${{ github.event.pull_request.head.sha }}"
           changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || true)
           if printf '%s\n' "$changed" | grep -qE \
-              '^(cmd/orch-agent-shim/|executors/|hooks/orch-nats-publish-)'; then
+              '^(cmd/orch-agent-shim/|executors/|internal/adapter/)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
             echo "relevant=false" >> "$GITHUB_OUTPUT"
@@ -235,7 +232,7 @@ jobs:
           HEAD="${{ github.event.pull_request.head.sha }}"
           changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || true)
           if printf '%s\n' "$changed" | grep -qE \
-              '^(bin/orch-nats-bridge-in|cmd/orch-agent-shim/|executors/|hooks/|gemini-hooks/|codex-hooks/)'; then
+              '^(cmd/orch-agent-shim/|executors/|internal/adapter/|hooks/)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
             echo "relevant=false" >> "$GITHUB_OUTPUT"

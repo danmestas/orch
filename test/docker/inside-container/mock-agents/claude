@@ -6,15 +6,13 @@
 #     banner-match path succeeds.
 #   - Read stdin line by line (so `tmux send-keys` from orch-tell lands
 #     visibly in the pane).
-#   - On each line received, fire the orch CC hooks (orch-stop-marker.sh
-#     and orch-nats-publish-stop.sh) so the test can observe both the
-#     fs-marker side and the NATS substrate side of "turn end".
 #   - Exit cleanly on SIGTERM.
 #
-# MOCK_USE_SHIM=1: instead of the hook-firing loop above, launch
-# orch-agent-shim with the claude-code adapter so T9/T10/T11 can
-# exercise the Synadia §12 contract against the real shim.  Falls back
-# to the hook-firing loop when MOCK_USE_SHIM is unset or 0.
+# MOCK_USE_SHIM=1: launch orch-agent-shim with the claude-code adapter so
+# T9/T10/T11 can exercise the Synadia §12 contract against the real shim.
+# Without MOCK_USE_SHIM, runs in plain-echo mode — there is no longer a
+# legacy hook-firing fallback (the marker / NATS-publish hooks were retired
+# in orch#94; the Synadia bus via the shim is the only event path).
 #
 # Intentionally NOT modeled on real claude-code semantics — this just
 # satisfies the orch plumbing contract.
@@ -24,8 +22,8 @@ cat <<'BANNER'
 ╭─── Claude Code v0 (mock test harness) ─────────────────────────╮
 │                                                                  │
 │  This is a mock used by orch's Docker test bench. It echoes      │
-│  each prompt it receives via stdin and triggers the CC-side      │
-│  hooks installed by orch (stop marker + nats publisher).         │
+│  each prompt it receives via stdin. With MOCK_USE_SHIM=1 it      │
+│  delegates to orch-agent-shim for full Synadia adapter coverage. │
 │                                                                  │
 │  Sending SIGTERM exits cleanly.                                  │
 │                                                                  │
@@ -37,7 +35,7 @@ BANNER
 if [ "${MOCK_USE_SHIM:-0}" = "1" ]; then
     SHIM_BIN="${SHIM_BIN:-orch-agent-shim}"
     if ! command -v "$SHIM_BIN" >/dev/null 2>&1; then
-        echo "[mock] MOCK_USE_SHIM=1 but $SHIM_BIN not found on PATH — falling back to hook-firing mode" >&2
+        echo "[mock] MOCK_USE_SHIM=1 but $SHIM_BIN not found on PATH — falling back to plain-echo mode" >&2
     else
         # Resolve the tmux pane we're running in.  orch-spawn sets $TMUX_PANE
         # (or $ORCH_PANE) before exec'ing us; fall back to the first visible
@@ -47,7 +45,7 @@ if [ "${MOCK_USE_SHIM:-0}" = "1" ]; then
             PANE=$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null | head -1)
         fi
         if [ -z "$PANE" ]; then
-            echo "[mock] MOCK_USE_SHIM=1 but could not determine tmux pane — falling back to hook-firing mode" >&2
+            echo "[mock] MOCK_USE_SHIM=1 but could not determine tmux pane — falling back to plain-echo mode" >&2
         else
             # Pass --heartbeat-interval so T11 can run fast (2s cadence).
             HB_INTERVAL="${SHIM_HB_INTERVAL:-30s}"
@@ -61,34 +59,13 @@ if [ "${MOCK_USE_SHIM:-0}" = "1" ]; then
     fi
 fi
 
-# --- Hook-firing mode (default / backward-compat) --------------------------
+# --- Plain-echo mode (default) ---------------------------------------------
 trap 'exit 0' TERM INT
-
-# Build a minimal Stop hook payload — real CC ships richer JSON, but the
-# hooks only consume session_id + (optionally) cwd, so this is enough.
-build_payload() {
-    if command -v jq >/dev/null 2>&1; then
-        jq -nc --arg s "mock-session" --arg c "$PWD" \
-            '{session_id:$s, cwd:$c, transcript_path:"/tmp/mock-transcript.jsonl"}'
-    else
-        printf '{"session_id":"mock-session","cwd":"%s","transcript_path":"/tmp/mock-transcript.jsonl"}' "$PWD"
-    fi
-}
-
-fire_hooks() {
-    local payload
-    payload=$(build_payload)
-    for hook in "$HOME"/.claude/hooks/orch-stop-marker.sh "$HOME"/.claude/hooks/orch-nats-publish-stop.sh; do
-        [ -x "$hook" ] || continue
-        printf '%s' "$payload" | "$hook" >/dev/null 2>&1 || true
-    done
-}
 
 # Print a prompt-style cursor so capture-pane shows we're alive between turns
 echo "❯ ready"
 
 while IFS= read -r line; do
     echo "[mock] received: $line"
-    fire_hooks
     echo "❯ ready"
 done

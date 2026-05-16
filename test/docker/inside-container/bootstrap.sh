@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # bootstrap.sh — runs inside the container as ENTRYPOINT.
 #
-# Sets up the environment (NATS server, orch hooks symlinked, bridge daemon
-# started, tmux server running) and then invokes tests.sh inside a tmux
-# session. Tests run synchronously; the container exits with the test
-# script's exit code so `docker run` returns pass/fail directly.
+# Sets up the environment (NATS server, orch hooks symlinked, tmux server
+# running) and then invokes tests.sh inside a tmux session. Tests run
+# synchronously; the container exits with the test script's exit code so
+# `docker run` returns pass/fail directly.
 set -uo pipefail
 
 log() { printf '[bootstrap %s] %s\n' "$(date -u +%T)" "$*"; }
@@ -12,7 +12,7 @@ log() { printf '[bootstrap %s] %s\n' "$(date -u +%T)" "$*"; }
 ORCH_PKG_DIR=/usr/lib/node_modules/@agent-ops/orch
 
 # 1. Start nats-server with JetStream (so we have parity with sesh's
-#    JetStream-backed hub; the bridge itself only needs core pub/sub).
+#    JetStream-backed hub; the shim uses core NATS for the Synadia bus).
 log "starting nats-server"
 mkdir -p /tmp/jetstream
 nats-server --jetstream --store_dir=/tmp/jetstream --port 4222 \
@@ -54,14 +54,6 @@ if ! git clone --depth 1 https://github.com/danmestas/wardrobe.git "$SUIT_CONTEN
     # Non-fatal: tests T2/T8 will note the gap.
 fi
 
-# 5. Start the NATS bridge subscriber. NATS_URL defaults to
-#    nats://localhost:4222 which is exactly what we ran.
-log "starting orch-nats-bridge-in"
-BRIDGE_PID=$(orch-nats-bridge-in --background)
-sleep 1
-kill -0 "$BRIDGE_PID" 2>/dev/null || { log "bridge failed"; tail /tmp/orch-nats-bridge.log 2>/dev/null; exit 1; }
-log "bridge alive (PID $BRIDGE_PID)"
-
 # 5. tmux session — orch-spawn requires a running tmux server. We launch
 #    one detached and run tests.sh inside its first pane. The pane runs to
 #    completion and writes its exit code to /tmp/test-rc; we poll up to
@@ -90,8 +82,6 @@ done
 log "tests done — output follows"
 echo "------------------------------------------------------------"
 cat /tmp/test-out.log
-echo "------------------------------------------------------------"
-log "bridge log:"; tail -20 "$HOME/.cache/orch-nats-bridge.log" 2>/dev/null || true
 echo "------------------------------------------------------------"
 
 RC=$(cat /tmp/test-rc 2>/dev/null || echo 99)

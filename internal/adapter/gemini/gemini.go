@@ -1,21 +1,19 @@
 // Package gemini bridges the orch-agent-shim to the gemini-cli CLI. It
 // does two things:
 //
-//  1. Watches the orch stop/notify marker files the existing hooks
-//     write (~/.cache/orch-stop/<pane>.event and
-//     ~/.cache/orch-notify/<pane>.notify) and emits typed Synadia chunks:
-//     stop (AfterAgent) → Terminator, notify (Notification) → Query.
+//  1. Watches ~/.cache/orch-stop/<pane>.event and
+//     ~/.cache/orch-notify/<pane>.notify, emitting typed Synadia chunks:
+//     stop → Terminator, notify → Query.
+//
+//     NOTE (orch#94): the production marker-writer hooks were retired.
+//     This loop remains for the test suite and as the substrate for a
+//     future bus-native turn-end detector (follow-up).
 //  2. Injects inbound prompts back into the pane via `tmux send-keys`.
 //
 // AfterAgent quirk. gemini-cli's turn-end event is named "AfterAgent",
-// NOT "Stop". Wiring a hook under "Stop" in ~/.gemini/settings.json
-// silently fails — gemini-cli prints:
-//
-//	⚠ Invalid hook event name: "Stop" from project config. Skipping.
-//
-// The existing gemini-hooks/orch-nats-publish-stop.sh hook is already
-// wired under AfterAgent; this adapter reads the same stop marker those
-// hooks write.
+// NOT "Stop". When per-harness hook writers are reintroduced (if ever),
+// the gemini hook must wire under AfterAgent, not Stop — gemini-cli
+// silently rejects unknown event names.
 //
 // Transcript-path deferral. gemini stores chat logs at
 // ~/.gemini/tmp/<scope>/chats/session-<ts>-<sessionId>.jsonl, but the
@@ -221,20 +219,13 @@ func (a *Adapter) notifyMarker() string {
 }
 
 // markerLoop reacts to fsnotify CREATE / WRITE events on the marker
-// directories.
+// directories. NOTE (orch#94): the production hook writers were retired;
+// in live operation this loop never fires. The loop is preserved for the
+// test suite (which writes markers into a tempdir) and as substrate for
+// a future bus-native turn-end detector.
 //
-// Stop marker (written by orch-nats-publish-stop.sh on AfterAgent):
-//
-//	→ emit Terminator chunk to close the active stream.
-//
-// Notify marker (written by orch-nats-publish-notify.sh on Notification):
-//
-//	→ emit Query chunk. gemini-cli fires a native Notification event,
-//	  so no synthetic detection is needed — the hook writes the marker
-//	  directly.
-//
-// Note: the hook scripts write via tmpfile-then-rename, so a single
-// CREATE event per turn is what we observe (consistent with cc.go).
+// Stop marker → Terminator chunk; Notify marker → Query chunk.
+// Atomic tmpfile-then-rename writes produce one CREATE event per turn.
 func (a *Adapter) markerLoop(ctx context.Context, w *fsnotify.Watcher) {
 	defer w.Close()
 	stopPath := a.stopMarker()

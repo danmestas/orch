@@ -45,36 +45,8 @@ for d in "$ROOT"/skills/*/; do
     link_one "${d%/}" "$HOME/.claude/skills/$name"
 done
 
-# pi extension (auto-discovered from ~/.pi/agent/extensions/)
-# Canonical location: executors/tmux/legacy/pi-extensions/ (pi-extensions/ is a compat symlink)
-if [ -d "$ROOT/executors/tmux/legacy/pi-extensions" ]; then
-    for f in "$ROOT"/executors/tmux/legacy/pi-extensions/*; do
-        [ -f "$f" ] || continue
-        link_one "$f" "$HOME/.pi/agent/extensions/$(basename "$f")"
-    done
-fi
-
-# codex hooks (referenced from user's ~/.codex/hooks.json — see
-# codex-hooks-snippet.json for the JSON fragment to merge there)
-# Canonical location: executors/tmux/legacy/codex-hooks/ (codex-hooks/ is a compat symlink)
-if [ -d "$ROOT/executors/tmux/legacy/codex-hooks" ]; then
-    for f in "$ROOT"/executors/tmux/legacy/codex-hooks/*; do
-        [ -f "$f" ] || continue
-        link_one "$f" "$HOME/.codex/hooks/$(basename "$f")"
-        chmod +x "$f"
-    done
-fi
-
-# gemini hooks (referenced from user's ~/.gemini/settings.json — see
-# gemini-settings-snippet.json for the JSON fragment to merge there)
-# Canonical location: executors/tmux/legacy/gemini-hooks/ (gemini-hooks/ is a compat symlink)
-if [ -d "$ROOT/executors/tmux/legacy/gemini-hooks" ]; then
-    for f in "$ROOT"/executors/tmux/legacy/gemini-hooks/*; do
-        [ -f "$f" ] || continue
-        link_one "$f" "$HOME/.gemini/hooks/$(basename "$f")"
-        chmod +x "$f"
-    done
-fi
+# Per-harness hook scripts (codex/gemini/pi) were retired in orch#94 — the
+# Synadia Agent Protocol path via orch-agent-shim is now the only path.
 
 # fleet doctrine — copy (not symlink — agents read it once at spawn so we
 # want a stable file, not one that disappears if the repo is moved).
@@ -157,14 +129,12 @@ Done.
 Manual step remaining:
   1. Merge settings-snippet.json into ~/.claude/settings.json under the
      existing "hooks" object. Preserve any hooks that are already there.
-     For NATS-bridge fan-out on other harnesses, also merge:
-       - codex-hooks-snippet.json    → ~/.codex/hooks.json
-       - gemini-settings-snippet.json → ~/.gemini/settings.json
-     Pi extensions are auto-discovered — no merge needed.
+     (As of orch#94 the legacy marker + NATS-publish hooks are retired;
+     the only entry in the snippet is orch-goal-session-context.sh.)
   2. Install runtime dependencies:
        $DEPS_HINT
-     (tmux is the runtime substrate; fswatch is used by orch-listen;
-     jq by the hook scripts and registry tooling.)
+     (tmux is the runtime substrate; jq is used by hook scripts and
+     registry tooling.)
 
 Verify by spawning a tmux pane like:
 

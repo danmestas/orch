@@ -1,9 +1,18 @@
 ---
-status: accepted
+status: accepted (mechanism amended 2026-05-16 per #94)
 date: 2026-05-09
 ---
 
-# Observers are a meta-class, default-excluded from `orch-listen`
+# Observers are a meta-class, default-excluded from event subscribers
+
+> **Amendment (orch#94, 2026-05-16):** `orch-listen` was retired. The
+> observer-exclusion role is preserved — it now lives in the shim's
+> `metadata.role` on `$SRV.INFO.agents`, and bus subscribers filter
+> observers themselves (`nats sub` consumers should drop messages whose
+> source pane carries `metadata.role == "observer"` unless they
+> explicitly want them). The decision in this ADR still stands; the
+> implementation locus moved from a fswatch-listener CLI to bus-side
+> subscriber filters.
 
 Spawned panes are tagged with a `role` in the registry — `worker` (default) or `observer`. `orch-listen` default-excludes observers; only explicit `--include-observers` surfaces their Stop events. `orch-tell` refuses worker→observer messaging unless `--force` is passed. The operator (no `ORCH_PANE_ID` set) can redirect anyone. We took this shape because observers exist to *watch*, not to *do work* — they are a third class alongside operator and worker. The amplification-loop incident on 2026-05-09 (a stasi spy's monitor woke the operator's listener every turn, oscillating) was the proof that treating spies as plain workers is wrong: an event-equivalence bug made observable as a feedback oscillation.
 

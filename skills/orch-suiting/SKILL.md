@@ -5,10 +5,9 @@ description: Use BEFORE running orch-spawn when the operator describes a worker 
 
 # orch-suiting
 
-> **Note — primitives changing:** Spawn-side mechanics (`orch-spawn`, `suit prepare`) are stable.
-> The post-spawn driver primitives (`orch-tell`, `orch-listen`) are superseded by the Synadia
-> Agent Protocol — use the Synadia path exclusively. See the `migrating-to-synadia` skill for the
-> translation table. This skill body will be updated once #58 and #59 close.
+> **As of orch#94 (2026-05-16):** post-spawn driver primitives go through
+> the Synadia Agent Protocol bus. Spawn-side mechanics (`orch-spawn`,
+> `suit prepare`) are unchanged.
 
 Translate operator intent into a `suit` configuration before spawning a worker. Operator describes a role; you pick the outfit + cut + accessories.
 
@@ -88,7 +87,8 @@ After spawn returns the pane id:
 
 ```sh
 orch-tell <pane> "<initial brief — what you want the worker to do>"
-orch-listen --exclude-self &     # if you want push-notifications on Stop
+# For push-notifications on agent events, subscribe to the Synadia bus:
+nats sub --raw 'agents.>' &
 ```
 
 ## Quirks to know

@@ -27,9 +27,8 @@
 # Output contract: stdout is exactly one line — the new spy's pane id.
 # Diagnostics on stderr. --quiet silences both.
 #
-# Observer role: spy is auto-tagged role=observer by orch-spawn (A1), so
-# orch-listen default-excludes it. No --exclude needed in the operator's
-# listener.
+# Observer role: spy is auto-tagged role=observer by orch-spawn (A1). Bus
+# subscribers can filter the spy out by checking metadata.role.
 set -euo pipefail
 
 usage() {
@@ -194,10 +193,11 @@ BRIEF=$(cat <<EOT
 You are a stasi/wait-watch observer spawned via orch-spy.
 
 You are role=observer on \$SRV.INFO.agents (the Synadia Agent Protocol
-service registry). The operator's \`orch-listen\` default-excludes you,
-so your Stop events do not wake the operator's listener. Workers cannot
-tell you (worker→observer is refused unless --force). You report to the
-operator via \`orch-tell\`; you do not redirect the target.
+service registry). Bus subscribers (including the operator) filter
+observers out by metadata.role, so your events do not wake the
+operator's default subscriber. Workers cannot tell you (worker→observer
+is refused unless --force). You report to the operator via
+\`orch-tell\`; you do not redirect the target.
 
 == Mission ==
 $MISSION

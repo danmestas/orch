@@ -42,7 +42,6 @@ function sweepDir(srcDir, dstDir) {
 
 sweepDir(path.join(ROOT, "hooks"),  path.join(HOME, ".claude", "hooks"));
 sweepDir(path.join(ROOT, "skills"), path.join(HOME, ".claude", "skills"));
-sweepDir(path.join(ROOT, "pi-extensions"), path.join(HOME, ".pi", "agent", "extensions"));
 
 // Fleet prompt is a copy, not a symlink — we leave it in place. Operator deletes
 // manually if they want it gone:

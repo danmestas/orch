@@ -7,11 +7,11 @@ real users get it), and verifies the core stack:
 - `orch-*` binaries on PATH after install
 - `suit` lists outfits (after cloning the public [`wardrobe`](https://github.com/danmestas/wardrobe) repo into suit's content path)
 - `orch-spawn` creates a tmux pane
-- Pane is registered in `~/.cache/orch-registry/`
-- **Inbound NATS comms**: `nats pub orch.tell` → bridge → worker stdin
-- **Outbound NATS comms**: Stop hook fires → `orch.stop.<num>` published
-- **Broadcast fan-out**: empty-pane publish reaches multiple workers
 - `suit prepare` produces a bundle dir
+- Synadia §12 adapter contract (T9/T10/T11, opt-in via `--with-shim`)
+
+Legacy bridge / fs-marker coverage (T4–T7) was retired in orch#94 along
+with the bridge daemon and per-harness publish hooks.
 
 The tests use a mock `claude` shell script (`inside-container/mock-agents/claude`)
 that simulates the real harness — prints the expected banner, reads stdin,
@@ -87,7 +87,7 @@ MOCK_USE_SHIM=1 ./test/docker/run-tests.sh
 | **T11** | Heartbeat cadence — `agents.hb.cc.<owner>.<pane>` receives ≥2 beats in 6 s with valid §8.3 payload fields (`agent`, `owner`, `instance_id`, `ts`, `interval_s`) |
 
 CI runs T9/T10/T11 automatically on PRs touching
-`cmd/orch-agent-shim/`, `executors/`, or `hooks/orch-nats-publish-*.sh`
+`cmd/orch-agent-shim/`, `executors/`, or `internal/adapter/`
 (see `.github/workflows/ci.yml` job `adapter-contract`).
 
 ## Adding tests

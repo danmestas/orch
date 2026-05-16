@@ -226,39 +226,9 @@ fi
 sesh_down_in /tmp/g3-leaf1 s1
 sesh_down_in /tmp/g3-leaf2 s2
 
-# Pattern: orchestrator-driven multi-builder (orch.tell from operator
-# reaches workers via the bridge subscribed to the sesh hub).
-log "T3.2: orch.tell via sesh-hosted NATS → workers (using bare-bridge mode)"
-# We re-use the bare-substrate flow from test/docker — the point here is
-# to verify that pointing the bridge at the SESH leaf works exactly the
-# same as pointing it at bare nats-server. If the leaf supports the
-# bridge's pub/sub semantics, this passes.
-sesh_up_in /tmp/g3-orch s1 || true
-if [ -n "$SESH_NATS_URL" ]; then
-    NATS_URL="$SESH_NATS_URL" orch-nats-bridge-in --background >/tmp/bridge-pid 2>&1
-    BRIDGE_PID=$(cat /tmp/bridge-pid)
-    sleep 1
-    if kill -0 "$BRIDGE_PID" 2>/dev/null; then
-        PANE=$(orch-spawn claude --cwd /tmp/g3-orch --headless --verify 2>&1 | tail -1)
-        sleep 1
-        TOK="orchsesh-$(date +%s)"
-        nats --server="$SESH_NATS_URL" pub orch.tell \
-            "$(jq -nc --arg p "$PANE" --arg t "$TOK" '{pane:$p,prompt:$t}')" >/dev/null 2>&1
-        sleep 2
-        if tmux capture-pane -p -J -t "$PANE" | grep -q "$TOK"; then
-            assert "orch.tell through sesh leaf → worker received" "yes" "yes"
-        else
-            assert "orch.tell through sesh leaf → worker received" "yes" "no"
-        fi
-        kill "$BRIDGE_PID" 2>/dev/null || true
-        tmux kill-pane -t "$PANE" 2>/dev/null || true
-    else
-        skip "T3.2" "bridge died at start against sesh leaf"
-    fi
-else
-    skip "T3.2" "no sesh leaf available"
-fi
-sesh_down_in /tmp/g3-orch s1
+# T3.2 (orchestrator-driven multi-builder via the legacy bridge) retired in
+# #94. Bus-side multi-builder coverage now lives in Group 7 (Synadia §12
+# adapter contract against the sesh leaf).
 
 # ============================================================
 # GROUP 4 — JetStream durability & replay
@@ -363,67 +333,11 @@ else
     skip "T5.4" "sesh up failed"
 fi
 
-# ============================================================
-# GROUP 6 — Subject namespacing & orch bridge over sesh
-# ============================================================
-log "=== Group 6: Subject namespacing + bridge ==="
-
-log "T6.1: ORCH_NATS_SUBJECT_PREFIX scopes published subject"
-PROJ=/tmp/g6-prefix
-if sesh_up_in "$PROJ" sp; then
-    export ORCH_NATS_SUBJECT_PREFIX="sesh.test.orch"
-    timeout 4 nats --server="$SESH_NATS_URL" sub --count=1 "sesh.test.orch.tell" >/tmp/prefix.cap 2>&1 &
-    SUB=$!
-    sleep 0.5
-    nats --server="$SESH_NATS_URL" pub "${ORCH_NATS_SUBJECT_PREFIX}.tell" '{"pane":"%99","prompt":"prefix"}' >/dev/null 2>&1
-    sleep 2
-    kill $SUB 2>/dev/null || true
-    if grep -q "prefix" /tmp/prefix.cap; then
-        assert "publish under custom prefix received" "yes" "yes"
-    else
-        assert "publish under custom prefix received" "yes" "no"
-    fi
-    unset ORCH_NATS_SUBJECT_PREFIX
-    sesh_down_in "$PROJ" sp
-else
-    skip "T6.1" "sesh up failed"
-fi
-
-log "T6.2: outbound stop hook publishes orch.stop.<num> via sesh leaf"
-PROJ=/tmp/g6-stop
-if sesh_up_in "$PROJ" sg; then
-    NATS_URL="$SESH_NATS_URL" orch-nats-bridge-in --background >/tmp/bridge2.pid 2>&1
-    BRIDGE=$(cat /tmp/bridge2.pid)
-    sleep 1
-    if kill -0 "$BRIDGE" 2>/dev/null; then
-        PANE=$(NATS_URL="$SESH_NATS_URL" orch-spawn claude --cwd "$PROJ" --headless --verify 2>&1 | tail -1)
-        PANE_NUM="${PANE#%}"
-        sleep 1
-        timeout 4 nats --server="$SESH_NATS_URL" sub --raw --count=1 "orch.stop.${PANE_NUM}" >/tmp/stop6.cap 2>&1 &
-        SUB=$!
-        sleep 0.5
-        # Trigger via inbound pub
-        nats --server="$SESH_NATS_URL" pub orch.tell "$(jq -nc --arg p "$PANE" --arg t "trigger" '{pane:$p,prompt:$t}')" >/dev/null 2>&1
-        for _ in $(seq 1 10); do [ -s /tmp/stop6.cap ] && break; sleep 0.5; done
-        kill $SUB 2>/dev/null || true
-        if grep -q '"event":"stop"' /tmp/stop6.cap; then
-            assert "stop hook published to sesh leaf" "yes" "yes"
-        else
-            assert "stop hook published to sesh leaf" "yes" "no"
-        fi
-        kill "$BRIDGE" 2>/dev/null || true
-        tmux kill-pane -t "$PANE" 2>/dev/null || true
-    else
-        skip "T6.2" "bridge failed to start against sesh leaf"
-    fi
-    sesh_down_in "$PROJ" sg
-else
-    skip "T6.2" "sesh up failed"
-fi
-
-log "T6.3: inbound orch.tell dispatches via sesh-hosted bridge"
-# This is covered by T3.2 — call it out as the canonical test.
-log "  (covered by T3.2 — orch.tell via sesh leaf)"
+# GROUP 6 — Legacy bridge subject namespacing (retired in #94)
+# T6.1 / T6.2 / T6.3 exercised the legacy orch.tell + orch.stop.<num>
+# bridge subjects. Those subjects no longer exist (subscriber daemon
+# and per-harness publish hooks were deleted). Synadia subject coverage
+# (agents.prompt.>, agents.hb.>, $SRV.INFO.agents) now lives in Group 7.
 
 # ============================================================
 # GROUP 7 — Synadia Agent Protocol primitives (the shim)

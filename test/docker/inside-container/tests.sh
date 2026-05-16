@@ -35,7 +35,7 @@ skip() {
 
 # ---------- Test 1: orch-* bins on PATH ----------
 log "=== T1: orch-* binaries on PATH ==="
-for bin in orch orch-spawn orch-tell orch-listen orch-nats-bridge-in orch-claim-operator orch-version; do
+for bin in orch orch-spawn orch-tell orch-ask orch-peek orch-claim-operator orch-version; do
     if command -v "$bin" >/dev/null 2>&1; then
         assert "$bin on PATH" "found" "found"
     else
@@ -75,64 +75,9 @@ else
     assert "pane $PANE exists in tmux" "yes" "no"
 fi
 
-# ---------- Test 4: pane registered in ~/.cache/orch-registry/ ----------
-log "=== T4: pane registry entry ==="
-if [ -n "$PANE" ] && [ -f "$HOME/.cache/orch-registry/${PANE}.json" ]; then
-    role=$(jq -r '.role // ""' "$HOME/.cache/orch-registry/${PANE}.json")
-    assert "registry entry exists for $PANE with role=worker" "worker" "$role"
-else
-    assert "registry entry exists for $PANE" "yes" "no"
-fi
-
-# ---------- Test 5: inbound — nats pub orch.tell → mock receives ----------
-log "=== T5: inbound NATS bridge → worker ==="
-TOKEN="inbound-$(date +%s)-$$"
-nats pub orch.tell "$(jq -nc --arg p "$PANE" --arg t "$TOKEN" '{pane:$p, prompt:$t}')" >/dev/null 2>&1
-sleep 2
-if tmux capture-pane -p -J -t "$PANE" -S -100 | grep -q "received: $TOKEN"; then
-    assert "mock worker received bridge-dispatched prompt" "yes" "yes"
-else
-    assert "mock worker received bridge-dispatched prompt" "yes" "no"
-fi
-
-# ---------- Test 6: outbound — Stop hook publishes orch.stop.<num> ----------
-log "=== T6: outbound NATS Stop publish ==="
-PANE_NUM="${PANE#%}"
-# Start a sub in background that captures one orch.stop.<num> message
-nats sub --raw "orch.stop.${PANE_NUM}" --count=1 > /tmp/stop.cap 2>&1 &
-SUB=$!
-sleep 0.5
-# Trigger another turn (which fires hooks via the mock)
-TOKEN2="trigger-stop-$(date +%s)"
-nats pub orch.tell "$(jq -nc --arg p "$PANE" --arg t "$TOKEN2" '{pane:$p, prompt:$t}')" >/dev/null 2>&1
-# Wait up to 5s for the sub to capture
-for _ in $(seq 1 10); do
-    [ -s /tmp/stop.cap ] && break
-    sleep 0.5
-done
-kill $SUB 2>/dev/null || true
-if grep -q '"event":"stop"' /tmp/stop.cap; then
-    assert "orch.stop.${PANE_NUM} published" "yes" "yes"
-else
-    assert "orch.stop.${PANE_NUM} published" "yes" "no"
-fi
-
-# ---------- Test 7: broadcast fan-out reaches >1 worker ----------
-log "=== T7: broadcast fan-out ==="
-PANE2=$(orch-spawn claude --cwd /tmp --headless --verify 2>/dev/null | tail -1)
-sleep 1
-BROADCAST_TOKEN="bcast-$(date +%s)"
-nats pub orch.tell "$(jq -nc --arg t "$BROADCAST_TOKEN" '{prompt:$t}')" >/dev/null 2>&1
-sleep 2
-HITS=0
-for p in "$PANE" "$PANE2"; do
-    tmux capture-pane -p -J -t "$p" -S -100 | grep -q "received: $BROADCAST_TOKEN" && HITS=$((HITS+1))
-done
-if [ "$HITS" -ge 2 ]; then
-    assert "broadcast reached both panes" "2" "$HITS"
-else
-    assert "broadcast reached both panes" "2" "$HITS"
-fi
+# T4-T7 (registry entry / NATS bridge inbound / outbound stop publish /
+# broadcast fan-out) retired in #94 along with the legacy bridge daemon.
+# Bus-side coverage now lives in T9-T11 (Synadia §12 adapter contract).
 
 # ---------- Test 8: suit prepare builds a bundle ----------
 log "=== T8: suit prepare ==="

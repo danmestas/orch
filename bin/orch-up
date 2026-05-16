@@ -3,9 +3,9 @@
 #
 # Idempotent. Safe to re-run any time. Does what `npm install -g @agent-ops/orch`
 # can't do on its own:
-#   1. Verifies runtime deps (tmux, fswatch, jq) and reports missing
+#   1. Verifies runtime deps (tmux, jq) and reports missing
 #   2. Runs the postinstall symlink farm (in case --ignore-scripts was used)
-#   3. Merges hook registrations into ~/.claude/settings.json (with backup)
+#   3. Merges the SessionStart hook entry into ~/.claude/settings.json (with backup)
 #
 # What it does NOT do:
 #   - Install the npm package itself (that's `npm install -g @agent-ops/orch`)
@@ -45,7 +45,7 @@ say
 # ───────────────────────────────────────────────────────────────────
 say "[1/3] checking runtime deps"
 missing=()
-for cmd in tmux fswatch jq; do
+for cmd in tmux jq; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         missing+=("$cmd")
     fi
@@ -67,13 +67,13 @@ if [ ${#missing[@]} -gt 0 ]; then
     warn "re-run 'orch up' once deps are installed"
     exit 2
 fi
-say "  ok: tmux, fswatch, jq all present"
+say "  ok: tmux, jq all present"
 say
 
 # ───────────────────────────────────────────────────────────────────
 # 2. Symlink farm (idempotent — postinstall handles this; here as fallback)
 # ───────────────────────────────────────────────────────────────────
-say "[2/3] symlinking hooks + skills + pi-extensions into Claude Code tree"
+say "[2/3] symlinking hooks + skills into Claude Code tree"
 if [ $DRY_RUN -eq 1 ]; then
     say "  would run: node $PKG_ROOT/scripts/postinstall.js"
 elif [ -f "$PKG_ROOT/scripts/postinstall.js" ]; then
@@ -104,11 +104,11 @@ fi
 
 mkdir -p "$HOME/.claude"
 
-# The settings.json hook shape:
-#   { "hooks": { "Stop": [{"hooks": [...]}], "Notification": [{"hooks": [...]}] } }
-# We want to add orch's stop + notify entries to the existing arrays, but only
-# if not already present (detect by command-string containing "orch-stop-marker"
-# or "orch-notify-marker").
+# Post orch#94, the snippet ships a single SessionStart entry for the still-live
+# orch-goal-session-context.sh hook. Stop/Notification wiring is retired — the
+# Synadia Agent Protocol path via orch-agent-shim handles those events. We merge
+# the SessionStart hook idempotently (detect duplicates by hook basename in the
+# command string).
 
 # Strip the _INSTRUCTIONS comment from snippet before merging.
 SNIPPET_CLEAN=$(jq 'del(._INSTRUCTIONS)' "$SNIPPET")
@@ -116,17 +116,15 @@ SNIPPET_CLEAN=$(jq 'del(._INSTRUCTIONS)' "$SNIPPET")
 # Expand $HOME in the snippet command strings — Claude Code doesn't expand vars.
 SNIPPET_CLEAN=$(echo "$SNIPPET_CLEAN" | sed "s|\\\$HOME|$HOME|g")
 
-merge_hooks() {
-    # Args: existing settings JSON (string), event name (Stop / Notification).
+merge_hook_for_event() {
+    # Args: existing settings JSON (string), event name (e.g. SessionStart).
     # Returns merged settings on stdout. Detects orch's hook by extracting the
-    # `orch-<name>-marker` token from the snippet's own command string for this
-    # event, so the lookup tracks the real filename instead of guessing from
-    # the lowercased event name (which silently fails for Notification, where
-    # the file is orch-notify-marker.sh — not orch-notification-marker).
+    # hook basename (e.g. orch-goal-session-context.sh) from the snippet's own
+    # command string for this event.
     local existing=$1 event=$2 mark
     mark=$(echo "$SNIPPET_CLEAN" | jq -r --arg ev "$event" '.hooks[$ev][0].hooks[0].command' \
-        | grep -oE 'orch-[a-z]+-marker' | head -1)
-    [ -n "$mark" ] || { warn "could not derive marker name for event $event from snippet"; return 1; }
+        | grep -oE 'orch-[a-zA-Z0-9-]+\.sh' | head -1)
+    [ -n "$mark" ] || { warn "could not derive hook name for event $event from snippet"; return 1; }
 
     local already_present
     already_present=$(echo "$existing" | jq -r --arg ev "$event" --arg mark "$mark" \
@@ -155,7 +153,7 @@ merge_hooks() {
 }
 
 if [ $DRY_RUN -eq 1 ]; then
-    say "  would merge orch-stop-marker + orch-notify-marker into $SETTINGS"
+    say "  would merge orch-goal-session-context.sh (SessionStart) into $SETTINGS"
 else
     if [ -f "$SETTINGS" ]; then
         BACKUP="$SETTINGS.orch-bak.$(date +%Y%m%d-%H%M%S)"
@@ -167,11 +165,8 @@ else
         existing='{}'
     fi
 
-    # Merge Stop then Notification, sequentially.
-    after_stop=$(merge_hooks "$existing" Stop)
-    after_notify=$(merge_hooks "$after_stop" Notification)
-
-    echo "$after_notify" | jq '.' > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+    merged=$(merge_hook_for_event "$existing" SessionStart)
+    echo "$merged" | jq '.' > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
 fi
 say
 

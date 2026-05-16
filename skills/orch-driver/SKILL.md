@@ -5,31 +5,32 @@ description: Drive interactive AI agent CLIs (claude, pi, codex, gemini) already
 
 # orch-driver
 
-> **Note — primitives changing:** `orch-tell`, `orch-listen`, `orch-peek`, and the local registry
-> are superseded by the Synadia Agent Protocol. Use the Synadia path exclusively; see the
-> `migrating-to-synadia` skill for the translation table. This skill body will be updated once
-> #58 and #59 close.
+> **As of orch#94 (2026-05-16):** the legacy fs-marker IPC and the orch
+> NATS comms bridge are retired. The Synadia Agent Protocol via
+> `orch-agent-shim` is the only wire. Event-listening goes through the
+> NATS bus (`nats sub 'agents.>'`); pane discovery goes through
+> `$SRV.INFO.agents`. See `migrating-to-synadia` for the translation
+> table and the bus-side recipes.
 
-Drive interactive AI agents in adjacent tmux panes from a parent Claude Code session, and react to their lifecycle events without polling.
+Drive interactive AI agents in adjacent tmux panes from a parent Claude Code session, and react to their lifecycle events without polling — over the Synadia Agent Protocol bus.
 
 ## Tools (all in `~/.local/bin`)
 
 | command | what it does |
 |---|---|
-| `orch-tell <pane> <prompt>` | inject a prompt into the pane's input box and submit it |
-| `orch-wait <pane>` | block until the pane's screen is stable (works for any TUI) |
-| `orch-ask <pane> <prompt>` | tell + wait + return only the agent's new reply |
-| `orch-listen [timeout] [--include-notify] [--exclude <pane[,pane]>] [--exclude-self]` | block on the next Stop event from ANY hook-wired pane. The orchestrator's "always on ear." Default: Stop only; opt in to Notification with `--include-notify`. `--exclude-self` filters events from the calling pane (use when the orchestrator's own Stop hook fires would otherwise wake the listener every turn). |
-| `orch-peek [<pane>...] [--json] [--since <duration>] [--all]` | peek live workers from the registry — shows pane id, agent/outfit, role, activity bucket (ACTIVE/recent/idle), event count, last assistant text, last tool. `--json`, `--since <duration>`, `--all` flags. Useful as a periodic status report (e.g. via `/loop 5m orch-peek`). |
-| `orch-spy <target> <mission>` | one-shot spy spawn: target is `operator` or `%pane_id`. Spawns claude `--outfit stasi --cut wait-watch` (auto-tagged role=observer by A1, default-excluded from `orch-listen`), builds the standard brief envelope (target jsonl + harness state pointers), sends it via `orch-tell`. Returns spy's pane id on stdout. `--mission-file <path>`, `--dry-run-brief` (preview the envelope without spawning), `--quiet`, `--headed` flags. |
-| `orch-version [--json] [--quiet]` | drift detection between the project repo and the live install — surveys every binary, hook, and skill; reports per-item state (match/drift/missing). Symlink-aware (recognizes the symlink-farm install pattern). Exit 0 sync, 1 drift, 2 hard error. |
-| `orch-subscribe <peer> [<peer>...]` / `--list` / `--unsub <peer>` / `--cancel` | give a worker pane push-notifications when listed peers fire Stop. Spawns a per-(self,peer) daemon that fwatches markers and injects `[peer event]` prompts via `orch-tell`. Mutual subscriptions are refused at setup (would cascade). |
-| `orch-register <pane> <agent> <cwd> [session_id]` | record pane metadata to `~/.cache/orch-registry/<pane>.json` for restart recovery |
-| `orch-spawn <agent> [--cwd p] [--project n] [--headless] [--no-fleet] [--outfit X] [--cut Y] [--accessory A]...` | unified worker spawn. Defaults to headed (in current window); `--headless` puts it in the detached `orch-headless` tmux session — agent runs identically, just not visible. Auto-registers. With `--outfit` (claude only for now), runs `suit prepare` to generate an isolated config bundle in a tempdir, makes the bundle the worker's cwd, and adds the project as a workspace dir — gives per-worker outfit isolation even when multiple workers share the same project. Bundle auto-removed via wrap-shell `trap` when the pane dies. |
+| `orch-tell <pane> <prompt>` | publish a prompt to `agents.prompt.<token>.<owner>.<pane-enc>`; the shim delivers it into the pane's input box and submits it. `--collect` streams response chunks until the terminator. |
+| `orch-wait <pane>` | block until the pane's screen is stable (works for any TUI; capture-pane based) |
+| `orch-ask <pane> <prompt>` | tell + collect: returns the agent's full reply via the shim's chunk stream |
+| `orch-peek [<pane>...] [--json] [--since <duration>] [--all]` | live agent surface from `$SRV.INFO.agents` — pane id, agent/outfit, role, last-heartbeat, recent events. `--json`, `--since <duration>`, `--all` flags. Useful as a periodic status report (e.g. via `/loop 5m orch-peek`). |
+| `orch-spy <target> <mission>` | one-shot spy spawn: target is `operator` or `%pane_id`. Spawns claude `--outfit stasi --cut wait-watch` (auto-tagged `role=observer`; bus subscribers filter observers by `metadata.role`), builds the standard brief envelope (target jsonl + harness state pointers), sends it via `orch-tell`. `--mission-file <path>`, `--dry-run-brief`, `--quiet`, `--headed`. |
+| `orch-version [--json] [--quiet]` | drift detection between the project repo and the live install — surveys every binary, hook, and skill; reports per-item state (match/drift/missing). Symlink-aware. Exit 0 sync, 1 drift, 2 hard error. |
+| `orch-spawn <agent> [--cwd p] [--project n] [--headless] [--no-fleet] [--outfit X] [--cut Y] [--accessory A]...` | unified worker spawn. Defaults to headed (in current window); `--headless` puts it in the detached `orch-headless` tmux session — agent runs identically, just not visible. Auto-launches `orch-agent-shim` alongside the pane so it appears on the bus. With `--outfit` (claude only for now), runs `suit prepare` to generate an isolated config bundle. |
 | `orch-show <pane>` | promote a headless pane into the orchestrator's window (`tmux join-pane`) |
 | `orch-hide <pane>` | demote a headed pane back to the detached `orch-headless` session (`tmux break-pane`) |
-| `orch-relayout [orch_pane] [--orch-width N] [--cols N]` | rebuild a precise custom layout (orch full-height left + N-col agent grid right) using a hand-built layout string + checksum. Use after pane drift. |
+| `orch-relayout [orch_pane] [--orch-width N] [--cols N]` | rebuild a precise custom layout (orch full-height left + N-col agent grid right). |
 | `orch-tell --list` | list all tmux panes for picking targets |
+
+**Retired in #94:** `orch-listen` (use `nats sub 'agents.>'` with a Monitor wrapper instead), `orch-subscribe` (the worker-side push-notification daemon — no replacement; subscribe to the bus directly), `orch-register` (registration is automatic via the shim's `$SRV.INFO.agents` advertisement; the legacy `orch-register` stub still exists and no-ops), `orch-current-jsonl` (resolved via the shim's metadata.transcript_path).
 
 Aliases optional, in `~/.config/orch-aliases` (`name=%pane_id` per line). Pane ids change on every recycle.
 
@@ -47,9 +48,9 @@ cd ~/projects/foo && claude          # plain — no ORCH_PANE_ID exported
 
 That gives you the right asymmetry for free: workers are visible in the registry and emit Stop markers; the operator isn't and doesn't. No `--orchestrator` flag, no role enforcement layer, no filter logic — the env-var distinction *is* the role.
 
-A1 added a third class: **observers** (stasi spies, wait-watch / spy-on-* cuts) — workers in the registry, but tagged `role: "observer"`. `orch-listen` default-excludes them; `orch-tell` refuses worker→observer unless `--force`. Observers exist to watch the operator; the operator can redirect them, workers cannot. Spawn an observer via `orch-spy <target> <mission>` (auto-tags) or explicitly via `orch-spawn ... --role observer`.
+A1 added a third class: **observers** (stasi spies, wait-watch / spy-on-* cuts) — workers tagged `role: "observer"`. The shim publishes that role in its `$SRV.INFO.agents` metadata; bus subscribers filter observers by `metadata.role`. `orch-tell` refuses worker→observer unless `--force`. Observers exist to watch the operator; the operator can redirect them, workers cannot. Spawn an observer via `orch-spy <target> <mission>` (auto-tags) or explicitly via `orch-spawn ... --role observer`.
 
-If an operator session was accidentally started through `orch-spawn` (the wrapper exports `ORCH_PANE_ID` unconditionally, baking it into the live process), it's stuck firing self-Stops and self-registering until restart. `orch-listen --exclude-self` filters the noise on the listener side; the durable fix is to start the next operator session plainly.
+If an operator session was accidentally started through `orch-spawn` (the wrapper exports `ORCH_PANE_ID` unconditionally, baking it into the live process), it's stuck firing self-events forever. The durable fix is to start the next operator session plainly. Bus subscribers can filter their own pane id out of `agents.>` subscriptions when they need to ignore self-fires.
 
 If you're the operator, run `orch-claim-operator` once at session start. That writes `~/.cache/orch-operator.json` with your pane id + transcript JSONL path, so other harness tools (`orch-peek`, `orch-spy`, observer skills) can find your session without prompting.
 
@@ -57,27 +58,24 @@ If you're the operator, run `orch-claim-operator` once at session start. That wr
 
 If you're orchestrating, you should NOT only listen when you've explicitly launched something for a specific event. Workers can be driven by the user too (manual chat, hand-edits) and you'd miss that activity.
 
-**Recommended pattern: `orch-listen --stream` wrapped in a Monitor.** Self-rearming, one push notification per event. Arm once at session start; covers the whole session.
+**Recommended pattern: `nats sub 'agents.>'` wrapped in a Monitor.** Self-rearming, one push notification per event. Arm once at session start; covers the whole session.
 
 ```python
 Monitor(
-    command="orch-listen --stream",
-    description="harness events",
+    command="nats sub 'agents.>' --raw",
+    description="harness events on the Synadia bus",
     persistent=True,
 )
-# parent does other work; each event lands as a push notification with
-# one JSON line: {"event_file":..., "pane_id":..., "ext":..., "kv":{...}}
+# parent does other work; each event lands as a push notification with the
+# raw chunk body (JSON: {type:'response'|'status'|'query'|'thinking', data:...})
 ```
 
-**Legacy bg-bash one-shot pattern** (kept for back-compat): re-arm immediately after each fire, or you go deaf. Most-violated rule in the harness — prefer `--stream` + Monitor.
+To narrow scope, subscribe to a specific subject family:
+- `agents.hb.>` — heartbeats only (liveness signal)
+- `agents.events.cc.<owner>.>` — only claude-code events for this owner
+- `agents.events.>.<owner>.pct<N>` — only events from pane `%<N>`
 
-```python
-while orchestrating:
-    Bash("orch-listen 3600", run_in_background=True)
-    # parent processes event, then immediately re-launches the listener
-```
-
-Distinguishing "I sent the prompt" vs "user typed something": cross-check the event's `pane_id` against your own send-log (your recent orch-tell calls). If you didn't send to that pane recently, that's user activity.
+Distinguishing "I sent the prompt" vs "user typed something": cross-check the event's pane against your own recent `orch-tell` calls (`~/.cache/orch-send.log`). If you didn't send to that pane recently, that's user activity.
 
 ## Choosing the right wait primitive
 
@@ -108,7 +106,7 @@ For release flows specifically (build → publish → install → verify), see t
 
 ## Reporting watch state honestly
 
-"Standing by", "I'll be watching", "monitoring for…" claims a concrete vigilance posture. Only say it when something is *actually* keeping watch right now — an armed `orch-listen`, an active Monitor stream, a scheduled cron, a live `/loop` iteration. Without one, the conversation just pauses until the operator speaks again; that's stopping, not standing by.
+"Standing by", "I'll be watching", "monitoring for…" claims a concrete vigilance posture. Only say it when something is *actually* keeping watch right now — an active Monitor on `nats sub 'agents.>'`, a scheduled cron, a live `/loop` iteration. Without one, the conversation just pauses until the operator speaks again; that's stopping, not standing by.
 
 **Why**: claiming vigilance you don't have misrepresents posture. It undermines trust in everything else you claim about state.
 
@@ -122,14 +120,14 @@ When the parent will send prompts via `orch-tell`, each agent's spawn command ne
 
 One table for everything you need per agent — permission flag, hook config, resume mechanism, session storage. Match each row to your spawn recipe.
 
-| Agent | Yolo flag | Hook config | Hook quirks | Resume | Session dir |
-|---|---|---|---|---|---|
-| **claude** | `--dangerously-skip-permissions` (or `--permission-mode bypassPermissions`; or `--allowed-tools "Read,Glob,Grep,Bash"`) | `~/.claude/settings.json` `hooks.{Stop,Notification}` | works out of the box | `--resume <id>` / `--continue` | `~/.claude/projects/<cwd-encoded>/<session>.jsonl` |
-| **codex** | `--dangerously-bypass-approvals-and-sandbox` (or `--ask-for-approval never --sandbox <mode>`) | `~/.codex/hooks.json` `hooks.Stop` (claude format) | **`/hooks` review-and-approve gate** — codex won't run new/changed hooks until you `/hooks` in the REPL and approve, even with bypass flag | `codex resume <id>` | `~/.codex/sessions/...` |
-| **gemini** | `-y` / `--yolo` (or `--approval-mode yolo`) | `~/.gemini/settings.json` `hooks` (claude format accepted) | `gemini hooks migrate --from-claude` is for *project-local* `.claude/` → `.gemini/`, NOT global config — edit `~/.gemini/settings.json` directly | (project-scoped history, no flag) | `~/.gemini/history/` |
-| **pi** | n/a — no gating by default; `--no-tools` / `--tools <allowlist>` only RESTRICT | `~/.pi/agent/extensions/orch-stop-marker.ts` (TypeScript extension subscribes to `pi.on("agent_end", ...)` and writes the same marker format as the bash hooks) | extension auto-discovered on pi startup; same `ORCH_PANE_ID` env-var contract as the other agents | `--resume <id>` / `--continue` | `~/.pi/agent/sessions/<session>.jsonl` |
+| Agent | Yolo flag | Bus integration | Resume | Session dir |
+|---|---|---|---|---|
+| **claude** | `--dangerously-skip-permissions` (or `--permission-mode bypassPermissions`; or `--allowed-tools "Read,Glob,Grep,Bash"`) | shim's `claudecode` adapter tails the transcript JSONL + detects turn-end | `--resume <id>` / `--continue` | `~/.claude/projects/<cwd-encoded>/<session>.jsonl` |
+| **codex** | `--dangerously-bypass-approvals-and-sandbox` (or `--ask-for-approval never --sandbox <mode>`) | shim's `codex` adapter tails rollouts + uses idle-heuristic for turn-end | `codex resume <id>` | `~/.codex/sessions/...` |
+| **gemini** | `-y` / `--yolo` (or `--approval-mode yolo`) | shim's `gemini` adapter watches per-session events; transcript emission deferred | (project-scoped history, no flag) | `~/.gemini/history/` |
+| **pi** | n/a — no gating by default; `--no-tools` / `--tools <allowlist>` only RESTRICT | shim's `pi` adapter tails `~/.pi/agent/sessions/...` | `--resume <id>` / `--continue` | `~/.pi/agent/sessions/<session>.jsonl` |
 
-The hook scripts (`orch-stop-marker.sh`, `orch-notify-marker.sh`) are agent-agnostic — they read `$ORCH_PANE_ID` from the env and write the marker file. Same scripts work for any agent once that agent's hook config points at them.
+All per-agent eventing lives inside `orch-agent-shim` and the adapters under `internal/adapter/<harness>/`. The shim is auto-launched by `orch-spawn` alongside every pane.
 
 ### ORCH_PANE_ID env var (CC only)
 
@@ -163,7 +161,7 @@ Workers spawned with the standard recipe get a system-prompt addendum (`~/.cache
 - Its own pane id (`$ORCH_PANE_ID`)
 - How to enumerate peers via `~/.cache/orch-registry/<pane>.json`
 - How to send messages to peers via `orch-tell`
-- How to wait for peer activity via `orch-listen`
+- How to wait for peer activity via `nats sub 'agents.>'` on the Synadia bus
 
 **Per-agent injection mechanism** (all four wired):
 
@@ -244,70 +242,55 @@ result=$(orch-ask %30 "summarize this project" --stable 3 --interval 1)
 
 Captures pre-snapshot, sends, waits for stability, captures post-snapshot, prints only content past the LAST occurrence of the pre-snapshot's last non-empty line. Use the LAST occurrence — first match catches repeating footer lines and dumps the entire scrollback.
 
-## Event-driven path
+## Event-driven path (Synadia bus)
 
-Each agent's hook fires on `Stop` (turn complete) and `Notification` (attention needed). The two tiny no-op-unless-tagged hook scripts (`~/.claude/hooks/orch-{stop,notify}-marker.sh`) read `$ORCH_PANE_ID` from env and write a marker file at `~/.cache/orch-stop/<pane_id>.<event>`. If `ORCH_PANE_ID` is unset the hook exits immediately — so installing globally is safe; only opted-in panes write markers.
+Per-pane events are emitted by `orch-agent-shim` on the NATS bus. The shim
+runs as a sibling process to each spawned agent and:
 
-`orch-listen` watches that one directory via `fswatch -1` (kqueue on macOS — `brew install fswatch`) and wakes the parent regardless of which agent fired.
+- Tails the agent's transcript / session JSONL → emits typed chunks
+  (`{type:"response",...}`, `{type:"thinking",...}`, `{type:"tool_use",...}`)
+  on `agents.events.<harness>.<owner>.<pane-enc>`.
+- Detects turn-end via the per-harness adapter and emits a status chunk
+  (`{type:"status",data:"ack"}` / terminator).
+- Publishes liveness heartbeats on `agents.hb.<harness>.<owner>.<pane-enc>`
+  at a fixed cadence.
+- Advertises pane metadata via `$SRV.INFO.agents` (NATS micro-service
+  discovery).
 
-| Marker file | When written | Used by `orch-listen` default? |
-|---|---|---|
-| `<pane>.event` | Stop fires (turn complete) | yes |
-| `<pane>.notify` | Notification fires (permission prompt, idle warning) | no — opt in with `--include-notify` |
+| Subject family | Carries |
+|---|---|
+| `agents.prompt.>` | inbound prompts from `orch-tell` / `nats request` |
+| `agents.events.>` | outbound typed chunks (response, thinking, tool_use, etc.) |
+| `agents.status.>` | turn-end / ack / terminator |
+| `agents.hb.>` | heartbeats (§8.3 of Synadia spec) |
+| `$SRV.INFO.agents` | NATS micro-service discovery — pane metadata |
 
-See the per-agent matrix above for which agents have hooks wired (claude ✓, codex ✓ pending `/hooks` approval, gemini configured but unverified, pi unsolved).
-
-The "Always be listening" and "Choosing the right wait primitive" sections above govern *how* you arm the listener and *which* primitive holds the wait — read those first; the subsections below are the mechanics.
-
-### Bg-bash + auto-notification = real push to the parent
-
-Claude Code's harness fires a notification when a `Bash(run_in_background=true)` exits. Compose:
-
-```python
-Bash(command="orch-listen 3600", run_in_background=True)
-# When the agent finishes, fswatch wakes, bash exits, parent gets a notification.
-# Parent does NOT poll — it does other work and is woken on event arrival.
-```
-
-Measured end-to-end: hook fire → parent notification ≈ 1-3 seconds (dominated by harness internals; fswatch + bash-exit is sub-100ms).
+The "Always be listening" and "Choosing the right wait primitive" sections above govern *how* you arm the bus subscription and *which* primitive holds the wait.
 
 ### The permission-prompt gap
 
 If a CC pane hits a permission prompt mid-turn:
 
-- Stop does **not** fire (turn isn't complete).
-- Notification **does** fire with a `message` field describing what's being requested.
+- The turn-end status chunk does **not** fire (turn isn't complete).
+- A query chunk is emitted instead (`{type:"query","data":{"message":"..."}}`).
 
-A watcher only listening for Stop will hang forever. **Always set `--dangerously-skip-permissions` on the spawn command** unless you have a specific reason to want the prompts. If you DO want to handle them in-flight, the pattern is:
-
-1. Launch parallel watchers — one for Stop, one for Notification.
-2. Whichever fires first wakes the parent.
-3. On Notification: read `message`, decide approve/reject, `tmux send-keys -t <pane> Enter` (option 1 "Yes" is highlighted by default, so Enter accepts), re-arm the Notification watcher.
-4. Loop until Stop fires.
-
-This is a state machine; bg-bash-per-event-of-interest is the unit of reaction.
+A subscriber only waiting for turn-end will hang forever. **Always set `--dangerously-skip-permissions` on the spawn command** unless you have a specific reason to want the prompts. If you DO want to handle them in-flight, watch `agents.events.>` for `type:"query"` chunks and respond by sending an Enter via `tmux send-keys -t <pane> Enter` (option 1 "Yes" is highlighted by default, so Enter accepts).
 
 ## Peer subscriptions (worker-side push)
 
-`orch-listen` is for the orchestrator — it returns when a peer's Stop fires. Workers (other claude/pi/codex/gemini panes) can get the same push behavior via `orch-subscribe`, which spawns a per-(self,peer) daemon that fwatches the marker dir and injects a `[peer event]` prompt into the calling pane on each fire.
+Workers (other claude/pi/codex/gemini panes) that need to react to peer activity should subscribe directly to the bus from inside their own wrap shell. The legacy `orch-subscribe` daemon (which fwatched the marker dir and injected `[peer event]` prompts) was retired in #94 along with the markers.
+
+A simple worker-side recipe (run inside the worker pane at startup):
 
 ```sh
-# inside a worker pane (ORCH_PANE_ID set by orch-spawn):
-orch-subscribe %59 %60         # subscribe to two peers' Stops
-orch-subscribe --list          # show what we're subscribed to
-orch-subscribe --unsub %59     # drop one
-orch-subscribe --cancel        # drop all
+# Subscribe to a specific peer's events; pipe through orch-tell to self.
+nats sub --raw "agents.events.>.${OWNER}.pct${PEER_PANE_NUM}" \
+  | while IFS= read -r chunk; do
+        orch-tell "$ORCH_PANE_ID" "[peer event] $chunk"
+    done &
 ```
 
-The injected prompt looks like `[peer event] %59 fired Stop at <iso> (cwd=...) — read-only context, do not auto-reply unless instructed.` The fleet doctrine (`~/.cache/orch-fleet-prompt.md`) tells workers to treat these as notifications, not conversation — but doctrine alone can't suppress the *turn* the agent runs on receipt, only the verbosity of its response.
-
-**Mutual subscriptions are refused at setup.** If A subs to B and you try to sub B to A, the second subscribe returns exit 2 with a "mutual subscriptions cause cascade loops" error. Empirically verified: with two real claudes mutually subscribed and a single trigger prompt, the cascade hits ~12 events in 45s. The refusal is the only Ousterhout-shaped fix that doesn't require hook surgery — bidirectional coordination should go through the orchestrator instead.
-
-Internals worth knowing:
-- Daemon dedups on the `ts_ns` field inside the marker file (not mtime) — a shell `> file` redirect can produce multiple kernel events per logical write, but the producer hook stamps exactly one `ts_ns`.
-- Daemon exits when the calling pane disappears (cheap `tmux list-panes` check on each fswatch wake) or on TERM signal (which is what `--cancel` sends).
-- Pidfiles at `~/.cache/orch-subs/<self>.<peer>.pid`. Subscriptions are in-memory only — restart of the worker = re-subscribe.
-- Test suites: `~/projects/orch/test/test-orch-subscribe.sh` (fast, 18 assertions) and `test-orch-subscribe-real.sh` (slow, real-claude E2E, 7 assertions).
+Cross-cascade hazard: a worker that injects peer events into itself and then *responds* will trigger more events on its own subject — easy to make a feedback loop. Filter the subject pattern carefully (don't subscribe to your own pane's events) and consider rate-limiting the injection (e.g. one `orch-tell` per N seconds per peer).
 
 ## Broadcast pattern
 
@@ -323,9 +306,8 @@ done
 Each bg bash:
 1. Captures pre-snapshot for the diff
 2. Records `T_SEND_NS` (nanoseconds)
-3. Calls `orch-tell`
-4. Waits via `orch-listen` (CC) or `orch-wait` (non-CC)
-5. Records `T_SETTLED_NS`, `T_BASH_END_NS`
+3. Calls `orch-tell --collect` (so the bus's terminator chunk signals turn-end), or `orch-tell` + `orch-wait` for non-shim panes
+4. Records `T_SETTLED_NS`, `T_BASH_END_NS`
 6. Prints structured report:
 
 ```
@@ -364,8 +346,7 @@ Trade-off: transcript format is internal CC and may change between versions; we'
 - **`pane_current_path` lags** — only updates on shell prompt redraw (OSC 7). Don't conclude "cd failed" from it during a foreground task.
 - **Default permission-dialog option is "1. Yes"** highlighted. Pressing Enter accepts. Convenient for auto-approve, but pressing Enter in an UN-blocked pane just submits an empty prompt — make sure the pane is actually showing a permission prompt before sending Enter.
 - **Bg bash that runs forever doesn't push** — parent wakes on bash EXIT, not on bash output lines. Every event-of-interest needs to be its own short-lived bash that exits on the trigger.
-- **fswatch on Mac** — `brew install fswatch`. No inotify on macOS.
-- **The Stop hook fires for the parent CC too** if no gating. Our scripts gate on `ORCH_PANE_ID`; the parent doesn't have it set, so it no-ops. Don't remove the gate. **Edge case:** if the operator session was accidentally started through `orch-spawn`, it inherits `ORCH_PANE_ID` and starts emitting self-Stops — see "Operator vs worker sessions" above. Workaround: `orch-listen --exclude-self`. Durable fix: launch operator sessions plainly (not via `orch-spawn`).
+- **Operator session self-events** — the parent CC has no `ORCH_PANE_ID` and no shim attached, so it does NOT publish to `agents.>`. If the operator session was accidentally started through `orch-spawn`, it inherits a shim and starts emitting self-events. Durable fix: launch operator sessions plainly (not via `orch-spawn`). Workaround: filter the operator pane out of your bus subscription pattern.
 
 ## Layout heuristics
 
@@ -373,7 +354,7 @@ Each broadcast has a different number of agents, so don't rely on a fixed "alway
 
 ## Headed vs headless workers
 
-A worker pane runs identically whether it's visible in the orchestrator's window (headed) or running in a detached tmux session (headless). Tmux provides the TTY either way; hooks, `orch-tell`, `orch-listen`, and `capture-pane` all work the same.
+A worker pane runs identically whether it's visible in the orchestrator's window (headed) or running in a detached tmux session (headless). Tmux provides the TTY either way; the shim, `orch-tell`, bus subscriptions, and `capture-pane` all work the same.
 
 **Headed** — default; the worker is a pane in your visible orchestrator window. Useful when you want eyes on the conversation.
 
@@ -397,41 +378,31 @@ orch-hide "$PANE"
 
 ## Persistence layer (survives parent CC restart)
 
-The parent CC's in-memory state (send log, listener, knowledge of which pane is which) dies when the parent dies. Workers keep running in tmux. To recover cleanly on restart, every relevant signal is also written to disk:
+The parent CC's in-memory state (send log, knowledge of which pane is which) dies when the parent dies. Workers keep running in tmux and their shims keep advertising on the bus. To recover cleanly on restart:
 
-| File | Format | Purpose | Updated by |
-|---|---|---|---|
-| `~/.cache/orch-stop/<pane>.event` | key=value | latest Stop fired (overwritten) | Stop hook |
-| `~/.cache/orch-stop/<pane>.notify` | key=value | latest Notification fired (overwritten) | Notification hook |
-| `~/.cache/orch-stop/events.log` | JSONL **append-only** | full history of every Stop and Notification across all panes | Stop + Notification hooks |
-| `~/.cache/orch-send.log` | JSONL append-only | every `orch-tell` call (pane, sender, prompt preview, ts_ns) | `orch-tell` |
-| `~/.cache/orch-registry/<pane>.json` | JSON | pane → agent → cwd → session_id → spawn_ts_ns → last_seen_ts_ns | `orch-register` (eager) + Stop hook (lazy refresh) |
+| Source | Format | Purpose |
+|---|---|---|
+| `$SRV.INFO.agents` (NATS micro-service) | JSON | live pane → agent → role → metadata for every shim-attached pane |
+| `agents.events.>` / `agents.hb.>` (NATS subjects) | JSON chunks | event stream — durable replay requires a JetStream consumer on these subjects |
+| `~/.cache/orch-send.log` | JSONL append-only | every `orch-tell` call (pane, sender, prompt preview, ts_ns) |
+| `~/.cache/orch-operator.json` | JSON | operator's pane id + transcript JSONL path (written by `orch-claim-operator`) |
 
 ### Recovering on restart
 
 ```bash
-# 1. What workers do I know about?
-ls ~/.cache/orch-registry/
+# 1. What workers are live right now?
+nats req '$SRV.INFO.agents' '' --replies=0 --timeout=2s \
+  | jq -s '.[].metadata | {pane_id, agent, role, owner}'
 
-# 2. What happened while I was away? Replay events since some checkpoint.
-LAST_TS_NS=...   # whatever timestamp you last processed
-jq -c "select(.ts_ns > $LAST_TS_NS)" ~/.cache/orch-stop/events.log
+# 2. What events happened while I was away?
+# If you set up a JetStream consumer on agents.events.>, replay from the
+# durable-consumer cursor. Otherwise, this is bus-live-only — you can't
+# recover missed events without JetStream durability.
 
 # 3. Of those events, which were ME (orchestrator-driven) vs USER?
-# Match each event against send-log for the same pane in a small time window before.
+# Match each event's pane against ~/.cache/orch-send.log in a small time
+# window before the event.
 ```
-
-### Registering a worker at spawn
-
-Hooked agents (claude, codex) register themselves lazily — first Stop event refreshes their registry entry. **Non-hooked agents (pi, and gemini until proven otherwise)** need explicit registration:
-
-```bash
-orch-register <pane_id> <agent> <cwd> [session_id]
-# e.g.
-orch-register %44 pi ~/projects/example
-```
-
-Add this call to the spawn recipe for non-hooked agents.
 
 ## When NOT to use this skill
 
