@@ -20,3 +20,7 @@ The env-var distinction (`ORCH_PANE_ID` set ⇒ worker) *is* the role assignment
 ## Surface area
 
 `orch-claim-operator` writes the record. `orch-peek` reads it to prepend an operator row to its survey. `orch-spy` reads it to resolve `target=operator` to a pane id and transcript path. The file format is small: `{pane_id, claimed_at_ts_ns, transcript_jsonl, cwd}`.
+
+## Migration note (2026-05-16 — issue #60)
+
+`orch-claim-operator` has been retired to a no-op stub. The operator-pane identity is now established by setting `ORCH_ROLE=operator` in the operator's shell before starting a session; `orch-agent-shim` then registers the pane with `metadata.role=="operator"` on `$SRV.INFO.agents`. Discovery consumers filter by `metadata.role == "operator"` — no separate claim file is needed. `~/.cache/orch-operator.json` is no longer written. The "separate file" option in "Considered options" above is superseded by this; the single-source-of-truth property of `$SRV.INFO.agents` removes the need for the asymmetric bridge.

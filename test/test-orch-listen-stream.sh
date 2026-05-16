@@ -46,18 +46,52 @@ assert_contains() {
 }
 
 LISTEN=$(command -v orch-listen)
-REGBIN=$(command -v orch-register)
-[ -x "$LISTEN" ] && [ -x "$REGBIN" ] || { echo "harness binaries missing on PATH"; exit 2; }
+[ -x "$LISTEN" ] || { echo "orch-listen missing on PATH"; exit 2; }
 
 SANDBOX=$(mktemp -d)
-export ORCH_REGISTRY_DIR="$SANDBOX/registry"
 export ORCH_STOP_DIR="$SANDBOX/stop"
-mkdir -p "$ORCH_REGISTRY_DIR" "$ORCH_STOP_DIR"
+mkdir -p "$ORCH_STOP_DIR"
 trap 'rm -rf "$SANDBOX"' EXIT
 
-# Pre-register two panes: %900 worker, %901 observer.
-"$REGBIN" %900 pi /tmp --role worker >/dev/null
-"$REGBIN" %901 claude /tmp --role observer >/dev/null
+# ── Synthetic $SRV.INFO.agents service ───────────────────────────────────────
+#
+# orch-listen's is_observer() shells out to `nats req '$SRV.INFO.agents'` to
+# resolve roles. After issue #60, that's the only place roles live — no more
+# ~/.cache/orch-registry. To exercise the observer-default-exclude path in a
+# unit test (without spinning up a real nats-server), we put a shell-script
+# stub named `nats` on PATH that returns canned replies in the exact wire
+# format the real CLI emits.
+#
+# Fixtures: %900=worker, %901=observer.
+NATS_STUB_DIR="$SANDBOX/bin"
+mkdir -p "$NATS_STUB_DIR"
+cat > "$NATS_STUB_DIR/nats" <<'STUB'
+#!/usr/bin/env bash
+# Synthetic `nats` for test-orch-listen-stream. Recognises the one shape
+# orch-listen calls: `nats req '$SRV.INFO.agents' '' --replies=0 ...`.
+# Emits two JSON reply bodies (one per fixture pane), one per line, framed
+# with "Received on ..." headers like the real CLI.
+verb=""
+for arg in "$@"; do
+    case "$arg" in
+        req) verb=req ;;
+    esac
+done
+if [ "$verb" = "req" ]; then
+    printf 'Received on "$SRV.INFO.agents.fake1"\n'
+    printf '{"metadata":{"pane_id":"%%900","role":"worker"}}\n'
+    printf 'Received on "$SRV.INFO.agents.fake2"\n'
+    printf '{"metadata":{"pane_id":"%%901","role":"observer"}}\n'
+    exit 0
+fi
+# Any other invocation: no-op, succeed silently.
+exit 0
+STUB
+chmod +x "$NATS_STUB_DIR/nats"
+export PATH="$NATS_STUB_DIR:$PATH"
+export NATS_URL="nats://stub.invalid:4222"
+# Tighter discovery timeout — the stub returns instantly, no need to wait.
+export ORCH_LISTEN_DISCOVERY_TIMEOUT="0.5s"
 
 write_marker() {
     local pane=$1

@@ -21,3 +21,7 @@ The role tag is persisted in registry JSON; auto-detection lives in `orch-spawn`
 - Workers cannot redirect observers (worker→observer is refused). Observers report up to the operator via `orch-tell`; operator can tell observers freely.
 - New outfits auto-detected as observer must be added to the role-map (currently inline in `orch-spawn`'s case statement, future: `~/.config/harness/role-map.json` per ADR-0001).
 - The `--exclude` and `--exclude-self` flags on `orch-listen` are now narrower fixes; the role tag handles the common case structurally.
+
+## Migration note (2026-05-16 — issue #60)
+
+`~/.cache/orch-registry/<pane>.json` was the prior storage for the role tag. As of this migration, `orch-listen`'s `is_observer()` function queries `$SRV.INFO.agents` (NATS micro-service discovery) instead of reading registry JSON. The shim populates `metadata.role` at registration time from `$ORCH_ROLE`; `orch-spawn` sets that env var in the shim's process env from the resolved `$ROLE` before launch. Semantics are identical: `metadata.role == "observer"` ⇒ excluded by default. When NATS is unavailable the function falls back to treating the pane as a worker (include), matching the pre-migration behavior for unregistered panes.
