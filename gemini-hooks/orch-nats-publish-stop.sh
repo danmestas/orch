@@ -5,10 +5,16 @@
 # Subject: orch.stop.<pane_num>     (pane id "%37" becomes "37")
 # Body:    JSON  {event, harness, pane_id, session_id, cwd, ts_ns, ts_iso}
 #
-# Wire this into ~/.gemini/settings.json under hooks.Stop[].hooks[]. Gemini's
-# hook system is nascent (as of mid-2026) — only Stop is confirmed; equivalent
-# SessionStart-JSONL and Notification publishers are deferred until those event
-# semantics are documented and stable in gemini-cli.
+# Wire this into ~/.gemini/settings.json under hooks.AfterAgent[].hooks[] —
+# gemini-cli's turn-end event is "AfterAgent", NOT "Stop" (claude's name).
+# Using "Stop" in gemini settings.json is silently rejected with a console
+# warning: `⚠ Invalid hook event name: "Stop" from project config. Skipping.`
+# Verified against gemini-cli v0.42.0 HookEventName enum + `gemini hooks
+# migrate` mapping (Stop → AfterAgent).
+#
+# Companion Notification publisher (orch-nats-publish-notify.sh) wires under
+# the same-named "Notification" event. SessionStart-JSONL is deferred —
+# gemini's transcript path encoding varies by project context.
 #
 # Payload shape on stdin is inferred to match claude-code's convention (JSON
 # with at least `session_id`). If gemini ships a divergent shape, this hook
