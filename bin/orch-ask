@@ -1,37 +1,46 @@
 #!/usr/bin/env bash
-# orch-ask — send a prompt to a tmux pane, wait for the agent to settle,
-# return only the new content the agent emitted (stdout).
+# orch-ask — send a prompt to an agent, collect and return response chunks.
+#
+# This is a thin wrapper around `orch-tell --collect`. It delegates discovery,
+# NATS publish, and chunk streaming to orch-tell. The legacy tmux-snapshot
+# approach is still available via --legacy.
 #
 # Usage:
 #   orch-ask <pane_id|alias> <prompt words...>
 #   orch-ask <pane_id|alias> -                      # prompt from stdin
-#   orch-ask <pane_id|alias> --stable N --timeout S <prompt...>
+#   orch-ask <pane_id|alias> --timeout N <prompt...> # inactivity timeout (s)
+#   orch-ask <pane_id|alias> --legacy <prompt...>   # legacy tmux-snapshot mode
 #
-# Stdout: just the new chunk of pane history that appeared after we sent the
-# prompt. Use this for scripting agent calls — pipe into a file, jq, whatever.
-#
-# Stderr: status lines ("sent", "settled after Ns") unless --quiet.
+# Stdout: concatenated response chunk content from the agent.
+# Stderr: status lines unless --quiet.
 #
 # Exit codes:
-#   0  prompt sent and pane settled
-#   1  bad usage / pane missing
-#   2  timeout reached
+#   0  prompt sent and response collected
+#   1  bad usage / pane missing / agent error (5xx)
+#   2  agent error 400
+#   3  agent error 401-403
+#   4  agent error 404
+#   5  agent error 409
+#   6  agent error 429
 set -euo pipefail
 
 ALIAS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/orch-aliases"
-STABLE_NEEDED=5
-TIMEOUT=600
-INTERVAL=2
+TIMEOUT=30
 QUIET=0
-SCROLLBACK_DEPTH=4000   # rows to capture from history each side; bump for very long replies
+LEGACY=0
+
+# Legacy-mode settings (used only when --legacy is passed)
+STABLE_NEEDED=5
+INTERVAL=2
+SCROLLBACK_DEPTH=4000
 
 die() { printf 'orch-ask: %s\n' "$*" >&2; exit 1; }
 
-[ "$#" -ge 2 ] || die "usage: orch-ask <pane_id|alias> <prompt> [--stable N] [--timeout S] [--quiet]"
+[ "$#" -ge 2 ] || die "usage: orch-ask <pane_id|alias> <prompt> [--timeout N] [--quiet] [--legacy [--stable N] [--interval N]]"
 
 target=$1; shift
 
-# Parse flags before / after the prompt — flags can come anywhere
+# Parse flags — flags can come anywhere after the target.
 prompt_args=()
 while [ "$#" -gt 0 ]; do
     case $1 in
@@ -39,6 +48,7 @@ while [ "$#" -gt 0 ]; do
         --interval) INTERVAL=$2; shift 2 ;;
         --timeout)  TIMEOUT=$2; shift 2 ;;
         --quiet)    QUIET=1; shift ;;
+        --legacy)   LEGACY=1; shift ;;
         *)          prompt_args+=("$1"); shift ;;
     esac
 done
@@ -53,34 +63,41 @@ case $target in
         ;;
 esac
 
-tmux list-panes -a -F '#{pane_id}' | grep -qx "$pane" \
-    || die "pane $pane does not exist"
-
 if [ "$1" = "-" ]; then
     prompt=$(cat)
 else
     prompt="$*"
 fi
 
+# ── Discovery path (default) ──────────────────────────────────────────────────
+if [ "$LEGACY" -eq 0 ]; then
+    [ "$QUIET" = 1 ] || printf 'orch-ask: sending to %s via NATS\n' "$pane" >&2
+    exec orch-tell --collect --timeout "$TIMEOUT" "$pane" "$prompt"
+fi
+
+# ── Legacy path: tmux capture-pane snapshot diff ─────────────────────────────
+tmux list-panes -a -F '#{pane_id}' | grep -qx "$pane" \
+    || die "pane $pane does not exist"
+
 # Snapshot scrollback BEFORE sending. We'll diff against it after.
 before=$(mktemp -t orch-ask-before.XXXXXX)
+after=$(mktemp -t orch-ask-after.XXXXXX)
 trap 'rm -f "$before" "$after" 2>/dev/null' EXIT
 tmux capture-pane -t "$pane" -pS "-${SCROLLBACK_DEPTH}" > "$before"
 
-[ "$QUIET" = 1 ] || printf 'orch-ask: sending to %s\n' "$pane" >&2
-orch-tell "$pane" "$prompt"
+[ "$QUIET" = 1 ] || printf 'orch-ask: sending to %s (legacy)\n' "$pane" >&2
+orch-tell --legacy-keystrokes "$pane" "$prompt"
 [ "$QUIET" = 1 ] || printf 'orch-ask: sent at %s\n' "$(date +%H:%M:%S)" >&2
 
-# Brief settle so the prompt-echo and "thinking..." indicator land before we start
-# sampling for stability.
+# Brief settle so the prompt-echo and "thinking..." indicator land before we
+# start sampling for stability.
 sleep 3
 
 quiet_arg=()
 [ "$QUIET" = 1 ] && quiet_arg+=(--quiet)
+rc=0
 orch-wait "$pane" --stable "$STABLE_NEEDED" --interval "$INTERVAL" --timeout "$TIMEOUT" "${quiet_arg[@]}" 1>&2 || rc=$?
-rc=${rc:-0}
 
-after=$(mktemp -t orch-ask-after.XXXXXX)
 tmux capture-pane -t "$pane" -pS "-${SCROLLBACK_DEPTH}" > "$after"
 
 # The "new content" is everything in the after-snapshot that came after where
