@@ -7,6 +7,8 @@
 #   ./test/docker/run-tests.sh                # build + run
 #   ./test/docker/run-tests.sh --no-build     # re-use existing image
 #   ./test/docker/run-tests.sh --shell        # drop into shell after entry
+#   ./test/docker/run-tests.sh --with-bench   # also run latency benchmark
+#                                             # (opt-in; adds ~2 min)
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -15,10 +17,12 @@ IMAGE_TAG="orch-docker-tests:local"
 
 BUILD=1
 SHELL_MODE=0
+WITH_BENCH=0
 for arg in "$@"; do
     case $arg in
-        --no-build) BUILD=0 ;;
-        --shell)    SHELL_MODE=1 ;;
+        --no-build)   BUILD=0 ;;
+        --shell)      SHELL_MODE=1 ;;
+        --with-bench) WITH_BENCH=1 ;;
         --help|-h)
             sed -n '1,/^set -e/p' "$0" | sed '$d' | sed 's|^# *||'
             exit 0 ;;
@@ -49,3 +53,10 @@ fi
 
 echo "[run-tests] docker run"
 docker run --rm "$IMAGE_TAG"
+
+if [ "$WITH_BENCH" -eq 1 ]; then
+    echo "[run-tests] running latency benchmark (--with-bench)"
+    BENCH_ARGS=()
+    [ "$BUILD" -eq 0 ] && BENCH_ARGS+=(--no-build)
+    bash "$ROOT/test/bench/measure.sh" "${BENCH_ARGS[@]}"
+fi

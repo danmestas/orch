@@ -124,6 +124,7 @@ jobs:
       - name: real-harness suite (workflow_dispatch only)
         # These need a live claude/pi/transcript and can't run on a clean Ubuntu runner.
         if: github.event_name == 'workflow_dispatch'
+
         run: |
           set -e
 
@@ -155,3 +156,104 @@ jobs:
 
           cat /tmp/orch-ci-real.log
           test "$(cat /tmp/orch-ci-real.rc)" = "0"
+
+  bench:
+    name: latency benchmark (soft gate)
+    runs-on: ubuntu-latest
+    # Run on PRs that touch the bridge, shim, executors, or hook scripts.
+    # Soft warning only — latency varies on shared runners; never a hard gate.
+    if: |
+      github.event_name == 'pull_request' && (
+        contains(github.event.pull_request.title, '[bench]') ||
+        true
+      )
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+
+      - name: check if bench-relevant files changed
+        id: filter
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || true)
+          if printf '%s\n' "$changed" | grep -qE \
+              '^(bin/orch-nats-bridge-in|cmd/orch-agent-shim/|executors/|hooks/|gemini-hooks/|codex-hooks/)'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: run benchmark + compare to latest baseline
+        if: steps.filter.outputs.relevant == 'true'
+        id: bench
+        run: |
+          set -e
+          # Reduce sample size for CI to keep runtime under 3 min.
+          export BENCH_SAMPLES=20
+          export BENCH_WARMUP=3
+          export BENCH_HB_DURATION=15
+
+          bash test/bench/measure.sh --no-build 2>&1 | tee /tmp/bench-run.log || true
+          RESULT=$(ls -t test/bench/results-*.md 2>/dev/null | head -1)
+
+          BASELINE=$(ls -t test/bench/baselines/baseline-*.md 2>/dev/null | head -1)
+          if [ -n "$BASELINE" ] && [ -n "$RESULT" ]; then
+            COMPARE_OUT=$(bash test/bench/compare.sh "$BASELINE" "$RESULT" 2>&1 || true)
+            echo "$COMPARE_OUT"
+            printf '%s\n' "$COMPARE_OUT" > /tmp/bench-compare.md
+          else
+            echo "No baseline available yet — skipping regression check."
+            printf '(no baseline for comparison)\n' > /tmp/bench-compare.md
+          fi
+
+          # Surface the result file for the comment step.
+          if [ -n "$RESULT" ]; then
+            cat "$RESULT" >> /tmp/bench-compare.md
+          fi
+
+      - name: comment bench diff on PR
+        if: steps.filter.outputs.relevant == 'true' && steps.bench.outcome != 'skipped'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.existsSync('/tmp/bench-compare.md')
+              ? fs.readFileSync('/tmp/bench-compare.md', 'utf8')
+              : '(bench output not found)';
+            const marker = '<!-- orch-bench-comment -->';
+            const fullBody = `${marker}\n\n## Protocol overhead benchmark\n\n${body}\n\n` +
+              `_Soft warning: latency on shared runners varies. Regressions ≥ 20% flagged._`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: fullBody,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: fullBody,
+              });
+            }
