@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# mock gemini binary for orch Docker tests.
+#
+# Goals: print a banner containing "Gemini CLI" (which orch-spawn's
+# BANNER table looks for during --verify), read stdin, echo prompts.
+# The shim's gemini adapter (#73) attaches via the pane.
+set -uo pipefail
+
+cat <<'BANNER'
+╭─── Gemini CLI v0 (mock test harness) ──────────────────────────╮
+│                                                                  │
+│  Mock used by orch's Docker test bench. Reads prompts from      │
+│  stdin and echoes them so the shim's gemini adapter (using      │
+│  AfterAgent event semantics) can be probed.                     │
+│                                                                  │
+╰──────────────────────────────────────────────────────────────────╯
+
+BANNER
+
+trap 'exit 0' TERM INT
+
+echo "> ready"
+
+while IFS= read -r line; do
+    echo "[mock-gemini] received: $line"
+    echo "> ready"
+done
