@@ -76,6 +76,8 @@ Behind the scenes, each worker is a tmux pane running a full agent CLI with an o
 
 You don't drive any of this manually. You describe what you want; orch's installed skill suite handles the spawning, the addressing, the listening, and the escalation surface.
 
+For Synadia Agent Protocol integration (every spawned pane discoverable on a NATS bus, addressable via `agents.prompt.cc.<owner>.pct<pane>`), see [`docs/orch-agent-shim.md`](docs/orch-agent-shim.md) and `orch-spawn --with-shim`.
+
 ## Goal-harness (optional sesh integration)
 
 The goal-harness is orch's reference implementation of the [sesh goal-management spec](https://github.com/danmestas/sesh/blob/main/docs/goal-management.md). It wraps sesh's substrate-side goal records (token + wall-clock budgets, completion audit, hierarchical decomposition) with the harness-side discipline the spec calls out as non-substrate concerns: continuation, token accounting, context injection, completion verification.

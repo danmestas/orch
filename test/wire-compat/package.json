@@ -1,0 +1,14 @@
+{
+  "name": "orch-agent-shim-wire-compat",
+  "private": true,
+  "type": "module",
+  "description": "Wire-compatibility test: drives the orch-agent-shim with the upstream @synadia-ai/agents TS client.",
+  "scripts": {
+    "test": "bun run wire-compat.ts"
+  },
+  "dependencies": {
+    "@nats-io/nats-core": "^3.0.0",
+    "@nats-io/services": "^3.0.0",
+    "@synadia-ai/agents": "^0.3.0"
+  }
+}

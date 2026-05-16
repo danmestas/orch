@@ -26,3 +26,9 @@ node_modules/
 *~
 .idea/
 .vscode/
+
+# Go build artifacts (orch-agent-shim is built via install.sh into ~/.local/bin)
+/orch-agent-shim
+/cmd/orch-agent-shim/orch-agent-shim
+test/wire-compat/node_modules/
+test/wire-compat/bun.lockb
