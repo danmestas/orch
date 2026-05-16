@@ -93,6 +93,34 @@ sesh_full_reset() {
     rm -rf "$HOME/.sesh"
 }
 
+# Spawn an orch worker on the active hub via orch-spawn. Prints the
+# pane id on stdout (empty on failure). The shim needs ~5s to register
+# the agents micro service against the leaf, so callers MUST sleep
+# after spawning before probing $SRV.INFO.agents or sending prompts.
+# Used by Groups 11 + 13-16.
+spawn_worker_on_hub() {
+    local harness=$1 proj=$2
+    local raw p
+    raw=$(NATS_URL="$SESH_NATS_URL" orch-spawn "$harness" --cwd "$proj" --headless 2>&1)
+    # Filter to lines that look like pane IDs (start with %, then digits)
+    # so warnings interleaved into stderr-merged stdout don't break tail -1.
+    p=$(printf '%s\n' "$raw" | grep -E '^%[0-9]+' | tail -1)
+    if [ -z "$p" ]; then
+        log "  spawn_worker_on_hub($harness): no pane id in output; raw=$(printf '%s' "$raw" | tr '\n' '|' | cut -c1-200)"
+        printf ''
+        return 1
+    fi
+    printf '%s' "$p"
+}
+
+# Map harness CLI name → Synadia subject token (per shim's encoding).
+subject_token_for() {
+    case "$1" in
+        claude|claude-code) printf 'cc' ;;
+        *)                  printf '%s' "$1" ;;
+    esac
+}
+
 # ============================================================
 # GROUP 1 — Hub lifecycle
 # ============================================================
@@ -619,15 +647,94 @@ fi
 # ============================================================
 # GROUP 11 — Traceparent header chain (orch shim → sesh consumers)
 # ============================================================
-# Deferred until orch#116 lands the W3C traceparent + Sesh-* envelope
-# headers in the shim's outbound publishes. The bench can flip this
-# SKIP to a real assertion once that PR merges:
-#   - Spawn an orch-agent-shim worker
-#   - nats req --H 'traceparent:00-<id>-<sp>-01' agents.prompt.cc.<owner>.<pane>
-#   - Subscribe to the reply with `-H`; assert the reply chunks carry
-#     the same trace_id portion of traceparent (fresh span_id per hop)
+# Verifies orch#117 (sesh envelope headers) end-to-end at the bench:
+# an inbound traceparent on the prompt request propagates to every
+# reply chunk's W3C traceparent header. Each chunk MUST reuse the
+# trace_id portion and mint a fresh span_id (child-span semantics).
+# Heartbeat publishes also carry envelope headers (with their own
+# fresh traces, since they're not part of any prompt's context).
 log "=== Group 11: Traceparent header chain ==="
-skip "Traceparent header chain" "depends on orch#116 (shim envelope headers); SKIP flips after merge"
+if ! command -v orch-agent-shim >/dev/null 2>&1; then
+    skip "Group 11 — traceparent chain" "orch-agent-shim missing"
+else
+    sesh_full_reset
+    if sesh_up_in /tmp/g11-trace s1; then
+        PANE=$(spawn_worker_on_hub claude /tmp/g11-trace || true)
+        sleep 5  # shim registration
+
+        if [ -z "$PANE" ]; then
+            skip "Group 11 — traceparent chain" "worker spawn failed"
+        else
+            # Inbound traceparent: a known, valid W3C value. The bench
+            # uses 0af7651916cd43dd8448eb211c80319c — the canonical
+            # W3C spec example trace_id, so any divergence in capture
+            # vs assert is obvious.
+            PARENT_TRACE="0af7651916cd43dd8448eb211c80319c"
+            PARENT_TP="00-${PARENT_TRACE}-00f067aa0ba902b7-01"
+            PROMPT_SUBJ="agents.prompt.cc.${USER:-root}.pct${PANE#%}"
+
+            # Send the prompt with -H to inject the inbound traceparent,
+            # and --raw -H on the request capture stream so reply
+            # headers come back. Reply timeout 35s covers the shim's
+            # 30s terminator watchdog (mock claude has no real reply).
+            nats --server="$SESH_NATS_URL" req "$PROMPT_SUBJ" "hi-g11" \
+                -H "traceparent:$PARENT_TP" \
+                --replies=0 --reply-timeout=35s --timeout=45s \
+                > "/tmp/g11.cap" 2>&1 || true
+
+            # Extract every "traceparent: ..." line from the capture
+            # (nats CLI with --headers prints them as "Header: value"
+            # lines per reply, lowercase or mixed-case key).
+            TPS=$(grep -oiE 'traceparent: 00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}' /tmp/g11.cap \
+                | awk '{print $2}' || true)
+            n_chunks=$(printf '%s\n' "$TPS" | grep -c . || echo 0)
+
+            if [ "$n_chunks" = "0" ]; then
+                log "  g11 capture (no traceparent headers found):"
+                sed -n '1,40p' /tmp/g11.cap | sed 's/^/    /'
+                assert "reply chunks carry traceparent header" "present" "absent"
+            else
+                # The mock harness emits no response chunks, so the
+                # captured stream is ack + watchdog-terminator. Only the
+                # ack carries headers (the §6.5 terminator is intentionally
+                # headerless per spec + shim conformance). 1 traceparent
+                # is the correct happy-path count for this bench.
+                assert "reply chunks carry traceparent header" "present" "present"
+
+                # All chunks' trace_id portions MUST equal the inbound.
+                BAD_TRACE=$(printf '%s\n' "$TPS" | awk -F- -v want="$PARENT_TRACE" \
+                    'NF>=4 && $2 != want {print $2}' | head -1)
+                if [ -z "$BAD_TRACE" ]; then
+                    assert "every reply chunk reuses inbound trace_id (child-span propagation)" "yes" "yes"
+                else
+                    assert "every reply chunk reuses inbound trace_id" "$PARENT_TRACE" "got $BAD_TRACE"
+                fi
+
+                # Each chunk's span_id MUST be distinct (fresh per hop).
+                SPANS=$(printf '%s\n' "$TPS" | awk -F- '{print $3}' | sort -u | grep -c . || echo 0)
+                assert "each chunk mints a fresh span_id" "$n_chunks" "$SPANS"
+            fi
+
+            # Heartbeat envelope: capture one beat, assert headers present.
+            # The shim's default interval is 30s; we explicitly subscribe
+            # with --headers and wait up to 35s for the immediate-on-start
+            # heartbeat plus one tick. Heartbeats mint fresh traces, so we
+            # just check presence + Sesh-Envelope:1, not parent propagation.
+            HB=$(timeout 35 nats --server="$SESH_NATS_URL" sub \
+                "agents.hb.cc.${USER:-root}.pct${PANE#%}" \
+                --headers-only --count=1 2>&1 | tail -20)
+            HB_HAS_TP=$(printf '%s' "$HB" | grep -cE 'traceparent: 00-[0-9a-f]{32}' || echo 0)
+            HB_HAS_ENV=$(printf '%s' "$HB" | grep -ciF 'Sesh-Envelope: 1' || echo 0)
+            assert "heartbeat carries traceparent header" "1" "$HB_HAS_TP"
+            assert "heartbeat carries Sesh-Envelope: 1" "1" "$HB_HAS_ENV"
+
+            tmux kill-pane -t "$PANE" 2>/dev/null || true
+        fi
+        sesh_down_in /tmp/g11-trace s1
+    else
+        skip "Group 11 — traceparent chain" "sesh up failed"
+    fi
+fi
 
 # ============================================================
 # GROUP 12 — KV bucket scope isolation
@@ -668,37 +775,6 @@ else
         skip "Group 12 — KV scope isolation" "sesh up failed"
     fi
 fi
-
-# ============================================================
-# Helper for Groups 13-16: spawn an orch worker on the active hub.
-#
-# Returns: prints the pane id on stdout (empty on failure).
-# The shim needs ~5s to register the agents micro service against the
-# hub's leaf, so callers MUST sleep after spawning before probing
-# $SRV.INFO.agents or sending prompts.
-# ============================================================
-spawn_worker_on_hub() {
-    local harness=$1 proj=$2
-    local raw p
-    raw=$(NATS_URL="$SESH_NATS_URL" orch-spawn "$harness" --cwd "$proj" --headless 2>&1)
-    # Filter to lines that look like pane IDs (start with %, then digits)
-    # so warnings interleaved into stderr-merged stdout don't break tail -1.
-    p=$(printf '%s\n' "$raw" | grep -E '^%[0-9]+' | tail -1)
-    if [ -z "$p" ]; then
-        log "  spawn_worker_on_hub($harness): no pane id in output; raw=$(printf '%s' "$raw" | tr '\n' '|' | cut -c1-200)"
-        printf ''
-        return 1
-    fi
-    printf '%s' "$p"
-}
-
-# Map harness CLI name → Synadia subject token (per shim's encoding).
-subject_token_for() {
-    case "$1" in
-        claude|claude-code) printf 'cc' ;;
-        *)                  printf '%s' "$1" ;;
-    esac
-}
 
 # ============================================================
 # GROUP 13 — Multi-worker shared-hub + concurrent CAS pull
