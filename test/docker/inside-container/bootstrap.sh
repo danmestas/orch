@@ -66,10 +66,20 @@ log "bridge alive (PID $BRIDGE_PID)"
 #    one detached and run tests.sh inside its first pane. The pane runs to
 #    completion and writes its exit code to /tmp/test-rc; we poll up to
 #    120s and exit with that code.
+#
+#    When MOCK_USE_SHIM=1, pass SHIM_HB_INTERVAL=2s so T11 can verify
+#    heartbeat cadence within a 6s window.
 log "launching tests in tmux"
 rm -f /tmp/test-rc /tmp/test-out.log
+EXTRA_ENV=""
+if [ "${MOCK_USE_SHIM:-0}" = "1" ]; then
+    export MOCK_USE_SHIM=1
+    export SHIM_HB_INTERVAL=2s
+    EXTRA_ENV="MOCK_USE_SHIM=1 SHIM_HB_INTERVAL=2s"
+    log "MOCK_USE_SHIM=1 — shim-mode enabled; heartbeat interval = 2s"
+fi
 tmux new-session -d -s orch-tests \
-    'bash /usr/local/bin/tests.sh > /tmp/test-out.log 2>&1; echo $? > /tmp/test-rc'
+    "env NATS_URL=nats://localhost:4222 ${EXTRA_ENV} bash /usr/local/bin/tests.sh > /tmp/test-out.log 2>&1; echo \$? > /tmp/test-rc"
 
 deadline=$(( $(date +%s) + 180 ))
 while [ ! -f /tmp/test-rc ]; do

@@ -87,6 +87,24 @@ gaps are documented below.
   exists; full clone-push-propagate behavior across sub-leaves needs more
   setup than the current bench has.
 
+## Synadia adapter contract
+
+The adapter contract tests (T9/T10/T11) live in the sister bench at
+`test/docker/` — run them with `--with-shim`:
+
+```sh
+./test/docker/run-tests.sh --with-shim
+```
+
+| Group | What it tests |
+|-------|---------------|
+| **T9** | `$SRV.INFO.agents` — `metadata.protocol_version: "0.3"` and `metadata.agent: "claude-code"` |
+| **T10** | Typed chunk sequence — ack + ≥1 response + zero-body terminator |
+| **T11** | Heartbeat cadence — ≥2 beats in 6 s with valid §8.3 payload |
+
+CI runs both benches on PRs touching adapter paths (see
+`.github/workflows/ci.yml` job `adapter-contract`).
+
 ## Adding tests
 
 Each test follows this shape:
