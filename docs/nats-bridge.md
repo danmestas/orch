@@ -117,7 +117,7 @@ other harnesses orch supports lives alongside, in per-harness directories:
 | **claude-code** | ✓ | ✓ | ✓ | `hooks/orch-nats-publish-{stop,notify,jsonl}.sh` |
 | **codex** | ✓ | ✓ | ✗ no event | `codex-hooks/orch-nats-publish-{stop,jsonl}.sh` |
 | **pi** | ✓ | ✓ | ✗ no event | `pi-extensions/orch-nats-publish-{stop,jsonl}.ts` |
-| **gemini** | ✓ | ✗ deferred | ✗ deferred | `gemini-hooks/orch-nats-publish-stop.sh` |
+| **gemini** | ✓ (as `AfterAgent`) | ✗ deferred (path encoding) | ✓ | `gemini-hooks/orch-nats-publish-{stop,notify}.sh` |
 
 **Notification gap (codex / pi):** neither harness exposes a mid-turn
 "agent waiting for input" event analogous to claude-code's Notification hook.
@@ -126,10 +126,28 @@ agents finishes a turn, it is by definition idle and waiting. Future work:
 proxy via `UserPromptSubmit` (codex) or extension events (pi) once we map
 their semantics.
 
-**Gemini SessionStart-JSONL deferral:** gemini-cli's hook system is nascent
-(as of mid-2026). Stop is the only event currently confirmed in the wild.
-SessionStart with transcript-path delivery and JSONL streaming are deferred
-until those event hooks land upstream.
+**Gemini event-name pitfall:** gemini-cli's turn-end event is named
+`AfterAgent`, NOT `Stop`. Wiring a hook under `Stop` in `~/.gemini/settings.json`
+silently fails — gemini-cli prints `⚠ Invalid hook event name: "Stop" from
+project config. Skipping.` and continues. The canonical claude→gemini event
+mapping (from gemini-cli v0.42.0 `hooks migrate`) is:
+
+| claude-code | gemini-cli |
+|---|---|
+| `Stop` | `AfterAgent` |
+| `Notification` | `Notification` |
+| `SessionStart` | `SessionStart` |
+| `PreToolUse` | `BeforeTool` |
+| `PostToolUse` | `AfterTool` |
+| `UserPromptSubmit` | `BeforeAgent` |
+| `PreCompact` | `PreCompress` |
+
+`gemini-settings-snippet.json` wires `AfterAgent` and `Notification` directly.
+
+**Gemini SessionStart-JSONL deferral:** gemini-cli supports `SessionStart`
+as an event, but the transcript file path encoding (`~/.gemini/tmp/<scope>/chats/session-<ts>-<sessionId>.jsonl`)
+varies by project context in ways the discovery probe could not normalize.
+Deferred until the path-resolution rule is mapped from gemini-cli source.
 
 **Subject namespace stays uniform across harnesses.** Each publisher emits on
 `orch.{stop,notify,events}.<pane_num>` with a `harness:` field in the body so
