@@ -131,6 +131,17 @@ The same primitives that drive you-in-the-loop work are designed to also run una
 
 Once those land, you drop out of the loop. Orch keeps running, and the substrate is the same artifact whether you're in the loop or not — the difference is who signs each escalation. None of this ships in 0.1.x; today, orch is operator-in-the-loop.
 
+## Upstream protocol contributions
+
+Draft proposals for extending the [Synadia Agent Protocol for NATS](https://github.com/synadia-ai/synadia-agent-sdk-docs) live in [`docs/synadia-upstream/`](./docs/synadia-upstream/). Each file is a self-contained PR draft: it cites the section it amends, shows a BEFORE/AFTER of the relevant table, and includes a worked wire example in Appendix B style.
+
+| Draft | Amends | Topic |
+| --- | --- | --- |
+| [`role-metadata.md`](./docs/synadia-upstream/role-metadata.md) | §3.2 | Optional `metadata.role` — `worker / observer / operator` |
+| [`outfit-metadata.md`](./docs/synadia-upstream/outfit-metadata.md) | §3.2 | Optional `metadata.outfit` + `metadata.outfit_hash` |
+| [`query-attestation.md`](./docs/synadia-upstream/query-attestation.md) | §7 (new §7.4) | External query-chunk attestation for harnesses without a native attention event |
+| [`placement-metadata.md`](./docs/synadia-upstream/placement-metadata.md) | Appendix (new E) | Informative placement metadata — `metadata.executor` + `metadata.host` |
+
 ## License
 
 [Apache License 2.0](./LICENSE).
