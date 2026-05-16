@@ -26,6 +26,7 @@
     "orch-goal-status": "bin/orch-goal-status",
     "orch-hide": "bin/orch-hide",
     "orch-listen": "bin/orch-listen",
+    "orch-nats-bridge-in": "bin/orch-nats-bridge-in",
     "orch-peek": "bin/orch-peek",
     "orch-register": "bin/orch-register",
     "orch-relayout": "bin/orch-relayout",
