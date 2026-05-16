@@ -46,8 +46,9 @@ for d in "$ROOT"/skills/*/; do
 done
 
 # pi extension (auto-discovered from ~/.pi/agent/extensions/)
-if [ -d "$ROOT/pi-extensions" ]; then
-    for f in "$ROOT"/pi-extensions/*; do
+# Canonical location: executors/tmux/legacy/pi-extensions/ (pi-extensions/ is a compat symlink)
+if [ -d "$ROOT/executors/tmux/legacy/pi-extensions" ]; then
+    for f in "$ROOT"/executors/tmux/legacy/pi-extensions/*; do
         [ -f "$f" ] || continue
         link_one "$f" "$HOME/.pi/agent/extensions/$(basename "$f")"
     done
@@ -55,8 +56,9 @@ fi
 
 # codex hooks (referenced from user's ~/.codex/hooks.json — see
 # codex-hooks-snippet.json for the JSON fragment to merge there)
-if [ -d "$ROOT/codex-hooks" ]; then
-    for f in "$ROOT"/codex-hooks/*; do
+# Canonical location: executors/tmux/legacy/codex-hooks/ (codex-hooks/ is a compat symlink)
+if [ -d "$ROOT/executors/tmux/legacy/codex-hooks" ]; then
+    for f in "$ROOT"/executors/tmux/legacy/codex-hooks/*; do
         [ -f "$f" ] || continue
         link_one "$f" "$HOME/.codex/hooks/$(basename "$f")"
         chmod +x "$f"
@@ -65,8 +67,9 @@ fi
 
 # gemini hooks (referenced from user's ~/.gemini/settings.json — see
 # gemini-settings-snippet.json for the JSON fragment to merge there)
-if [ -d "$ROOT/gemini-hooks" ]; then
-    for f in "$ROOT"/gemini-hooks/*; do
+# Canonical location: executors/tmux/legacy/gemini-hooks/ (gemini-hooks/ is a compat symlink)
+if [ -d "$ROOT/executors/tmux/legacy/gemini-hooks" ]; then
+    for f in "$ROOT"/executors/tmux/legacy/gemini-hooks/*; do
         [ -f "$f" ] || continue
         link_one "$f" "$HOME/.gemini/hooks/$(basename "$f")"
         chmod +x "$f"
