@@ -41,18 +41,9 @@ if command -v jq >/dev/null 2>&1; then
         '{ts_ns:$ts_ns, event:$event, pane_id:$pane_id, session_id:$session_id, cwd:$cwd}' >> "$LOG"
 fi
 
-# Lazy registry update — pane meta refreshed on every Stop.
-REG_DIR="${ORCH_REGISTRY_DIR:-$HOME/.cache/orch-registry}"
-mkdir -p "$REG_DIR"
-REG_FILE="$REG_DIR/$ORCH_PANE_ID.json"
-if command -v jq >/dev/null 2>&1; then
-    jq -nc \
-        --arg pane_id "$ORCH_PANE_ID" \
-        --arg cwd "$PWD" \
-        --arg session_id "$SESSION_ID" \
-        --argjson last_stop_ts_ns "$NS" \
-        '{pane_id:$pane_id, cwd:$cwd, session_id:$session_id, last_stop_ts_ns:$last_stop_ts_ns}' \
-        > "$REG_FILE.$$.tmp" && mv -f "$REG_FILE.$$.tmp" "$REG_FILE"
-fi
+# Lazy registry update was removed in issue #60 — pane metadata is now
+# published by orch-agent-shim on $SRV.INFO.agents (Synadia Agent Protocol
+# v0.3 service discovery). This hook only writes the .event marker that
+# wakes the operator's orch-listen; agent registration is the shim's job.
 
 exit 0

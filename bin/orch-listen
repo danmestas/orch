@@ -36,9 +36,11 @@
 # session that fires Stop hooks on every turn — without filtering, the listener
 # wakes on its own events.
 #
-# Observer panes (registry role=="observer", e.g., stasi/wait-watch spies) are
-# excluded by default. Pass --include-observers to include them. Workers
-# (registry role=="worker" or absent) are always included.
+# Observer panes (shim metadata.role=="observer", e.g., stasi/wait-watch spies)
+# are excluded by default. Pass --include-observers to include them. Workers
+# (metadata.role=="worker" or absent) are always included. Role is resolved via
+# $SRV.INFO.agents; falls back to "worker" when NATS is unavailable or the pane
+# has no shim registration.
 #
 # One-shot stdout (single block on success):
 #   EVENT_FILE=<path>
@@ -86,15 +88,48 @@ if [ $STREAM -eq 1 ] && ! command -v jq >/dev/null 2>&1; then
     echo "orch-listen: --stream requires jq" >&2; exit 1
 fi
 
-REG_DIR="${ORCH_REGISTRY_DIR:-$HOME/.cache/orch-registry}"
+# Discovery timeout for $SRV.INFO.agents role lookups (per-pane call).
+# Keep short — this is on the hot event path. Falls back to "worker" on
+# timeout or when NATS / jq are absent.
+_LISTEN_DISC_TIMEOUT="${ORCH_LISTEN_DISCOVERY_TIMEOUT:-0.5s}"
+
+# Cache of already-resolved roles to avoid a NATS round-trip for every
+# event from the same pane during a stream session.
+declare -A _ROLE_CACHE
 
 is_observer() {
     local pane=$1
-    local reg="$REG_DIR/$pane.json"
-    [ -f "$reg" ] || return 1
-    command -v jq >/dev/null 2>&1 || return 1
-    local role
-    role=$(jq -r '.role // "worker"' "$reg" 2>/dev/null || echo worker)
+
+    # Return cached result if we already resolved this pane.
+    if [ -n "${_ROLE_CACHE[$pane]+_}" ]; then
+        [ "${_ROLE_CACHE[$pane]}" = "observer" ]
+        return
+    fi
+
+    # Without nats or jq we cannot resolve; treat as worker (include).
+    if ! command -v nats >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+        _ROLE_CACHE[$pane]="worker"
+        return 1
+    fi
+
+    local raw role
+    # shellcheck disable=SC2016  # $SRV.INFO.agents is a NATS system subject (literal $)
+    raw=$(nats --server="${NATS_URL:-}" req '$SRV.INFO.agents' '' \
+              --replies=0 "--reply-timeout=${_LISTEN_DISC_TIMEOUT}" 2>/dev/null \
+          | grep -v '^Received on\|^---\|^[[:space:]]*$' || true)
+
+    if [ -z "$raw" ]; then
+        # Bus unreachable or no agents registered — treat as worker.
+        _ROLE_CACHE[$pane]="worker"
+        return 1
+    fi
+
+    role=$(printf '%s\n' "$raw" \
+           | jq -r --arg p "$pane" \
+               'select(.metadata.pane_id == $p) | .metadata.role // "worker"' \
+               2>/dev/null | head -1)
+    role="${role:-worker}"
+    _ROLE_CACHE[$pane]="$role"
     [ "$role" = "observer" ]
 }
 

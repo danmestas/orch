@@ -2,32 +2,32 @@
 # orch-peek — status report for live worker harnesses.
 #
 # Usage:
-#   orch-peek                    # all live workers from the registry
+#   orch-peek                    # all live workers from $SRV.INFO.agents
 #   orch-peek %114 %115          # specific panes only
 #   orch-peek --json             # machine-readable output
 #   orch-peek --since 5m         # only workers that moved in the last duration
-#   orch-peek --all              # include dead-pane registry entries
+#   orch-peek --all              # include dead-pane discovery entries
 #
-# "Live" = the pane id from ~/.cache/orch-registry/<pane>.json appears in
-# `tmux list-panes -a`. Dead-pane entries are stale registry remnants and are
-# filtered out by default.
+# "Live" = the pane id from a $SRV.INFO.agents discovery reply appears in
+# `tmux list-panes -a`. Dead-pane entries are stale shim records (the shim
+# died but a residual reply remains) and are filtered out by default.
 #
-# Per-worker fields come from the registry plus the worker's CC JSONL
-# transcript at ~/.claude/projects/<encoded-cwd>/<session>.jsonl. Encoding
-# rule: take the worker's tmux pane_current_path, resolve symlinks via
-# `(cd <p> && pwd -P)`, then replace each "/" and "_" with "-".
+# Per-worker fields come from the agent's metadata (pane_id / agent / role /
+# cwd) plus the worker's CC JSONL transcript at
+# ~/.claude/projects/<encoded-cwd>/<session>.jsonl. Encoding rule: resolve
+# symlinks on cwd via `(cd <p> && pwd -P)`, then replace each "/" and "_" with "-".
 #
-# Operator pane: if ~/.cache/orch-operator.json exists (written by
-# `orch-claim-operator`), peek includes a row with agent="operator" using
-# the claim record's transcript_jsonl directly. Operator stays out of the
-# worker registry — claim record is the bridge.
+# Operator pane: an agent registered with metadata.role=="operator" (the
+# operator shell sets ORCH_ROLE=operator before starting the session) shows
+# up as the first row with agent="operator".
 set -euo pipefail
 
 command -v tmux >/dev/null 2>&1 || { echo "orch-peek: tmux not on PATH" >&2; exit 1; }
 command -v jq   >/dev/null 2>&1 || { echo "orch-peek: jq not on PATH" >&2; exit 1; }
+command -v nats >/dev/null 2>&1 || { echo "orch-peek: nats CLI not on PATH" >&2; exit 1; }
 
-REG="${ORCH_REGISTRY_DIR:-$HOME/.cache/orch-registry}"
 PROJECTS_DIR="${ORCH_PROJECTS_DIR:-$HOME/.claude/projects}"
+DISCOVERY_TIMEOUT="${ORCH_PEEK_DISCOVERY_TIMEOUT:-2s}"
 
 JSON=0
 ALL=0
@@ -86,27 +86,41 @@ LIVE_PANES=$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null) || {
 }
 is_live() { printf '%s\n' "$LIVE_PANES" | grep -qx "$1"; }
 
+# Snapshot $SRV.INFO.agents discovery once. One JSON object per line, keyed
+# by pane_id into AGENT_META for O(1) lookup.
+# shellcheck disable=SC2016  # $SRV.INFO.agents is a NATS system subject (literal $)
+DISCOVERY_RAW=$(nats --server="${NATS_URL:-}" req '$SRV.INFO.agents' '' \
+                    --replies=0 "--reply-timeout=${DISCOVERY_TIMEOUT}" 2>/dev/null \
+                | grep -v '^Received on\|^---\|^[[:space:]]*$' || true)
+
+declare -A AGENT_META
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    p=$(printf '%s' "$line" | jq -r '.metadata.pane_id // empty' 2>/dev/null)
+    [ -n "$p" ] || continue
+    AGENT_META["$p"]=$(printf '%s' "$line" | jq -c '.metadata' 2>/dev/null)
+done <<< "$DISCOVERY_RAW"
+
 # Resolve target pane list.
 TARGETS=()
 if [ ${#PANES_ARG[@]} -gt 0 ]; then
     for p in "${PANES_ARG[@]}"; do
-        if [ ! -f "$REG/$p.json" ]; then
-            echo "orch-peek: $p not in registry — skipping" >&2
+        if [ -z "${AGENT_META[$p]+_}" ]; then
+            echo "orch-peek: $p not registered on \$SRV.INFO.agents — skipping" >&2
             continue
         fi
         TARGETS+=("$p")
     done
 else
-    if [ -d "$REG" ]; then
-        for f in "$REG"/*.json; do
-            [ -e "$f" ] || continue
-            p=$(basename "$f" .json)
-            if [ "$ALL" -eq 0 ] && ! is_live "$p"; then
-                continue
-            fi
-            TARGETS+=("$p")
-        done
-    fi
+    for p in "${!AGENT_META[@]}"; do
+        # Operator agents are surfaced as a separate top row below.
+        role=$(printf '%s' "${AGENT_META[$p]}" | jq -r '.role // "worker"' 2>/dev/null)
+        [ "$role" = "operator" ] && continue
+        if [ "$ALL" -eq 0 ] && ! is_live "$p"; then
+            continue
+        fi
+        TARGETS+=("$p")
+    done
 fi
 
 encode_cwd() {
@@ -158,18 +172,28 @@ latest_jsonl_in() {
     [ -n "$best" ] && printf '%s|%s\n' "$best" "$mt"
 }
 
-# Read the operator-claim record (A2). Sets OP_PANE/OP_JSONL if present and
-# the named pane is currently live; empty strings otherwise.
+# Find the operator agent on $SRV.INFO.agents (metadata.role=="operator").
+# Sets OP_PANE/OP_JSONL if present, the pane is live in tmux, and a JSONL
+# transcript exists under PROJECTS_DIR for its cwd.
 OP_PANE=""; OP_JSONL=""
 read_operator_claim() {
-    local cache="${ORCH_OPERATOR_CACHE:-$HOME/.cache/orch-operator.json}"
-    [ -f "$cache" ] || return 0
-    local p j
-    p=$(jq -r '.pane_id // empty' "$cache" 2>/dev/null || true)
-    j=$(jq -r '.transcript_jsonl // empty' "$cache" 2>/dev/null || true)
-    if [ -n "$p" ] && [ -n "$j" ] && [ -f "$j" ] && is_live "$p"; then
-        OP_PANE=$p; OP_JSONL=$j
-    fi
+    local pane role cwd resolved encoded session_dir jsonl_mt jsonl
+    for pane in "${!AGENT_META[@]}"; do
+        role=$(printf '%s' "${AGENT_META[$pane]}" | jq -r '.role // "worker"' 2>/dev/null)
+        [ "$role" = "operator" ] || continue
+        is_live "$pane" || continue
+        cwd=$(printf '%s' "${AGENT_META[$pane]}" | jq -r '.cwd // empty' 2>/dev/null)
+        [ -n "$cwd" ] || continue
+        resolved=$(cd "$cwd" 2>/dev/null && pwd -P) || resolved=$cwd
+        encoded=$(printf '%s' "$resolved" | sed 's|/|-|g; s|_|-|g')
+        session_dir="$PROJECTS_DIR/$encoded"
+        [ -d "$session_dir" ] || continue
+        jsonl_mt=$(latest_jsonl_in "$session_dir" || true)
+        jsonl=${jsonl_mt%|*}
+        [ -n "$jsonl" ] && [ -f "$jsonl" ] || continue
+        OP_PANE=$pane; OP_JSONL=$jsonl
+        return 0
+    done
 }
 
 # Probe the operator pane using the claim record's transcript JSONL directly
@@ -205,13 +229,17 @@ probe_operator() {
 # Probe a single worker, emit one JSON object describing it.
 probe_json() {
     local pane=$1
-    local regf="$REG/$pane.json"
+    local meta=${AGENT_META[$pane]:-}
     local agent role cwd encoded jsonl_mt jsonl mtime age_s events bucket said tool last_text_json
 
-    agent=$(jq -r '.agent // .outfit // "?"' "$regf" 2>/dev/null || echo "?")
+    if [ -n "$meta" ]; then
+        agent=$(printf '%s' "$meta" | jq -r '.agent // .outfit // "?"' 2>/dev/null || echo "?")
+        role=$( printf '%s' "$meta" | jq -r '.role // "worker"'        2>/dev/null || echo "worker")
+    else
+        agent="?"; role="worker"
+    fi
     if [ -z "$agent" ] || [ "$agent" = "null" ]; then agent="?"; fi
-    role=$(jq -r '.role // "worker"' "$regf" 2>/dev/null || echo "worker")
-    if [ -z "$role" ] || [ "$role" = "null" ]; then role="worker"; fi
+    if [ -z "$role" ]  || [ "$role" = "null" ];  then role="worker";  fi
 
     if ! is_live "$pane"; then
         jq -n --arg p "$pane" --arg a "$agent" --arg r "$role" \

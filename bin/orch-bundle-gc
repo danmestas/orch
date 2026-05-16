@@ -18,6 +18,11 @@
 # spawn never completed, or the trap was bypassed). If you run agents
 # longer than 30 minutes off a single bundle, raise --age accordingly.
 #
+# NOTE: bundle dirs are not indexed in the shim registry ($SRV.INFO.agents
+# does not carry bundle paths), so live-pane detection is mtime-only.
+# The EXIT trap in orch-spawn is the primary cleanup path; this GC handles
+# only bundles the trap missed.
+#
 # With --clean, runs `rm -rf` on the matched set. Without --clean, just
 # prints a `du -sh`-style listing with per-dir size and age.
 #

@@ -67,7 +67,8 @@
 # Output contract: stdout is exactly one line — the new pane id. All
 # informational and error output goes to stderr. Pass --quiet to suppress
 # stderr too (caller signs up for silent failure on non-zero exit).
-# Auto-registers in the harness registry.
+# Pane metadata (agent, role, cwd) is published to $SRV.INFO.agents by the
+# orch-agent-shim that starts alongside the worker.
 #
 # suit interop: prefers `suit prepare --quiet` (v0.10+) for clean bundle-path
 # capture; falls back to legacy stdout-tail capture on older suit so the
@@ -381,7 +382,6 @@ if [ $VERIFY -eq 1 ]; then
 else
     sleep 1
 fi
-orch-register "$PANE" "$AGENT" "$CWD" --role "$ROLE" >/dev/null || true
 
 # Shim launch: start orch-agent-shim alongside the pane unless --no-shim.
 # The shim registers the pane on the Synadia Agent Protocol bus so callers

@@ -108,11 +108,21 @@ esac
 
 # Worker→observer guard: a worker (ORCH_PANE_ID set) cannot redirect an
 # observer-class target unless --force.
-if [ -n "${ORCH_PANE_ID:-}" ] && [ $FORCE -eq 0 ]; then
-    REG_DIR="${ORCH_REGISTRY_DIR:-$HOME/.cache/orch-registry}"
-    REG_FILE="$REG_DIR/$pane.json"
-    if [ -f "$REG_FILE" ] && command -v jq >/dev/null 2>&1; then
-        target_role=$(jq -r '.role // "worker"' "$REG_FILE" 2>/dev/null || echo worker)
+#
+# Target role is resolved from $SRV.INFO.agents (metadata.role). Falls back
+# to "worker" when NATS / jq are absent or the target is not registered —
+# unregistered panes are not subject to the guard (no role to enforce).
+if [ -n "${ORCH_PANE_ID:-}" ] && [ $FORCE -eq 0 ] \
+   && command -v nats >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    # shellcheck disable=SC2016  # $SRV.INFO.agents is a NATS system subject (literal $)
+    _guard_raw=$(nats --server="${NATS_URL:-}" req '$SRV.INFO.agents' '' \
+                     --replies=0 "--reply-timeout=${DISCOVERY_TIMEOUT}" 2>/dev/null \
+                 | grep -v '^Received on\|^---\|^[[:space:]]*$' || true)
+    if [ -n "$_guard_raw" ]; then
+        target_role=$(printf '%s\n' "$_guard_raw" \
+                      | jq -r --arg p "$pane" \
+                          'select(.metadata.pane_id == $p) | .metadata.role // "worker"' \
+                          2>/dev/null | head -1)
         if [ "$target_role" = "observer" ]; then
             die "refusing to tell observer pane $pane (sender is worker $ORCH_PANE_ID); pass --force to override"
         fi
