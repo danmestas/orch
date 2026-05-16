@@ -100,7 +100,12 @@ if [ "\$verb" = req ] && [ -s "$NATS_STUB_FIXTURES" ]; then
         [ -n "\$meta" ] || continue
         i=\$((i + 1))
         printf 'Received on "\$SRV.INFO.agents.fake%d"\n' "\$i"
-        printf '{"metadata":%s}\n' "\$meta"
+        # Emit each agent's full INFO response shape: metadata + endpoints[].
+        # orch-tell's discovery filters by metadata.pane_id then extracts
+        # endpoints[name=="prompt"].subject; without endpoints, discovery
+        # always returns no-match and (post-#98, with the tmux fallback
+        # removed) every orch-spy → orch-tell call becomes a hard error.
+        printf '{"metadata":%s,"endpoints":[{"name":"prompt","subject":"agents.prompt.stub.fake.0"}]}\n' "\$meta"
     done < "$NATS_STUB_FIXTURES"
 fi
 exit 0
