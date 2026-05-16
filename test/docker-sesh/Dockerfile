@@ -32,6 +32,17 @@ WORKDIR /src/sesh
 RUN go build -o /out/sesh ./cmd/sesh \
     && /out/sesh --help >/dev/null 2>&1 || true
 
+# orch-agent-shim — built from the npm-pack'd orch tarball below so the
+# bench tests the same shim source that real users would build via
+# install.sh after `npm install -g @agent-ops/orch`. Source ships in the
+# tarball because cmd/ is in package.json's files array (fixed alongside
+# this change).
+COPY orch-pack.tgz /tmp/orch-pack.tgz
+RUN mkdir -p /src/orch-pack \
+    && tar -xzf /tmp/orch-pack.tgz -C /src/orch-pack --strip-components=1 \
+    && cd /src/orch-pack \
+    && go build -o /out/orch-agent-shim ./cmd/orch-agent-shim
+
 # === Stage 2: runtime image ===============================================
 FROM ubuntu:24.04
 
@@ -55,8 +66,9 @@ RUN set -eux; arch="$TARGETARCH"; cd /tmp; \
     install -m 0755 "nats-${NATS_CLI_VERSION}-linux-${arch}/nats" /usr/local/bin/nats; \
     rm -rf nats.zip "nats-${NATS_CLI_VERSION}-linux-${arch}"
 
-# sesh binary from builder stage.
+# sesh + orch-agent-shim binaries from builder stage.
 COPY --from=builder /out/sesh /usr/local/bin/sesh
+COPY --from=builder /out/orch-agent-shim /usr/local/bin/orch-agent-shim
 
 # orch + suit + wardrobe (matches test/docker/ pattern).
 RUN npm install -g @agent-ops/suit

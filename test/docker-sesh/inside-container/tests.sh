@@ -426,7 +426,114 @@ log "T6.3: inbound orch.tell dispatches via sesh-hosted bridge"
 log "  (covered by T3.2 — orch.tell via sesh leaf)"
 
 # ============================================================
-# GROUP 7+ — Task/Goal/Envelope/KV: defer if sesh-ops not installed
+# GROUP 7 — Synadia Agent Protocol primitives (the shim)
+# ============================================================
+# These three tests exercise orch-agent-shim (PR #70) directly against
+# a sesh leaf. Tracks the adapter test contract from #76 — once the
+# contract is finalized in that issue, this group becomes the live
+# manifestation.
+#
+# Setup: spawn one claude worker via orch-spawn. Per #72, the shim
+# auto-launches alongside the pane. The shim registers as a Synadia
+# Agent Protocol `agents` micro service on the sesh leaf.
+log "=== Group 7: Synadia Agent Protocol via orch-agent-shim ==="
+
+sesh_full_reset
+PROJ=/tmp/g7-shim
+if ! command -v orch-agent-shim >/dev/null 2>&1; then
+    skip "T9 (Synadia discovery)" "orch-agent-shim not on PATH in this image"
+    skip "T10 (typed-chunk prompt round-trip)" "shim missing"
+    skip "T11 (heartbeat)" "shim missing"
+elif ! sesh_up_in "$PROJ" g7s; then
+    skip "T9/T10/T11" "sesh up failed"
+else
+    # Spawn with explicit NATS_URL so the shim talks to this leaf, not
+    # the hub-solicit URL in ~/.sesh/hub.url.
+    G7_PANE=$(NATS_URL="$SESH_NATS_URL" orch-spawn claude --cwd "$PROJ" --headless --verify 2>&1 | tail -1)
+    G7_NUM="${G7_PANE#%}"
+    sleep 5  # give the shim time to register the service against the leaf
+
+    # --- T9: $SRV.INFO.agents returns the spawned service with
+    #         protocol_version=0.3 + correct metadata.agent ---
+    log "T9: \$SRV.INFO.agents returns the shim's metadata"
+    # The nats CLI emits diagnostic lines to stderr; the body is the only
+    # stdout line that parses as JSON. Filter by jq-parseable to extract
+    # just the response.
+    INFO=$(nats --server="$SESH_NATS_URL" req '$SRV.INFO.agents' '' --replies=0 --timeout=2s 2>/dev/null \
+        | while IFS= read -r line; do
+            printf '%s' "$line" | jq -e . >/dev/null 2>&1 && printf '%s\n' "$line" && break
+          done)
+    # Default for vars that downstream tests reference, so `set -u` won't trip
+    # if T9 fails to populate them.
+    prompt_subj=""
+    if [ -z "$INFO" ]; then
+        assert "T9 service discovery returns a response" "non-empty" "empty"
+    else
+        proto=$(printf '%s' "$INFO" | jq -r '.metadata.protocol_version // ""')
+        agent_id=$(printf '%s' "$INFO" | jq -r '.metadata.agent // ""')
+        pane_id=$(printf '%s' "$INFO" | jq -r '.metadata.pane_id // ""')
+        if [ "$proto" = "0.3" ] && [ "$agent_id" = "claude-code" ] && [ "$pane_id" = "$G7_PANE" ]; then
+            assert "T9 metadata: protocol_version=0.3, agent=claude-code, pane_id matches" "yes" "yes"
+        else
+            assert "T9 metadata correct" "yes" "proto=$proto agent=$agent_id pane=$pane_id"
+        fi
+
+        # Endpoint subject convention check: agents.prompt.cc.<owner>.pct<num>
+        prompt_subj=$(printf '%s' "$INFO" | jq -r '.endpoints[] | select(.name=="prompt") | .subject')
+        if [ "${prompt_subj#agents.prompt.cc.}" != "$prompt_subj" ] && [ "${prompt_subj%.pct${G7_NUM}}" != "$prompt_subj" ]; then
+            assert "T9 prompt subject follows agents.prompt.cc.<owner>.pct<num>" "yes" "yes"
+        else
+            assert "T9 prompt subject convention" "agents.prompt.cc.<owner>.pct${G7_NUM}" "$prompt_subj"
+        fi
+    fi
+
+    # --- T10: prompt round-trip — leading status ack + zero-body terminator ---
+    # Note: v1 shim ack's then terminates; bridging the harness response
+    # to a {type:"response"} chunk is incremental work (tracked separately).
+    # This test validates the protocol skeleton, not response bridging.
+    log "T10: prompt round-trip produces ack + terminator"
+    if [ -n "$prompt_subj" ]; then
+        nats --server="$SESH_NATS_URL" req "$prompt_subj" "say bench-t10-ok" \
+            --replies=0 --reply-timeout=10s --timeout=20s >/tmp/t10.cap 2>&1
+        if grep -q '"type":"status","data":"ack"' /tmp/t10.cap; then
+            assert "T10 leading status:ack chunk received" "yes" "yes"
+        else
+            assert "T10 leading status:ack chunk received" "yes" "no"
+            log "       cap: $(head -c 200 /tmp/t10.cap)"
+        fi
+        if grep -q "nil body" /tmp/t10.cap || grep -q "0 bytes" /tmp/t10.cap; then
+            assert "T10 zero-body terminator received" "yes" "yes"
+        else
+            assert "T10 zero-body terminator received" "yes" "no"
+        fi
+    else
+        skip "T10" "no prompt subject discovered"
+    fi
+
+    # --- T11: heartbeat fires with correct shape ---
+    # Default heartbeat is 30s; bench-quick path uses sub --count=1
+    # with a window slightly above the interval.
+    log "T11: heartbeat publishes spec-shape payload"
+    HB=$(timeout 35 nats --server="$SESH_NATS_URL" sub --raw "agents.hb.cc.>" --count=1 2>/dev/null | tail -1)
+    if [ -z "$HB" ]; then
+        assert "T11 heartbeat received within 35s" "yes" "no"
+    else
+        hb_agent=$(printf '%s' "$HB" | jq -r '.agent // ""')
+        hb_iid=$(printf '%s' "$HB" | jq -r '.instance_id // ""')
+        hb_interval=$(printf '%s' "$HB" | jq -r '.interval_s // 0')
+        if [ "$hb_agent" = "claude-code" ] && [ -n "$hb_iid" ] && [ "$hb_interval" -gt 0 ] 2>/dev/null; then
+            assert "T11 heartbeat schema (agent + instance_id + interval_s)" "yes" "yes"
+        else
+            assert "T11 heartbeat schema" "yes" "agent=$hb_agent iid=$hb_iid interval=$hb_interval"
+        fi
+    fi
+
+    tmux kill-pane -t "$G7_PANE" 2>/dev/null || true
+    sesh_down_in "$PROJ" g7s
+fi
+
+# ============================================================
+# GROUP 8+ — Task/Goal/Envelope/KV: defer if sesh-ops not installed
 # ============================================================
 log "=== Group 7+: sesh-ops dependent tests ==="
 if command -v sesh-ops >/dev/null 2>&1; then
