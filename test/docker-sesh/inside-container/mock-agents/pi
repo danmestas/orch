@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# mock pi binary for orch Docker tests.
+#
+# Goals: same shape as the codex mock — print banner, read stdin,
+# echo prompts back. The shim's pi adapter (#74) attaches via the
+# spawned pane and handles Synadia protocol publishing.
+set -uo pipefail
+
+cat <<'BANNER'
+╭─── Pi Agent v0 (mock test harness) ────────────────────────────╮
+│                                                                  │
+│  Mock used by orch's Docker test bench. Reads prompts from      │
+│  stdin and echoes them so the shim's pi adapter can be probed.  │
+│                                                                  │
+╰──────────────────────────────────────────────────────────────────╯
+
+BANNER
+
+trap 'exit 0' TERM INT
+
+echo "$ ready"
+
+while IFS= read -r line; do
+    echo "[mock-pi] received: $line"
+    echo "$ ready"
+done

@@ -76,7 +76,10 @@ COPY orch-pack.tgz /tmp/orch-pack.tgz
 RUN npm install -g /tmp/orch-pack.tgz
 
 COPY inside-container/mock-agents/ /usr/local/bin/mock-agents/
-RUN install -m 0755 /usr/local/bin/mock-agents/claude /usr/local/bin/claude
+RUN install -m 0755 /usr/local/bin/mock-agents/claude  /usr/local/bin/claude \
+    && install -m 0755 /usr/local/bin/mock-agents/codex   /usr/local/bin/codex \
+    && install -m 0755 /usr/local/bin/mock-agents/pi      /usr/local/bin/pi \
+    && install -m 0755 /usr/local/bin/mock-agents/gemini  /usr/local/bin/gemini
 
 COPY inside-container/bootstrap.sh inside-container/tests.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/bootstrap.sh /usr/local/bin/tests.sh

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# mock codex binary for orch Docker tests.
+#
+# Goals:
+#   - Print a banner (visual marker; orch-spawn's BANNER for codex is
+#     empty, so verify falls through to title-rename or sleep-then-probe)
+#   - Read stdin line by line so tmux send-keys (and the shim's injection
+#     path) land visibly
+#   - Exit cleanly on SIGTERM
+#
+# Substrate eventing is handled by orch-agent-shim (per #70/#72/#73-75).
+# This mock does NOT fire any hooks — legacy hook-firing was retired in #99.
+set -uo pipefail
+
+cat <<'BANNER'
+╭─── OpenAI Codex v0 (mock test harness) ────────────────────────╮
+│                                                                  │
+│  Mock used by orch's Docker test bench. Echoes prompts read     │
+│  from stdin so the shim's codex adapter can be probed.          │
+│                                                                  │
+╰──────────────────────────────────────────────────────────────────╯
+
+BANNER
+
+trap 'exit 0' TERM INT
+
+echo "› ready"
+
+while IFS= read -r line; do
+    echo "[mock-codex] received: $line"
+    echo "› ready"
+done
