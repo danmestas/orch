@@ -45,7 +45,7 @@ the control-plane work only orch can do.
 |---|---|
 | Spawn | `orch-spawn <agent>` — tmux split + outfit + role; multi-executor sketched in `docs/multi-executor-workers.md` |
 | Address | tmux pane id (`%37`) + alias file `~/.config/orch-aliases` |
-| Send | `orch-tell` (publishes to `agents.prompt.…` via `$SRV.INFO.agents` discovery; `--legacy-keystrokes` falls back to tmux send-keys), `orch-ask` (= `orch-tell --collect`: streams response chunks until terminator) |
+| Send | `orch-tell` (publishes to `agents.prompt.…` via `$SRV.INFO.agents` discovery), `orch-ask` (= `orch-tell --collect`: streams response chunks until terminator) |
 | Listen | `orch-listen` (one-shot or `--stream` over fswatch markers), `orch-subscribe` (peer push) |
 | Track | `orch-register` (per-pane JSON cache), `orch-claim-operator`, `orch-peek`, `orch-spy` |
 | Lifecycle | `orch-up`, `orch-down`, `orch-bundle-gc` |
@@ -153,8 +153,7 @@ Today: `orch-tell` resolves `<pane|alias>` → Synadia subject via
 `$SRV.INFO.agents`, publishes the prompt to `endpoints[name=="prompt"].subject`,
 and (with `--collect`) consumes the response chunk stream until the
 inactivity timeout fires. Keystroke injection is the implementation detail
-of the shim. `--legacy-keystrokes` is the explicit escape hatch for panes
-without a shim (operator UX unchanged; wire under it is now standard).
+of the shim (operator UX unchanged; wire under it is now standard).
 
 `orch-ask` is `orch-tell --collect` — streams `response` chunk `.data` to
 stdout as each chunk arrives.

@@ -7,7 +7,6 @@
 #   orch-tell [--force] <pane_id|alias> <prompt>
 #   orch-tell --list                            # list panes + commands
 #   orch-tell --collect <pane> <prompt>         # request/reply; stream chunks to stdout
-#   orch-tell --legacy-keystrokes <pane> <prompt>  # bypass discovery; use tmux send-keys
 #
 # Default path (discovery):
 #   1. Resolve alias → pane id.
@@ -20,29 +19,10 @@
 #     400→2  401-403→3  404→4  409→5  429→6  500+→1
 #   Use --timeout N (seconds) to override the 30s inactivity window between chunks.
 #
-# --legacy-keystrokes: skips NATS discovery; falls back to tmux send-keys.
-#   Useful for panes that were spawned without a shim.
-#
 # Env overrides:
 #   ORCH_TELL_DISCOVERY_TIMEOUT (default 2s)   — $SRV.INFO.agents reply-timeout
 #   ORCH_TELL_INACTIVITY_TIMEOUT (default 30)  — --collect inactivity window (seconds)
-#   ORCH_TELL_MAX_WAIT (default 30)            — legacy-keystrokes idle deadline (seconds)
-#   ORCH_TELL_IDLE_DELAY (default 0.3)         — legacy-keystrokes poll interval
-#   ORCH_TELL_SUBMIT_DELAY (default 0.1)       — legacy-keystrokes Enter delay
-#   ORCH_TELL_FORCE_LEGACY (unset)             — when set to 1, skip discovery
-#                                                entirely and use tmux send-keys.
-#                                                Used by orch-nats-bridge-in and
-#                                                orch-subscribe daemons where the
-#                                                target is known to be a raw pane
-#                                                without a registered shim.
 #   NATS_URL                                   — NATS server URL (default per nats CLI)
-#
-# Auto-fallback: if discovery returns no match for the pane AND the pane exists
-# in tmux, orch-tell silently falls back to legacy keystrokes with a stderr
-# note. This preserves backward compatibility for callers (orch-subscribe,
-# orch-nats-bridge-in, ad-hoc operator use) that target panes spawned before
-# Plan 8 or with --no-shim. To force discovery-only behavior, run from a pane
-# that has a registered shim or pass --collect (which has no legacy fallback).
 #
 # Aliases: one per line "name=%pane_id" in ~/.config/orch-aliases.
 # Pane ids start with "%" — anything else is looked up as an alias.
@@ -51,15 +31,9 @@
 # refused when telling an observer-class target unless --force is passed.
 # Observers exist to watch, not to be redirected by workers. Operator panes
 # (no ORCH_PANE_ID) are unrestricted.
-#
-# Idle detection (legacy path): capture-pane twice with a small delay; if the
-# screen is unchanged the agent is considered idle. If it never settles within
-# ORCH_TELL_MAX_WAIT seconds, exit non-zero.
 set -euo pipefail
 
 ALIAS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/orch-aliases"
-MAX_WAIT="${ORCH_TELL_MAX_WAIT:-30}"
-IDLE_DELAY="${ORCH_TELL_IDLE_DELAY:-0.3}"
 # Discovery: how long to wait for $SRV.INFO.agents replies (reply-timeout between replies).
 DISCOVERY_TIMEOUT="${ORCH_TELL_DISCOVERY_TIMEOUT:-2s}"
 # Collect: inactivity window — how long to wait between chunks before giving up.
@@ -78,14 +52,12 @@ fi
 # positional <pane> <prompt...> shape.
 FORCE=0
 COLLECT=0
-LEGACY=0
 TIMEOUT_OVERRIDE=""
 ARGS=()
 while [ "$#" -gt 0 ]; do
     case $1 in
         --force)              FORCE=1; shift ;;
         --collect)            COLLECT=1; shift ;;
-        --legacy-keystrokes)  LEGACY=1; shift ;;
         --timeout)            TIMEOUT_OVERRIDE=$2; shift 2 ;;
         --timeout=*)          TIMEOUT_OVERRIDE=${1#--timeout=}; shift ;;
         *)                    ARGS+=("$1"); shift ;;
@@ -93,7 +65,7 @@ while [ "$#" -gt 0 ]; do
 done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
 
-[ "$#" -ge 2 ] || die "usage: orch-tell [--force] [--collect] [--legacy-keystrokes] [--timeout N] <pane_id|alias> <prompt> | --list"
+[ "$#" -ge 2 ] || die "usage: orch-tell [--force] [--collect] [--timeout N] <pane_id|alias> <prompt> | --list"
 
 [ -n "$TIMEOUT_OVERRIDE" ] && INACTIVITY_TIMEOUT="$TIMEOUT_OVERRIDE"
 
@@ -152,12 +124,11 @@ _exit_for_error_code() {
 # ── Discovery: resolve pane → prompt subject via $SRV.INFO.agents ────────────
 # Prints the prompt subject to stdout on success.
 # Returns 0 on match, non-zero on no-match / tooling-missing / bus-unreachable.
-# Caller decides whether to die or fall back to legacy based on context.
 # Assertion: exactly one agent matches; warn-and-pick-first on multiple.
 _discover_prompt_subject() {
     local pane_id=$1
 
-    # Tooling missing → caller falls back to legacy (no shim is registered
+    # Tooling missing → caller emits actionable error (no shim registered
     # in environments without the nats CLI anyway).
     command -v nats >/dev/null 2>&1 || return 10
     command -v jq   >/dev/null 2>&1 || return 11
@@ -352,75 +323,20 @@ _write_send_log() {
     fi
 }
 
-# ── Legacy path: tmux send-keys ───────────────────────────────────────────────
-_send_via_tmux() {
-    command -v tmux >/dev/null 2>&1 \
-        || die "tmux not found on PATH (required for --legacy-keystrokes)"
-
-    tmux list-panes -a -F '#{pane_id}' | grep -qx "$pane" \
-        || die "pane $pane does not exist"
-
-    local deadline
-    deadline=$(( $(date +%s) + MAX_WAIT ))
-    local prev=""
-    local prev_set=0
-    while :; do
-        local cur
-        cur=$(tmux capture-pane -t "$pane" -p)
-        if [ $prev_set -eq 1 ] && [ "$prev" = "$cur" ]; then
-            break
-        fi
-        [ "$(date +%s)" -gt "$deadline" ] \
-            && die "pane $pane never went idle within ${MAX_WAIT}s"
-        prev=$cur
-        prev_set=1
-        sleep "$IDLE_DELAY"
-    done
-
-    # Inject as literal keystrokes (-l): each char is a typed key, no bracketed-paste
-    # wrapping. Then a separate Enter that's interpreted as the special key.
-    # A brief sleep is necessary — without it, the Enter often arrives before the
-    # TUI has finished consuming the literal stream and the submit is dropped.
-    # 50ms is empirically enough; 100ms is safer for slow machines.
-    tmux send-keys -t "$pane" -l "$prompt"
-    sleep "${ORCH_TELL_SUBMIT_DELAY:-0.1}"
-    tmux send-keys -t "$pane" Enter
-
-    _write_send_log
-}
-
 # ── Main dispatch ─────────────────────────────────────────────────────────────
-# Explicit legacy: --legacy-keystrokes flag OR ORCH_TELL_FORCE_LEGACY=1.
-if [ "$LEGACY" -eq 1 ] || [ "${ORCH_TELL_FORCE_LEGACY:-0}" = "1" ]; then
-    _send_via_tmux
-    exit 0
-fi
-
-# Discovery path (default). _discover_prompt_subject returns:
+# Discovery path. _discover_prompt_subject returns:
 #   0      → printed subject; use NATS
 #   1      → no match (no agents replied OR no pane_id match)
 #   10/11  → nats / jq tool missing
-# On no-match we auto-fallback to legacy IFF the pane exists in tmux; this
-# preserves backward compat for orch-subscribe / orch-nats-bridge-in callers
-# targeting raw panes (no shim). --collect has no legacy fallback (legacy
-# can't return response chunks), so it hard-errors on no-match.
 prompt_subject=""
 discovery_rc=0
 prompt_subject=$(_discover_prompt_subject "$pane") || discovery_rc=$?
 
 if [ "$discovery_rc" -ne 0 ]; then
-    # Discovery failed. Decide: hard-error (--collect or no tmux pane) vs
-    # silent legacy fallback (pane exists in tmux).
     if [ "$COLLECT" -eq 1 ]; then
         die "pane $pane not registered on the bus (run orch-spawn after Plan 8); --collect requires a shim"
     fi
-    if command -v tmux >/dev/null 2>&1 \
-       && tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx "$pane"; then
-        printf 'orch-tell: %s not on the bus; falling back to tmux send-keys\n' "$pane" >&2
-        _send_via_tmux
-        exit 0
-    fi
-    die "pane $pane not registered on the bus and not present in tmux (run orch-spawn after Plan 8, or use --legacy-keystrokes)"
+    die "pane $pane not registered on the bus (run orch-spawn after Plan 8)"
 fi
 
 if [ "$COLLECT" -eq 1 ]; then

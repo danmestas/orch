@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Breaking changes
+
+- **`orch-tell --legacy-keystrokes` removed** (#96). The tmux send-keys fallback
+  flag and its associated code path (`_send_via_tmux`, `ORCH_TELL_FORCE_LEGACY`,
+  auto-fallback on discovery no-match) have been deleted. All panes must be
+  registered on the Synadia bus via `orch-spawn`. On discovery failure,
+  `orch-tell` now emits an actionable error and exits non-zero — there is no
+  silent fallback.
+
+- **`orch-ask --legacy` removed** (#96). The tmux capture-pane snapshot diff
+  path in `orch-ask` has been removed. `orch-ask` is now unconditionally a thin
+  wrapper around `orch-tell --collect`.
+
 ### refactor: executor pluralism — `executors/<type>/` is now first-class. tmux flow moved to `executors/tmux/`. No behavior change.
 
 - `executors/tmux/spawn.sh` — tmux-specific spawn logic extracted from `bin/orch-spawn`

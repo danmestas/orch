@@ -2,14 +2,12 @@
 # orch-ask — send a prompt to an agent, collect and return response chunks.
 #
 # This is a thin wrapper around `orch-tell --collect`. It delegates discovery,
-# NATS publish, and chunk streaming to orch-tell. The legacy tmux-snapshot
-# approach is still available via --legacy.
+# NATS publish, and chunk streaming to orch-tell.
 #
 # Usage:
 #   orch-ask <pane_id|alias> <prompt words...>
 #   orch-ask <pane_id|alias> -                      # prompt from stdin
 #   orch-ask <pane_id|alias> --timeout N <prompt...> # inactivity timeout (s)
-#   orch-ask <pane_id|alias> --legacy <prompt...>   # legacy tmux-snapshot mode
 #
 # Stdout: concatenated response chunk content from the agent.
 # Stderr: status lines unless --quiet.
@@ -27,16 +25,10 @@ set -euo pipefail
 ALIAS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/orch-aliases"
 TIMEOUT=30
 QUIET=0
-LEGACY=0
-
-# Legacy-mode settings (used only when --legacy is passed)
-STABLE_NEEDED=5
-INTERVAL=2
-SCROLLBACK_DEPTH=4000
 
 die() { printf 'orch-ask: %s\n' "$*" >&2; exit 1; }
 
-[ "$#" -ge 2 ] || die "usage: orch-ask <pane_id|alias> <prompt> [--timeout N] [--quiet] [--legacy [--stable N] [--interval N]]"
+[ "$#" -ge 2 ] || die "usage: orch-ask <pane_id|alias> <prompt> [--timeout N] [--quiet]"
 
 target=$1; shift
 
@@ -44,11 +36,8 @@ target=$1; shift
 prompt_args=()
 while [ "$#" -gt 0 ]; do
     case $1 in
-        --stable)   STABLE_NEEDED=$2; shift 2 ;;
-        --interval) INTERVAL=$2; shift 2 ;;
         --timeout)  TIMEOUT=$2; shift 2 ;;
         --quiet)    QUIET=1; shift ;;
-        --legacy)   LEGACY=1; shift ;;
         *)          prompt_args+=("$1"); shift ;;
     esac
 done
@@ -69,60 +58,5 @@ else
     prompt="$*"
 fi
 
-# ── Discovery path (default) ──────────────────────────────────────────────────
-if [ "$LEGACY" -eq 0 ]; then
-    [ "$QUIET" = 1 ] || printf 'orch-ask: sending to %s via NATS\n' "$pane" >&2
-    exec orch-tell --collect --timeout "$TIMEOUT" "$pane" "$prompt"
-fi
-
-# ── Legacy path: tmux capture-pane snapshot diff ─────────────────────────────
-tmux list-panes -a -F '#{pane_id}' | grep -qx "$pane" \
-    || die "pane $pane does not exist"
-
-# Snapshot scrollback BEFORE sending. We'll diff against it after.
-before=$(mktemp -t orch-ask-before.XXXXXX)
-after=$(mktemp -t orch-ask-after.XXXXXX)
-trap 'rm -f "$before" "$after" 2>/dev/null' EXIT
-tmux capture-pane -t "$pane" -pS "-${SCROLLBACK_DEPTH}" > "$before"
-
-[ "$QUIET" = 1 ] || printf 'orch-ask: sending to %s (legacy)\n' "$pane" >&2
-orch-tell --legacy-keystrokes "$pane" "$prompt"
-[ "$QUIET" = 1 ] || printf 'orch-ask: sent at %s\n' "$(date +%H:%M:%S)" >&2
-
-# Brief settle so the prompt-echo and "thinking..." indicator land before we
-# start sampling for stability.
-sleep 3
-
-quiet_arg=()
-[ "$QUIET" = 1 ] && quiet_arg+=(--quiet)
-rc=0
-orch-wait "$pane" --stable "$STABLE_NEEDED" --interval "$INTERVAL" --timeout "$TIMEOUT" "${quiet_arg[@]}" 1>&2 || rc=$?
-
-tmux capture-pane -t "$pane" -pS "-${SCROLLBACK_DEPTH}" > "$after"
-
-# The "new content" is everything in the after-snapshot that came after where
-# the before-snapshot ended. tmux scrollback rolls forward, so the simplest
-# robust way is: skip lines 1..(before_lines - shared-tail), print the rest.
-#
-# Easier and good enough: print the diff using `diff` and grab only added lines.
-# Even simpler: if before's last non-empty line is L, skip past L in after and
-# print everything after. We use the latter — robust to scrollback eviction.
-# Last non-empty line of the before-snapshot. Done with awk so we don't depend
-# on GNU `tac` (not in macOS BSD by default).
-last_before_line=$(awk 'NF { last = $0 } END { print last }' "$before")
-
-if [ -n "$last_before_line" ]; then
-    # Find the LAST occurrence in $after of $last_before_line and print everything
-    # after it. (First-occurrence is wrong — repeating footer lines match too early
-    # and we end up dumping the whole scrollback.)
-    last_match=$(grep -nF -- "$last_before_line" "$after" | tail -1 | cut -d: -f1 || true)
-    if [ -n "$last_match" ]; then
-        tail -n +"$((last_match + 1))" "$after"
-    else
-        cat "$after"
-    fi
-else
-    cat "$after"
-fi
-
-exit "$rc"
+[ "$QUIET" = 1 ] || printf 'orch-ask: sending to %s via NATS\n' "$pane" >&2
+exec orch-tell --collect --timeout "$TIMEOUT" "$pane" "$prompt"
