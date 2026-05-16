@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/danmestas/orch/internal/adapter/claudecode"
+	"github.com/danmestas/orch/internal/adapter/gemini"
 	"github.com/danmestas/orch/internal/shim"
 )
 
@@ -94,9 +95,15 @@ func buildAdapter(agent, pane, cwd string) (shim.Adapter, error) {
 		// Normalize: accept both "claude" (orch-spawn arg) and the
 		// canonical "claude-code" (Synadia §C identifier).
 		return claudecode.New(pane, cwd), nil
+	case "gemini":
+		// gemini-cli adapter. Uses AfterAgent (NOT Stop) for turn-end
+		// detection; native Notification events for query chunks.
+		// CWD is not used in v1 (transcript-path deferral — see
+		// internal/adapter/gemini/gemini.go TODO comment).
+		return gemini.New(pane), nil
 	default:
-		// codex / pi / gemini adapters land in Plans 11-13.
-		return nil, fmt.Errorf("no adapter for agent %q (only claude-code supported in v1)", agent)
+		// codex / pi adapters land in Plans 11-12.
+		return nil, fmt.Errorf("no adapter for agent %q (supported: claude-code, gemini)", agent)
 	}
 }
 

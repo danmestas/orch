@@ -70,6 +70,7 @@ Synadia bus.
 | `internal/shim/shim.go`               | Service registration, chunk encoding, heartbeat loop, prompt dispatcher, status reply. |
 | `internal/shim/adapter.go`            | `Adapter` interface and `Chunk` wire types.                                             |
 | `internal/adapter/claudecode/cc.go`   | claude-code adapter: JSONL tail, marker watch, tmux send-keys.                          |
+| `internal/adapter/gemini/gemini.go`   | gemini adapter: marker watch (AfterAgent → terminator, Notification → query), tmux send-keys. Transcript emission deferred (see below). |
 
 ## Configuration
 
@@ -78,7 +79,7 @@ then resolved defaults.
 
 | Flag       | Env             | Fallback                                  | Notes                                                      |
 |------------|-----------------|-------------------------------------------|------------------------------------------------------------|
-| `--agent`  | —               | (required)                                | `claude-code` or `claude` (alias) in v1.                   |
+| `--agent`  | —               | (required)                                | `claude-code` (or `claude` alias) or `gemini`.             |
 | `--pane`   | —               | (required)                                | Raw tmux pane id, e.g. `%37`.                              |
 | `--owner`  | `ORCH_OWNER`    | `$USER` / passwd lookup                   | Lands in metadata.owner.                                   |
 | `--session`| `SESH_SESSION`  | `""` (omitted from metadata)              | Marks the agent as session-aware per §3.2.                 |
@@ -214,9 +215,32 @@ The spawn integration test is `test/test-orch-spawn-shim.sh` — it
 starts a test NATS server, forks the shim, and asserts `$SRV.INFO.agents`
 returns the pane within 5 s.
 
+## Gemini adapter notes
+
+### AfterAgent quirk
+gemini-cli's turn-end event is named `AfterAgent`, **not** `Stop`. Wiring a
+hook under `Stop` in `~/.gemini/settings.json` is silently rejected:
+
+```
+⚠ Invalid hook event name: "Stop" from project config. Skipping.
+```
+
+The existing `gemini-hooks/orch-nats-publish-stop.sh` hook is already wired
+under `AfterAgent`. The gemini adapter reads the same stop marker that hook
+writes, and emits the §6.5 Terminator chunk when it fires.
+
+### Transcript-path deferral
+gemini stores chat logs at
+`~/.gemini/tmp/<scope>/chats/session-<ts>-<sessionId>.jsonl`, where `<scope>`
+varies by project context. The CWD→scope encoding is not yet confirmed from
+gemini-cli source. Full transcript chunk emission is deferred to a follow-up;
+v1 emits only the stop terminator and native Notification query chunks.
+
+See the `TODO(transcript)` comment in `internal/adapter/gemini/gemini.go`.
+
 ## Open work (out of scope for this PR)
 
-- **codex / pi / gemini adapters.** Plans 11-13. Each is an
+- **codex / pi adapters.** Plans 11-12. Each is an
   `adapter/<name>/<name>.go` with the same three-method interface.
 - **Marker-file retirement.** The Stop hook keeps writing markers for
   Plan-10 listeners. Plan 9 (orch-tell over Synadia) is what motivates
