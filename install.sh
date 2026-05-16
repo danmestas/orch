@@ -79,6 +79,24 @@ mkdir -p "$HOME/.cache"
 cp "$ROOT/fleet-prompt.md" "$HOME/.cache/orch-fleet-prompt.md"
 echo "fleet doctrine cached at ~/.cache/orch-fleet-prompt.md"
 
+# orch-agent-shim — Go binary, Synadia Agent Protocol bridge. Optional;
+# only built if `go` is on PATH. The shim is invoked from orch-spawn
+# under --with-shim, which is opt-in in v1. Builds straight into
+# ~/.local/bin so it's discoverable without an extra symlink dance.
+if command -v go >/dev/null 2>&1; then
+    SHIM_DST="$HOME/.local/bin/orch-agent-shim"
+    mkdir -p "$(dirname "$SHIM_DST")"
+    ( cd "$ROOT" && go build -o "$SHIM_DST" ./cmd/orch-agent-shim ) \
+        && echo "built $SHIM_DST" \
+        || echo "warn: orch-agent-shim build failed — --with-shim will be a no-op until fixed (the go.mod 'go' directive is the authoritative floor)"
+else
+    # The Go floor is whatever go.mod's `go` directive settles on against
+    # the dependency graph (currently 1.25, driven by nats-server v2.14).
+    # Bumps automatically as `go mod tidy` runs after upstream upgrades —
+    # check `head -3 go.mod` for the current authoritative floor.
+    echo "skip: go not on PATH — orch-agent-shim not built (see go.mod's 'go' directive for the floor; install Go to enable --with-shim)"
+fi
+
 # Inject fleet doctrine idempotently into agents that don't have a CLI flag for
 # system-prompt-append. Uses a marker block so re-running install.sh refreshes
 # the content in place without duplicating or clobbering surrounding user content.

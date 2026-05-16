@@ -6,6 +6,15 @@
 #                         [--quiet] [--role <worker|observer>]
 #                         [--position <right|left|above|below>] [--verify]
 #                         [--outfit <name>] [--cut <name>] [--accessory <name>]...
+#                         [--with-shim]
+#
+# --with-shim launches an orch-agent-shim sibling process bound to the
+# new pane, registering it as a Synadia Agent Protocol v0.3 agent on
+# the sesh hub (or $NATS_URL). The shim publishes heartbeats and
+# accepts prompts on agents.prompt.cc.<owner>.pct<pane>. Off by default
+# in v1 — flips to default-on in Plan 8 after the shim burns in. The
+# shim is a no-op if `orch-agent-shim` isn't on PATH (warning to
+# stderr, spawn proceeds — keeps install graceful for shell-only orchs).
 #
 # --position controls where the new pane is split off the current pane in headed
 # mode. Default `right` preserves prior behavior (tmux split-window -h). Mapping:
@@ -79,6 +88,7 @@ OUTFIT=""
 CUT=""
 ACCESSORIES=()
 NO_GOAL_ACCESSORY=0
+WITH_SHIM=0
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -106,6 +116,7 @@ while [ $# -gt 0 ]; do
         --cut) CUT=$2; shift 2 ;;
         --accessory) ACCESSORIES+=("$2"); shift 2 ;;
         --no-goal-accessory) NO_GOAL_ACCESSORY=1; shift ;;
+        --with-shim) WITH_SHIM=1; shift ;;
         *) echo "orch-spawn: unknown flag: $1" >&2; exit 1 ;;
     esac
 done
@@ -369,5 +380,32 @@ else
     sleep 1
 fi
 orch-register "$PANE" "$AGENT" "$CWD" --role "$ROLE" >/dev/null || true
+
+# --with-shim: launch an orch-agent-shim sibling that fronts the pane on
+# the Synadia Agent Protocol bus. Background — its lifetime is bound to
+# the parent shell (which dies with the pane), so no explicit teardown is
+# needed. Stderr goes to the same place as the spawn's stderr; stdout
+# discarded (the shim's log lines aren't part of the spawn output contract).
+if [ $WITH_SHIM -eq 1 ]; then
+    if command -v orch-agent-shim >/dev/null 2>&1; then
+        # Translate agent name into the canonical Synadia identifier so
+        # metadata.agent matches Appendix C. orch-spawn accepts "claude"
+        # as the harness arg; Synadia knows it as "claude-code".
+        case "$AGENT" in
+            claude) SHIM_AGENT="claude-code" ;;
+            *)      SHIM_AGENT="$AGENT" ;;
+        esac
+        orch-agent-shim \
+            --agent "$SHIM_AGENT" \
+            --pane "$PANE" \
+            --cwd "$CWD" \
+            ${ROLE:+--role "$ROLE"} \
+            ${OUTFIT:+--outfit "$OUTFIT"} \
+            >/dev/null 2>&1 &
+        disown
+    else
+        echo "orch-spawn: --with-shim requested but orch-agent-shim not on PATH (build it via install.sh)" >&2
+    fi
+fi
 
 echo "$PANE"
