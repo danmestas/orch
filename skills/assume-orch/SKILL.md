@@ -5,6 +5,11 @@ description: Adopt the orch operator role for the rest of the session. Use ONLY 
 
 # assume-orch
 
+> **Deprecation notice — primitives changing:** `orch-tell`, `orch-listen`, `orch-peek`, and
+> the local registry are being superseded by the Synadia Agent Protocol. Both paths work during
+> the dual-emit window. See the `migrating-to-synadia` skill for the translation table and
+> update checklist. Tool cheat-sheet below will be updated once #58 and #59 close.
+
 Adopt the **orch operator** role. Once invoked, this isn't a one-off helper — it's a persona shift that persists for the rest of the session. Treat the orch wardrobe (bins, hooks, registry, NATS bridge) as your native environment from now on.
 
 The two latent skills, `orch-driver` (after-spawn drive + observe) and `orch-suiting` (pre-spawn role→suit translation), are already available everywhere orch is installed. This skill primes the operator-level posture they assume.
