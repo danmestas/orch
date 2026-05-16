@@ -40,12 +40,18 @@ sed "s|\$HOME|$HOME|g" "$ORCH_PKG_DIR/settings-snippet.json" \
     | jq 'del(._INSTRUCTIONS)' \
     > "$HOME/.claude/settings.json"
 
-# 4. Initialize suit's wardrobe — npm package ships only the binary;
-#    outfits/cuts/accessories come from a template repo cloned by suit init.
-log "running suit init (clones wardrobe template)"
-if ! suit init --force >/tmp/suit-init.log 2>&1; then
-    log "suit init failed:"; tail /tmp/suit-init.log
-    # Non-fatal: tests T2/T8 will report the gap; T1+T3-T7 still run.
+# 4. Clone the public wardrobe into suit's content path. The default
+#    `suit init` pulls the minimal suit-template; we want the full
+#    wardrobe so suit list / suit prepare exercise real outfits.
+log "cloning wardrobe → suit content"
+SUIT_CONTENT="$HOME/.local/share/suit/content"
+mkdir -p "$(dirname "$SUIT_CONTENT")"
+if [ -d "$SUIT_CONTENT" ]; then
+    rm -rf "$SUIT_CONTENT"
+fi
+if ! git clone --depth 1 https://github.com/danmestas/wardrobe.git "$SUIT_CONTENT" >/tmp/wardrobe-clone.log 2>&1; then
+    log "wardrobe clone failed:"; tail /tmp/wardrobe-clone.log
+    # Non-fatal: tests T2/T8 will note the gap.
 fi
 
 # 5. Start the NATS bridge subscriber. NATS_URL defaults to

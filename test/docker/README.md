@@ -5,7 +5,7 @@ orch via the `npm pack`'d working tree (so it exercises the package as
 real users get it), and verifies the core stack:
 
 - `orch-*` binaries on PATH after install
-- `suit` lists outfits (wardrobe integration)
+- `suit` lists outfits (after cloning the public [`wardrobe`](https://github.com/danmestas/wardrobe) repo into suit's content path)
 - `orch-spawn` creates a tmux pane
 - Pane is registered in `~/.cache/orch-registry/`
 - **Inbound NATS comms**: `nats pub orch.tell` → bridge → worker stdin
