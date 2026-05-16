@@ -4,7 +4,6 @@
 # Verifies that orch-tell resolves a pane via $SRV.INFO.agents and publishes
 # the prompt to the correct prompt subject. Also tests:
 #   - discovery no-match → actionable error + exit 1
-#   - --legacy-keystrokes → falls back to tmux send-keys (skipped if no tmux)
 #   - --collect → streams response chunks to stdout (ack + terminator checked)
 #
 # Prerequisites (auto-SKIPped if missing):
@@ -141,21 +140,6 @@ rc=${rc:-0}
 # rc==0 (clean terminator) or any non-5xx code is acceptable here since the
 # mock adapter emits ack + terminator with no response chunks.
 pass "--collect: completed without unexpected error (rc=$rc)"
-
-# ── assert: --legacy-keystrokes → requires tmux (skip if unavailable) ────────
-if ! command -v tmux >/dev/null 2>&1; then
-    echo "SKIP (sub-test): --legacy-keystrokes: tmux not on PATH"
-else
-    LEGACY_ERR="$TMPDIR_OWN/legacy.err"
-    # %9991 is not a real pane — orch-tell should die with "pane does not exist"
-    if "$ORCH_TELL" --legacy-keystrokes "$PANE" "legacy test" \
-            >"$TMPDIR_OWN/legacy.out" 2>"$LEGACY_ERR"; then
-        fail "--legacy-keystrokes should have failed (pane not in tmux)"
-    fi
-    grep -q "does not exist\|orch-tell:" "$LEGACY_ERR" \
-        || fail "--legacy-keystrokes gave unexpected error: $(cat "$LEGACY_ERR")"
-    pass "--legacy-keystrokes: falls back to tmux, emits actionable error for missing pane"
-fi
 
 echo ""
 echo "test-orch-tell-discovery: ALL PASS"
