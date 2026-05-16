@@ -32,6 +32,7 @@ import (
 
 	"github.com/danmestas/orch/internal/adapter/claudecode"
 	"github.com/danmestas/orch/internal/adapter/gemini"
+	"github.com/danmestas/orch/internal/adapter/pi"
 	"github.com/danmestas/orch/internal/shim"
 )
 
@@ -101,9 +102,11 @@ func buildAdapter(agent, pane, cwd string) (shim.Adapter, error) {
 		// CWD is not used in v1 (transcript-path deferral — see
 		// internal/adapter/gemini/gemini.go TODO comment).
 		return gemini.New(pane), nil
+	case "pi":
+		return pi.New(pane, cwd), nil
 	default:
-		// codex / pi adapters land in Plans 11-12.
-		return nil, fmt.Errorf("no adapter for agent %q (supported: claude-code, gemini)", agent)
+		// codex adapter lands in Plan 12.
+		return nil, fmt.Errorf("no adapter for agent %q (supported: claude-code, gemini, pi; codex in Plan 12)", agent)
 	}
 }
 

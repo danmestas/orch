@@ -71,6 +71,23 @@ Synadia bus.
 | `internal/shim/adapter.go`            | `Adapter` interface and `Chunk` wire types.                                             |
 | `internal/adapter/claudecode/cc.go`   | claude-code adapter: JSONL tail, marker watch, tmux send-keys.                          |
 | `internal/adapter/gemini/gemini.go`   | gemini adapter: marker watch (AfterAgent → terminator, Notification → query), tmux send-keys. Transcript emission deferred (see below). |
+| `internal/adapter/pi/pi.go`           | pi adapter: JSONL tail, stop-marker watch, synthetic query chunks, tmux send-keys.      |
+
+## Adapter matrix
+
+| `--agent` value | Transcript source                              | Stop detection         | Notification / Query         | Inbound prompt    |
+|-----------------|------------------------------------------------|------------------------|------------------------------|-------------------|
+| `claude-code` / `claude` | `~/.claude/projects/<enc>/<sid>.jsonl` tail | `~/.cache/orch-stop/<pane>.event` fsnotify | `~/.cache/orch-notify/<pane>.notify` fsnotify → §7 query | tmux send-keys |
+| `pi`            | `~/.pi/agent/sessions/<enc>/<ts>_<sid>.jsonl` tail | `~/.cache/orch-stop/<pane>.event` fsnotify | Synthetic §7 query at turn-end (Plan 11 idle heuristic — pi has no Notification event) | tmux send-keys |
+
+`<enc>` in both cases: replace `/` and `.` with `-` in the pane's CWD.
+
+**pi `pi-extensions/` deprecation notice:** `orch-nats-publish-jsonl.ts`,
+`orch-nats-publish-stop.ts`, and `orch-stop-marker.ts` are superseded by the
+`pi` adapter in orch-agent-shim. Keep them installed for backwards compatibility
+with `orch-listen` listeners that read the legacy orch.events / orch.stop
+subjects directly; the shim is additive. Remove them after orch-tell v2 is
+rolled out and all observers have migrated to the Synadia Agent Protocol bus.
 
 ## Configuration
 
@@ -79,14 +96,14 @@ then resolved defaults.
 
 | Flag       | Env             | Fallback                                  | Notes                                                      |
 |------------|-----------------|-------------------------------------------|------------------------------------------------------------|
-| `--agent`  | —               | (required)                                | `claude-code` (or `claude` alias) or `gemini`.             |
+| `--agent`  | —               | (required)                                | `claude-code` (or `claude`), `pi`, or `gemini`.            |
 | `--pane`   | —               | (required)                                | Raw tmux pane id, e.g. `%37`.                              |
 | `--owner`  | `ORCH_OWNER`    | `$USER` / passwd lookup                   | Lands in metadata.owner.                                   |
 | `--session`| `SESH_SESSION`  | `""` (omitted from metadata)              | Marks the agent as session-aware per §3.2.                 |
 | `--nats`   | `NATS_URL`      | `~/.sesh/hub.url` → `nats://127.0.0.1:4222` | URL resolution per `shim.ReadNATSURL`.                     |
 | `--outfit` | `ORCH_OUTFIT`   | `""`                                      | orch-specific metadata (forward-compat per §12).           |
 | `--role`   | `ORCH_ROLE`     | `worker`                                  | orch-specific metadata.                                    |
-| `--cwd`    | —               | `tmux display-message -p '#{pane_current_path}'` | Used by the claude-code adapter to find the transcript.   |
+| `--cwd`    | —               | `tmux display-message -p '#{pane_current_path}'` | Used by the adapter to locate the transcript directory.    |
 | `--interval`| —              | `30s`                                     | Heartbeat cadence. Clamped to ≥ 1s per §8.2.               |
 
 ## Subjects
@@ -240,12 +257,21 @@ See the `TODO(transcript)` comment in `internal/adapter/gemini/gemini.go`.
 
 ## Open work (out of scope for this PR)
 
+<<<<<<< HEAD
 - **codex / pi adapters.** Plans 11-12. Each is an
   `adapter/<name>/<name>.go` with the same three-method interface.
+=======
+- **codex / gemini adapters.** Plans 12-13. Each is an
+  `adapter/<name>/<name>.go` with the same four-method interface.
+>>>>>>> 93e50b6 (feat(shim): pi adapter — synthetic query chunks for the Notification gap)
 - **Marker-file retirement.** The Stop hook keeps writing markers for
   Plan-10 listeners. Plan 9 (orch-tell over Synadia) is what motivates
-  removing the dependency.
-- **Per-query reply routing.** The adapter emits notify markers as §7
-  query chunks but doesn't wire the caller's reply back through
-  `tmux send-keys`. That requires a reply-subject subscriber and is
-  Plan 9 territory.
+  removing the dependency. The `pi-extensions/orch-nats-publish-{stop,jsonl}.ts`
+  and `orch-stop-marker.ts` are deprecated — see Adapter matrix above.
+- **Per-query reply routing.** The adapter emits §7 query chunks but
+  doesn't wire the caller's reply back through `tmux send-keys`. That
+  requires a reply-subject subscriber and is Plan 9 territory.
+- **pi native Notification.** If pi adds a native mid-turn event
+  analogous to claude-code's Notification hook in a future release, the
+  pi adapter's synthetic-query heuristic can be replaced with a direct
+  watcher without changing the Adapter interface.
