@@ -1,6 +1,6 @@
 ---
 name: migrating-to-synadia
-description: Operator cheatsheet for the orch → Synadia Agent Protocol cutover. Use when asked to "migrate orch-tell", "what replaces orch-listen", "translate old orch CLI", "Synadia migration cheatsheet", "how do I use NATS instead of orch-tell", "what happens to the registry after #58", "update a skill for the new wire", "dual-emit window", "what changes in #59 / #60", or any variation of "old orch primitives → new equivalent". Covers the side-by-side translation table, dual-emit window rules, common workflows shown both ways, and the step-by-step checklist for updating skills that embed today's primitives.
+description: Operator cheatsheet for the orch → Synadia Agent Protocol cutover. Use when asked to "migrate orch-tell", "what replaces orch-listen", "translate old orch CLI", "Synadia migration cheatsheet", "how do I use NATS instead of orch-tell", "what happens to the registry after #58", "update a skill for the new wire", "what changes in #59 / #60", or any variation of "old orch primitives → new equivalent". Covers the side-by-side translation table, common workflows shown in the Synadia-native form, and the step-by-step checklist for updating skills that embed legacy primitives.
 ---
 
 # migrating-to-synadia
@@ -9,7 +9,7 @@ Operator cheatsheet for the protocol cutover from orch's ad-hoc wire to
 the [Synadia Agent Protocol](~/references/synadia-agent-sdk-docs/core-protocol.md).
 Reference this whenever a skill, a prompt, or a workflow uses pre-Synadia primitives
 (`orch-tell`, `orch-listen`, `orch-peek`, the local registry) and you need to know the
-post-cutover shape.
+current shape.
 
 ## Status
 
@@ -24,22 +24,21 @@ Tracking issue: **#55** (parent epic for the Synadia integration campaign).
 | #59 | `orch-listen` Synadia backend | open |
 | #60 | Registry retirement / service-discovery migration | open |
 
-**Current state (as of this PR):** The shim is live and every `orch-spawn`ed pane
-is already registered on the Synadia bus. The *caller* side — the commands an
-operator types to reach a worker — still defaults to the legacy primitives.
-The dual-emit window lets both paths coexist until #58/#59/#60 close.
+The shim is live and every `orch-spawn`ed pane is registered on the Synadia bus.
+The legacy primitives (`orch-tell`, `orch-listen`, `orch-peek`, local registry files)
+are retired. Use the Synadia path exclusively.
 
 ## Side-by-side translation table
 
-The five operator-facing primitives that change shape when #58/#59/#60 land.
+The five operator-facing primitives and their Synadia-native replacements.
 
-| Legacy primitive | What it does today | Post-cutover equivalent | Notes |
+| Legacy primitive | What it did | Current equivalent | Notes |
 |---|---|---|---|
-| `orch-tell %NNN "hello"` | Injects prompt into tmux pane via `send-keys` | `TBD — see #58` (`nats req agents.prompt.cc.<owner>.pct<N> "hello"` or new `orch` CLI verb) | Subject token for `%NNN`: replace `%` with `pct`, e.g. `%37` → `pct37`. Caller MUST read the subject off the endpoint record (§4.3), not construct it from the pane id. |
-| `orch-listen [--stream]` | `fswatch` loop over `~/.cache/orch-stop/*.event` marker files | `TBD — see #59` (`nats sub 'agents.hb.>'` + chunk-stream sub) | Heartbeats fire on `agents.hb.cc.<owner>.pct<N>` every 15 s; Stop events will be modelled as a status-chunk sequence. |
-| `orch-peek [pane...]` | Reads `~/.cache/orch-registry/<pane>.json` | `nats req '$SRV.INFO.agents'` | Returns all live shim instances; filter by `metadata.pane_id` if you want a single worker. `nats micro info agents` is the human-readable alias. |
-| `~/.cache/orch-registry/<pane>.json` | Local JSON file per pane — source of truth for pane→agent→cwd→session | `TBD — see #60` (service-discovery query, retired after sunset) | The shim already publishes the same fields to `$SRV.INFO.agents` metadata; the local file is kept during the dual-emit window for back-compat. |
-| `orch-tell --force <pane> "/rename foo"` | Sends harness-specific slash command via tmux | Harness-specific; TBD — see #59 | `/rename` will route through `metadata.session` once the session-control channel is defined. |
+| `orch-tell %NNN "hello"` | Injected prompt into tmux pane via `send-keys` | `nats req agents.prompt.cc.<owner>.pct<N> "hello"` (or new `orch` verb — see #58) | Subject token for `%NNN`: replace `%` with `pct`, e.g. `%37` → `pct37`. Caller MUST read the subject off the endpoint record (§4.3), not construct it from the pane id. |
+| `orch-listen [--stream]` | `fswatch` loop over `~/.cache/orch-stop/*.event` marker files | `nats sub 'agents.hb.>'` + chunk-stream sub (see #59) | Heartbeats fire on `agents.hb.cc.<owner>.pct<N>` every 15 s; Stop events are modelled as a status-chunk sequence. |
+| `orch-peek [pane...]` | Read `~/.cache/orch-registry/<pane>.json` | `nats req '$SRV.INFO.agents'` | Returns all live shim instances; filter by `metadata.pane_id` for a single worker. `nats micro info agents` is the human-readable alias. |
+| `~/.cache/orch-registry/<pane>.json` | Local JSON file per pane — source of truth for pane→agent→cwd→session | `nats req '$SRV.INFO.agents'` + `jq` on `metadata.pane_id` / `metadata.owner` | The shim publishes the same fields to `$SRV.INFO.agents` metadata. Local registry files are retired. |
+| `orch-tell --force <pane> "/rename foo"` | Sent harness-specific slash command via tmux | Routes through `metadata.session` once the session-control channel is defined — see #59 | |
 
 **Subjects quick-reference** (shim v1, §2.3 channel-plugin layout, `cc` token for claude-code):
 
@@ -53,44 +52,12 @@ $SRV.PING.agents                   # liveness probe
 
 `<owner>` defaults to `$USER`; set `ORCH_OWNER` to override.
 
-## Dual-emit window
+## Common workflows
 
-During the migration, **both paths work simultaneously**. The shim is additive:
-`orch-tell` and marker files keep working; the shim makes every pane *additionally*
-reachable on the Synadia bus.
+Four canonical patterns in their current Synadia-native form.
 
-```
-   operator
-      │
-      ├─── orch-tell %37 "hello" ──────────► tmux send-keys (legacy path, still works)
-      │
-      └─── nats req agents.prompt.cc.… ────► shim → orch-tell internally
-```
+### Spawn a worker and send it a prompt
 
-After the sunset date (TBD — will be announced when #59 and #60 close), the legacy
-`orch-tell` / marker-file path will be soft-deprecated. A warning period precedes
-removal; no hard cutover without operator notice.
-
-**During the dual-emit window:**
-- Skills that already reference `orch-tell` / `orch-listen` / `orch-peek` remain correct.
-- New skills should prefer the Synadia path only once #58/#59 are merged and the CLI shape is stable.
-- Do NOT update existing skill bodies before #58/#59 land — the new CLI shape isn't finalized.
-
-## Common workflows translated
-
-Four canonical patterns, shown legacy → Synadia. The Synadia column uses
-`nats` CLI as a stand-in; the new `orch` verb (TBD — #58) will wrap it.
-
-### Spawn a worker and ask it a question
-
-**Legacy:**
-```sh
-PANE=$(orch-spawn claude --project myapp --outfit backend --cut executing)
-orch-tell "$PANE" "summarize the auth module"
-REPLY=$(orch-ask "$PANE" "summarize the auth module")
-```
-
-**Synadia (during dual-emit window — shim already up after orch-spawn):**
 ```sh
 PANE=$(orch-spawn claude --project myapp --outfit backend --cut executing)
 # shim is launched automatically; discover the subject
@@ -103,15 +70,6 @@ nats req "$INFO" "summarize the auth module"
 
 ### Broadcast a question to all workers
 
-**Legacy:**
-```sh
-for PANE in %37 %38 %39; do
-  orch-tell "$PANE" "what did you last complete?" &
-done
-wait
-```
-
-**Synadia:**
 ```sh
 # Discover all live panes, send in parallel
 nats req '$SRV.INFO.agents' '' | jq -r '.services[].endpoints[].subject' | \
@@ -121,13 +79,6 @@ nats req '$SRV.INFO.agents' '' | jq -r '.services[].endpoints[].subject' | \
 
 ### Watch for a worker becoming idle (Stop event)
 
-**Legacy:**
-```python
-Monitor(command="orch-listen --stream", description="harness events", persistent=True)
-# each event: {"event_file":..., "pane_id":..., "ext":"event", ...}
-```
-
-**Synadia:**
 ```sh
 # Heartbeat subscription — fires every 15 s per live pane
 nats sub 'agents.hb.>'
@@ -136,12 +87,6 @@ nats sub 'agents.hb.>'
 
 ### Spy on a session
 
-**Legacy:**
-```sh
-orch-spy operator "audit operator session for the last hour"
-```
-
-**Synadia (shim path, same spawn mechanics — shim registers the spy too):**
 ```sh
 orch-spy operator "audit operator session for the last hour"
 # spy pane is auto-registered on the bus; its own heartbeats appear on
@@ -151,34 +96,29 @@ orch-spy operator "audit operator session for the last hour"
 
 ## Skill update checklist
 
-For operators who maintain skills that embed today's primitives. Run this checklist
-against each skill body **after #58 and #59 are merged** (not before — the new CLI
-shape isn't stable until then).
+For operators who maintain skills that embed legacy primitives:
 
 1. **Grep for legacy primitives.** Search the skill body for `orch-tell`, `orch-listen`,
    `orch-peek`, `orch-registry`, `orch-register`, `orch-subscribe`.
 
-2. **For each hit, determine the pattern:**
-   - `orch-tell <pane> <prompt>` → replace with the new `orch` verb (see #58 announcement)
-     or `nats req agents.prompt.cc.<owner>.pct<N> <prompt>`.
-   - `orch-listen [--stream]` → replace with the new backend (see #59 announcement);
+2. **For each hit, apply the replacement:**
+   - `orch-tell <pane> <prompt>` → `nats req agents.prompt.cc.<owner>.pct<N> <prompt>`
+     (or new `orch` verb — see #58 announcement).
+   - `orch-listen [--stream]` → `nats sub 'agents.hb.>'` + chunk-stream sub (see #59);
      Monitor wrapper stays — only the inner command changes.
-   - `orch-peek` → replace with `nats micro info agents` or `nats req '$SRV.INFO.agents'`.
-   - Registry file reads → replace with a `nats req '$SRV.INFO.agents'` + `jq` filter
+   - `orch-peek` → `nats micro info agents` or `nats req '$SRV.INFO.agents'`.
+   - Registry file reads → `nats req '$SRV.INFO.agents'` + `jq` filter
      on `metadata.pane_id` / `metadata.owner`.
-   - `orch-register` calls → remove; the shim self-registers on spawn, no manual step.
-   - `orch-subscribe` → TBD — see #59 (worker-side push is the open part).
+   - `orch-register` calls → remove; the shim self-registers on spawn.
+   - `orch-subscribe` → TBD — see #59 (worker-side push).
 
 3. **Update the "Tools" or cheat-sheet table** in the skill body to reflect the new subjects
    and CLI verbs.
 
-4. **Add a cross-ref to this skill** in the deprecation notice (already added to
-   `orch-driver`, `orch-suiting`, `assume-orch`).
+4. **Verify** by reading the updated skill body and confirming no legacy primitive remains
+   without a fully resolved replacement.
 
-5. **Verify** by reading the updated skill body and confirming no legacy primitive remains
-   without a corresponding "TBD — see #N" or a fully resolved replacement.
-
-6. **Commit** with `refactor(skills): update <skill-name> for Synadia cutover (#58 #59)`.
+5. **Commit** with `refactor(skills): update <skill-name> for Synadia cutover (#58 #59)`.
 
 ## Cross-references
 
