@@ -159,9 +159,13 @@ if [ "${MOCK_USE_SHIM:-0}" = "1" ]; then
         REPLY_INBOX="_t10_reply_$$"
         T10_CAP=/tmp/t10-chunks.log
 
-        # Subscribe to the reply inbox; collect up to 5 messages or timeout 8s.
+        # Subscribe to the reply inbox; collect up to 5 messages or timeout.
+        # Timeout must exceed the shim's terminatorWatchdog (30s, see
+        # cmd/orch-agent-shim/internal/shim/shim.go) — when the mock harness
+        # produces no response chunks, the terminator is watchdog-fired ~30s
+        # after the ack. 35s gives slack for scheduler jitter.
         nats --server="${NATS_URL:-nats://localhost:4222}" \
-             sub --raw --count=5 --timeout=8s \
+             sub --raw --count=5 --timeout=35s \
              "$REPLY_INBOX" >"$T10_CAP" 2>&1 &
         T10_SUB=$!
         sleep 0.3
@@ -193,11 +197,14 @@ if [ "${MOCK_USE_SHIM:-0}" = "1" ]; then
             # Final chunk must be zero-body (empty line or no JSON).
             # nats sub --raw writes each message on its own line; the
             # terminator arrives as an empty line.
+            # Post-#102: the shim's terminatorWatchdog (30s) guarantees a
+            # terminator emission. With the sub timeout bumped above 30s,
+            # the empty line is reliably captured — flipping this from skip
+            # to a hard assertion.
             if grep -q '^$' "$T10_CAP" 2>/dev/null; then
                 assert "T10.4: zero-body terminator present" "yes" "yes"
             else
-                skip "T10.4: zero-body terminator" \
-                     "terminator line not captured — nats sub may have exited before it arrived"
+                assert "T10.4: zero-body terminator present" "yes" "no"
             fi
         else
             skip "T10: typed chunk sequence" \

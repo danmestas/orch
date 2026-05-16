@@ -405,10 +405,15 @@ else
     # Note: v1 shim ack's then terminates; bridging the harness response
     # to a {type:"response"} chunk is incremental work (tracked separately).
     # This test validates the protocol skeleton, not response bridging.
+    #
+    # reply-timeout must exceed the shim's terminatorWatchdog (30s, see
+    # cmd/orch-agent-shim/internal/shim/shim.go) — when the harness mock
+    # produces no output, the terminator is watchdog-fired ~30s after the
+    # ack. 35s gives a few seconds of slack for scheduler jitter.
     log "T10: prompt round-trip produces ack + terminator"
     if [ -n "$prompt_subj" ]; then
         nats --server="$SESH_NATS_URL" req "$prompt_subj" "say bench-t10-ok" \
-            --replies=0 --reply-timeout=10s --timeout=20s >/tmp/t10.cap 2>&1
+            --replies=0 --reply-timeout=35s --timeout=45s >/tmp/t10.cap 2>&1
         if grep -q '"type":"status","data":"ack"' /tmp/t10.cap; then
             assert "T10 leading status:ack chunk received" "yes" "yes"
         else
