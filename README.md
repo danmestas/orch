@@ -4,6 +4,12 @@ By Daniel Mestas
 
 A lightweight, extensible substrate for autonomous long-running multi-agent coordination on tmux.
 
+Each pane orch spawns speaks the [Synadia Agent Protocol v0.3](docs/synadia-comparison.md)
+on NATS. `orch-spawn` launches an [`orch-agent-shim`](docs/orch-agent-shim.md) sibling that
+registers the pane on `$SRV.INFO.agents` and serves prompts at
+`agents.prompt.<token>.<owner>.<pane>`. `orch-tell` and `orch-ask` route through discovery;
+operator UX is unchanged, the wire under it is standard.
+
 ## Prerequisites
 
 - **tmux** (3.0+) — `brew install tmux` (macOS) or `apt install tmux` / `dnf install tmux` (Linux)
@@ -72,11 +78,9 @@ That's it. Orch handles the spawning, addressing, prompting, listening, and esca
 
 ## How it works
 
-Behind the scenes, each worker is a tmux pane running a full agent CLI with an optional outfit — a config-as-code bundle that ships system prompt, tool allowlist, skills, hooks, and model choice as one versioned artifact. Workers are addressable by pane id; you (or any other harness with addressing rights) send prompts, wait for completion, and survey activity over the Synadia Agent Protocol bus. Each spawned pane gets an `orch-agent-shim` sibling that publishes typed event chunks (response, thinking, tool_use, status) on `agents.events.>` and heartbeats on `agents.hb.>`; subscribers compose with `nats sub 'agents.>'` and a Monitor. Each harness carries a role tag — worker / observer / operator — surfaced in the shim's `$SRV.INFO.agents` metadata so subscribers know who can interrupt whom.
+Behind the scenes, each worker is a tmux pane running a full agent CLI with an optional outfit — a config-as-code bundle that ships system prompt, tool allowlist, skills, hooks, and model choice as one versioned artifact. Workers are addressable by pane id; you (or any other harness with addressing rights) send prompts, wait for completion, and survey activity over the bus introduced above. The shim publishes typed chunks (response, thinking, tool_use, status) on each prompt's reply subject and heartbeats on `agents.hb.<token>.<owner>.<pane>`; subscribe with `nats sub 'agents.>'` (wrap in a Monitor for live streams). Each harness carries a role tag — worker / observer / operator — surfaced in the shim's `$SRV.INFO.agents` metadata so subscribers know who can interrupt whom.
 
 You don't drive any of this manually. You describe what you want; orch's installed skill suite handles the spawning, the addressing, the listening, and the escalation surface.
-
-For Synadia Agent Protocol integration (every spawned pane discoverable on a NATS bus, addressable via `agents.prompt.cc.<owner>.pct<pane>`), see [`docs/orch-agent-shim.md`](docs/orch-agent-shim.md) and `orch-spawn --with-shim`.
 
 ## Goal-harness (optional sesh integration)
 
