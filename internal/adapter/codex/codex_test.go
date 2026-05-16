@@ -3,8 +3,11 @@ package codex
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -554,6 +557,106 @@ func TestAdapter_IdleQuery_NoChunk_WhenNoPromptPattern(t *testing.T) {
 	case <-time.After(400 * time.Millisecond):
 		// correct — no query chunk without prompt pattern.
 	}
+}
+
+// TestHashTail_NoAllocations asserts the per-tick change-detection path does
+// not allocate. Regression guard for orch#108: the previous sha256 path copied
+// the whole pane string into a fresh []byte every poll (~50KB/tick → MADV_FREE
+// arena drift over long runs).
+func TestHashTail_NoAllocations(t *testing.T) {
+	// Build a 24KB sample pane buffer, similar to what tmux capture-pane
+	// returns for a default-size pane.
+	content := strings.Repeat("codex output line that looks roughly like real TUI text\n", 480)
+
+	h := fnv.New64a()
+	// Warm-up so any one-time init isn't counted.
+	_ = hashTail(h, content, 4096)
+
+	allocs := testing.AllocsPerRun(200, func() {
+		_ = hashTail(h, content, 4096)
+	})
+	// io.WriteString on a *Hash should not allocate; tail-slicing is a
+	// pointer/length adjustment. Allow a tiny slack for runtime jitter.
+	if allocs > 1 {
+		t.Fatalf("hashTail allocates per call: got %.2f allocs/op, want ≤1", allocs)
+	}
+}
+
+// TestIdleQueryLoop_BoundedHeap drives ~1000 idleQueryLoop ticks through the
+// adapter and asserts heap growth stays bounded. Regression guard for orch#108
+// where the codex shim's RSS climbed ~26% over a 3-min soak while peer
+// adapters (claude/pi/gemini) stayed within ±1%.
+func TestIdleQueryLoop_BoundedHeap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping heap-growth test in -short mode")
+	}
+
+	stub := &capturePaneStub{}
+	a, _, _ := newTestAdapter(t)
+	defer a.Close()
+	a.CapturePaneFn = stub.fn
+	a.idleThreshold = 2 * time.Millisecond // poll at 1ms
+
+	shimCtx, shimCancel := context.WithCancel(context.Background())
+	defer shimCancel()
+	if err := a.Start(shimCtx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Vary content every iteration so the loop hashes a fresh buffer each
+	// tick (worst case for the old sha256 path).
+	base := strings.Repeat("pane line of typical codex TUI width that wraps occasionally\n", 400)
+	change := func(i int) {
+		stub.set(fmt.Sprintf("%s\nsample %d\n", base, i))
+	}
+	change(0)
+
+	// Drain any chunks the loop emits so the events channel never blocks.
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for {
+			select {
+			case <-a.Events():
+			case <-shimCtx.Done():
+				return
+			}
+		}
+	}()
+
+	// Warm-up: let the loop reach steady state.
+	for i := 0; i < 100; i++ {
+		change(i)
+		time.Sleep(1 * time.Millisecond)
+	}
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	// Drive ~1000 captures.
+	for i := 0; i < 1000; i++ {
+		change(i + 1000)
+		time.Sleep(1 * time.Millisecond)
+	}
+
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	// HeapInuse should not climb meaningfully. Allow 2MB of slack for
+	// non-idle-loop allocations and runtime jitter.
+	const maxGrowthBytes = 2 * 1024 * 1024
+	growth := int64(after.HeapInuse) - int64(before.HeapInuse)
+	if growth > maxGrowthBytes {
+		t.Fatalf("idleQueryLoop heap growth too high: before=%d after=%d delta=%d bytes (limit=%d)",
+			before.HeapInuse, after.HeapInuse, growth, maxGrowthBytes)
+	}
+
+	// Also assert no goroutine leak from the loop itself.
+	shimCancel()
+	<-drained
+	time.Sleep(50 * time.Millisecond)
+	// Loop exit is best-effort to check here — the main signal is HeapInuse.
 }
 
 // -----------------------------------------------------------------------------

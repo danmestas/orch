@@ -21,10 +21,11 @@ package codex
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -348,10 +349,14 @@ func (a *Adapter) idleQueryLoop(ctx context.Context) {
 	}
 
 	var (
-		prevHash  [32]byte
+		prevHash  uint64
+		hasPrev   bool
 		idleSince time.Time
 		emitted   bool // guard: only one query chunk per idle window
 	)
+
+	// Reuse a single hasher across ticks to avoid per-tick allocations.
+	hasher := fnv.New64a()
 
 	t := time.NewTicker(pollInterval)
 	defer t.Stop()
@@ -367,16 +372,18 @@ func (a *Adapter) idleQueryLoop(ctx context.Context) {
 		content, err := a.CapturePaneFn(a.Pane)
 		if err != nil {
 			// pane gone or tmux not available — reset and wait.
-			prevHash = [32]byte{}
+			prevHash = 0
+			hasPrev = false
 			idleSince = time.Time{}
 			emitted = false
 			continue
 		}
 
-		h := sha256.Sum256([]byte(content))
-		if h != prevHash {
-			// buffer changed: reset idle clock.
+		h := hashTail(hasher, content, idleHashTailBytes)
+		if !hasPrev || h != prevHash {
+			// buffer changed (or first sample): reset idle clock.
 			prevHash = h
+			hasPrev = true
 			idleSince = time.Now()
 			emitted = false
 			continue
@@ -406,11 +413,37 @@ func (a *Adapter) idleQueryLoop(ctx context.Context) {
 	}
 }
 
+// idleHashTailBytes is how many trailing bytes of the pane buffer we hash
+// to detect change. Prompt patterns only appear near the bottom of the
+// visible buffer, so hashing the full pane (often 20–80KB) per tick wasted
+// arena pressure that drifted RSS upward over long runs. 4KB comfortably
+// covers a wrapped multi-line prompt and is roughly free to feed FNV.
+const idleHashTailBytes = 4096
+
+// hashTail returns the FNV-64a hash of the last n bytes of s. The hasher is
+// reset and reused across calls so no per-call allocation occurs (FNV-64a
+// state is fixed-size). io.WriteString avoids the []byte(s) copy that
+// crypto/sha256 required, which was the dominant per-tick allocation.
+func hashTail(h io.Writer, s string, n int) uint64 {
+	if r, ok := h.(interface{ Reset() }); ok {
+		r.Reset()
+	}
+	if len(s) > n {
+		s = s[len(s)-n:]
+	}
+	_, _ = io.WriteString(h, s)
+	if sum, ok := h.(interface{ Sum64() uint64 }); ok {
+		return sum.Sum64()
+	}
+	return 0
+}
+
 // promptPatterns are simple string markers that appear in the codex TUI
 // when it is waiting for user input. Checked with strings.Contains so
 // partial matches across wrapped lines work correctly.
 var promptPatterns = []string{
-	"❯",       // codex primary prompt glyph
+	"❯",       // codex primary prompt glyph (U+276F heavy right ornament)
+	"›",       // codex compact prompt glyph (U+203A single right-pointing angle)
 	"> ",      // fallback generic shell-style prompt
 	"[y/n]",   // codex approval prompt
 	"(y/n)",   // variant approval prompt
