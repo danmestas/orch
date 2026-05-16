@@ -20,6 +20,9 @@ rules-bundle/
 *.tgz
 node_modules/
 
+# Scratch dir
+tmp/
+
 # OS / editor cruft
 .DS_Store
 *.swp
