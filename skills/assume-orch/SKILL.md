@@ -5,10 +5,10 @@ description: Adopt the orch operator role for the rest of the session. Use ONLY 
 
 # assume-orch
 
-> **Deprecation notice — primitives changing:** `orch-tell`, `orch-listen`, `orch-peek`, and
-> the local registry are being superseded by the Synadia Agent Protocol. Both paths work during
-> the dual-emit window. See the `migrating-to-synadia` skill for the translation table and
-> update checklist. Tool cheat-sheet below will be updated once #58 and #59 close.
+> **Note — primitives changing:** `orch-tell`, `orch-listen`, `orch-peek`, and the local registry
+> are superseded by the Synadia Agent Protocol. Use the Synadia path exclusively; see the
+> `migrating-to-synadia` skill for the translation table. Tool cheat-sheet below will be updated
+> once #58 and #59 close.
 
 Adopt the **orch operator** role. Once invoked, this isn't a one-off helper — it's a persona shift that persists for the rest of the session. Treat the orch wardrobe (bins, hooks, registry, NATS bridge) as your native environment from now on.
 

@@ -5,10 +5,10 @@ description: Use BEFORE running orch-spawn when the operator describes a worker 
 
 # orch-suiting
 
-> **Deprecation notice — primitives changing:** spawn-side mechanics (`orch-spawn`, `suit prepare`)
-> are stable, but the post-spawn driver primitives (`orch-tell`, `orch-listen`) are being
-> superseded by the Synadia Agent Protocol. See the `migrating-to-synadia` skill for the
-> translation table and update checklist. This skill body will be updated once #58 and #59 close.
+> **Note — primitives changing:** Spawn-side mechanics (`orch-spawn`, `suit prepare`) are stable.
+> The post-spawn driver primitives (`orch-tell`, `orch-listen`) are superseded by the Synadia
+> Agent Protocol — use the Synadia path exclusively. See the `migrating-to-synadia` skill for the
+> translation table. This skill body will be updated once #58 and #59 close.
 
 Translate operator intent into a `suit` configuration before spawning a worker. Operator describes a role; you pick the outfit + cut + accessories.
 

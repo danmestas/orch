@@ -5,10 +5,10 @@ description: Drive interactive AI agent CLIs (claude, pi, codex, gemini) already
 
 # orch-driver
 
-> **Deprecation notice — primitives changing:** `orch-tell`, `orch-listen`, `orch-peek`, and
-> the local registry are being superseded by the Synadia Agent Protocol. Both paths work during
-> the dual-emit window. See the `migrating-to-synadia` skill for the translation table and
-> update checklist. This skill body will be updated once #58 and #59 close.
+> **Note — primitives changing:** `orch-tell`, `orch-listen`, `orch-peek`, and the local registry
+> are superseded by the Synadia Agent Protocol. Use the Synadia path exclusively; see the
+> `migrating-to-synadia` skill for the translation table. This skill body will be updated once
+> #58 and #59 close.
 
 Drive interactive AI agents in adjacent tmux panes from a parent Claude Code session, and react to their lifecycle events without polling.
 
