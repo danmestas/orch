@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### feat(extensions): claudecode-subagent-panel bridge — surface orch panes in Claude Code's subagent panel (#93)
+
+A new top-level `extensions/` plane lands alongside executors and adapters.
+The first extension, `claudecode-subagent-panel`, runs as a sidecar daemon
+(`orch-cc-subagent-bridge`) launched by `orch up` and stopped by `orch down`.
+It subscribes to `$SRV.INFO.agents` (discovery) and `agents.>` (chunks) and
+synthesises JSONLs under `~/.claude/projects/<cwd-enc>/<session-uuid>/subagents/`
+so every orch-spawned pane — claude, codex, pi, gemini — appears in Claude
+Code's subagent panel. The bridge is harness-agnostic (reads only the SAP
+wire). See [`docs/extensions.md`](docs/extensions.md) and
+[`extensions/README.md`](extensions/README.md) for the contract.
+
 ### Breaking changes
 
 - **`orch-tell --legacy-keystrokes` removed** (#96). The tmux send-keys fallback

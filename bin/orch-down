@@ -2,11 +2,13 @@
 # orch-down — tear down orch's install state on this machine.
 #
 # Reverses what `orch up` (and the npm postinstall) put in place:
-#   1. Remove orch hook entries from ~/.claude/settings.json (including
+#   1. Stop extension daemons (~/.orch/extensions/*/daemon.pid) and sweep
+#      their synthetic CC subagent JSONLs
+#   2. Remove orch hook entries from ~/.claude/settings.json (including
 #      legacy orch-{stop,notify}-marker entries from pre-#94 installs)
-#   2. Sweep symlinks orch owns (hooks, skills)
-#   3. Remove the fleet-prompt cache
-#   4. Remove runtime state (registry, send log, subs, claim, plus migration
+#   3. Sweep symlinks orch owns (hooks, skills)
+#   4. Remove the fleet-prompt cache
+#   5. Remove runtime state (registry, send log, subs, claim, plus migration
 #      residue under ~/.cache/orch-stop/ for operators on pre-#94 installs)
 #
 # What it does NOT do:
@@ -63,6 +65,8 @@ say "=== orch-down — package: $PKG_ROOT ==="
 # ───────────────────────────────────────────────────────────────────
 say
 say "This will:"
+say "  - Stop extension daemons (~/.orch/extensions/*/daemon.pid) and sweep"
+say "    their synthetic CC subagent JSONLs"
 say "  - Remove orch hook entries from ~/.claude/settings.json (backup first)"
 say "  - Remove symlinks under ~/.claude/hooks/ and ~/.claude/skills/"
 say "    that point back to this package"
@@ -97,7 +101,51 @@ fi
 # ───────────────────────────────────────────────────────────────────
 # 1. Remove orch hooks from settings.json
 # ───────────────────────────────────────────────────────────────────
-say "[1/4] removing orch hooks from ~/.claude/settings.json"
+say "[1/5] stopping extension daemons"
+EXT_RUN_BASE="$HOME/.orch/extensions"
+if [ -d "$EXT_RUN_BASE" ]; then
+    for pid_file in "$EXT_RUN_BASE"/*/daemon.pid; do
+        [ -f "$pid_file" ] || continue
+        ext_name=$(basename "$(dirname "$pid_file")")
+        pid=$(cat "$pid_file" 2>/dev/null || true)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            if [ $DRY_RUN -eq 1 ]; then
+                say "  would SIGTERM $ext_name (pid=$pid)"
+            else
+                kill -TERM "$pid" 2>/dev/null || true
+                # Wait up to 5s for graceful exit.
+                for _ in 1 2 3 4 5; do
+                    kill -0 "$pid" 2>/dev/null || break
+                    sleep 1
+                done
+                kill -KILL "$pid" 2>/dev/null || true
+                say "  stopped $ext_name (pid=$pid)"
+            fi
+        else
+            say "  $ext_name: stale pid file (pid=$pid not running)"
+        fi
+        if [ $DRY_RUN -eq 0 ]; then
+            rm -f "$pid_file"
+        fi
+    done
+else
+    say "  no extension daemons under $EXT_RUN_BASE"
+fi
+
+# Belt-and-suspenders sweep: synthetic CC subagent JSONLs that an extension
+# daemon left behind (e.g. SIGKILL before it could clean up). Pattern is
+# strictly agent-pct*.jsonl — see extensions/claudecode-subagent-panel/
+# internal/writer/EncodePane. Real CC subagent files use a-f hex prefixes,
+# so the "pct" prefix is unambiguous.
+say "  sweeping orphaned synthetic CC subagent JSONLs"
+shopt -s nullglob 2>/dev/null || true
+for f in "$HOME"/.claude/projects/*/*/subagents/agent-pct*.jsonl; do
+    [ -f "$f" ] || continue
+    do_rm "$f"
+done
+say
+
+say "[2/5] removing orch hooks from ~/.claude/settings.json"
 SETTINGS="$HOME/.claude/settings.json"
 if [ -f "$SETTINGS" ]; then
     if [ $DRY_RUN -eq 0 ]; then
@@ -135,7 +183,7 @@ say
 # ───────────────────────────────────────────────────────────────────
 # 2. Sweep package-owned symlinks
 # ───────────────────────────────────────────────────────────────────
-say "[2/4] removing package-owned symlinks"
+say "[3/5] removing package-owned symlinks"
 if [ $DRY_RUN -eq 0 ] && [ -f "$PKG_ROOT/scripts/preuninstall.js" ] && command -v node >/dev/null 2>&1; then
     node "$PKG_ROOT/scripts/preuninstall.js" 2>&1 | sed 's/^/  /'
 else
@@ -164,14 +212,14 @@ say
 # ───────────────────────────────────────────────────────────────────
 # 3. Remove fleet-prompt cache
 # ───────────────────────────────────────────────────────────────────
-say "[3/4] removing fleet-prompt cache"
+say "[4/5] removing fleet-prompt cache"
 do_rm "$HOME/.cache/orch-fleet-prompt.md"
 say
 
 # ───────────────────────────────────────────────────────────────────
 # 4. Remove runtime state (unless --keep-state)
 # ───────────────────────────────────────────────────────────────────
-say "[4/4] removing runtime state"
+say "[5/5] removing runtime state"
 if [ $KEEP_STATE -eq 1 ]; then
     say "  --keep-state — preserving runtime caches"
 else

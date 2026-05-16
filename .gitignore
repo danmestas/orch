@@ -35,3 +35,6 @@ tmp/
 /cmd/orch-agent-shim/orch-agent-shim
 test/wire-compat/node_modules/
 test/wire-compat/bun.lockb
+
+# Extension binaries built lazily by orch-up
+extensions/*/.bin/
