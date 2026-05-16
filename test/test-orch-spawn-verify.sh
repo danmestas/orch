@@ -168,13 +168,17 @@ echo "=== verify configuration: defaults and banner table ==="
 
 # 4) Per #36, the default verify ceiling rose from 30s to 60s. Verify
 # the script literally has that default so a future drift gets caught.
-# Resolve to the in-tree orch-spawn relative to this test, not whatever
+# Resolve to the in-tree spawn script relative to this test, not whatever
 # command -v finds — a stale system install would silently invalidate
 # these config assertions while the integration tests above still ran
 # against the in-tree binary via PATH.
-ORCH_SPAWN_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/bin/orch-spawn"
-[ -f "$ORCH_SPAWN_SCRIPT" ] || { echo "in-tree orch-spawn not found at $ORCH_SPAWN_SCRIPT"; exit 2; }
-if grep -q 'ORCH_VERIFY_TIMEOUT:-60' "$ORCH_SPAWN_SCRIPT"; then
+#
+# Post-#78: the verify/banner logic moved from bin/orch-spawn into the
+# tmux executor (executors/tmux/spawn.sh). Grep that file — it now owns
+# those configs.
+TMUX_SPAWN_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/executors/tmux/spawn.sh"
+[ -f "$TMUX_SPAWN_SCRIPT" ] || { echo "in-tree executors/tmux/spawn.sh not found at $TMUX_SPAWN_SCRIPT"; exit 2; }
+if grep -q 'ORCH_VERIFY_TIMEOUT:-60' "$TMUX_SPAWN_SCRIPT"; then
     timeout_default="60"
 else
     timeout_default="missing-or-different"
@@ -186,7 +190,7 @@ assert "config: default ORCH_VERIFY_TIMEOUT is 60s" "60" "$timeout_default"
 # canonical agents are named in the BANNER case.
 banner_table_ok="yes"
 for agent in claude codex pi gemini; do
-    if ! grep -qE "^[[:space:]]*$agent\\)[[:space:]]*BANNER=" "$ORCH_SPAWN_SCRIPT"; then
+    if ! grep -qE "^[[:space:]]*$agent\\)[[:space:]]*BANNER=" "$TMUX_SPAWN_SCRIPT"; then
         banner_table_ok="missing-$agent"
         break
     fi

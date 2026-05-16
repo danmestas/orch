@@ -46,6 +46,7 @@
     "internal/",
     "go.mod",
     "go.sum",
+    "executors/",
     "hooks/",
     "codex-hooks/",
     "gemini-hooks/",

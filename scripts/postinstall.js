@@ -2,12 +2,16 @@
 // postinstall — symlink orch's hooks and skills into Claude Code's tree.
 //
 // What we do here (idempotent):
-//   1. Symlink hooks/*           → ~/.claude/hooks/
-//   2. Symlink skills/*          → ~/.claude/skills/
-//   3. Symlink pi-extensions/*   → ~/.pi/agent/extensions/  (only if that dir exists)
-//   4. Symlink codex-hooks/*     → ~/.codex/hooks/          (only if ~/.codex exists)
-//   5. Symlink gemini-hooks/*    → ~/.gemini/hooks/         (only if ~/.gemini exists)
-//   6. Copy fleet-prompt.md      → ~/.cache/orch-fleet-prompt.md  (stable file, not symlink)
+//   1. Symlink hooks/*                                 → ~/.claude/hooks/
+//   2. Symlink skills/*                                → ~/.claude/skills/
+//   3. Symlink executors/tmux/legacy/pi-extensions/*   → ~/.pi/agent/extensions/  (only if that dir exists)
+//   4. Symlink executors/tmux/legacy/codex-hooks/*     → ~/.codex/hooks/          (only if ~/.codex exists)
+//   5. Symlink executors/tmux/legacy/gemini-hooks/*    → ~/.gemini/hooks/         (only if ~/.gemini exists)
+//   6. Copy fleet-prompt.md                            → ~/.cache/orch-fleet-prompt.md  (stable file, not symlink)
+//
+// Note: codex-hooks/, gemini-hooks/, pi-extensions/ at the repo root are
+// backward-compat symlinks pointing into executors/tmux/legacy/. The canonical
+// locations are under executors/tmux/legacy/ and are used directly here.
 //
 // What we do NOT do (intentionally):
 //   * Modify ~/.claude/settings.json  — the user merges settings-snippet.json by hand.
@@ -62,21 +66,24 @@ linkDirEntries(path.join(ROOT, "hooks"), path.join(HOME, ".claude", "hooks"));
 linkDirEntries(path.join(ROOT, "skills"), path.join(HOME, ".claude", "skills"));
 
 // 3. Pi extensions (only if pi is installed)
+// Canonical source: executors/tmux/legacy/pi-extensions/
 const piExtDir = path.join(HOME, ".pi", "agent", "extensions");
 if (fs.existsSync(path.join(HOME, ".pi"))) {
-    linkDirEntries(path.join(ROOT, "pi-extensions"), piExtDir);
+    linkDirEntries(path.join(ROOT, "executors", "tmux", "legacy", "pi-extensions"), piExtDir);
 }
 
 // 4. Codex hooks (only if codex is installed)
+// Canonical source: executors/tmux/legacy/codex-hooks/
 const codexHooksDir = path.join(HOME, ".codex", "hooks");
 if (fs.existsSync(path.join(HOME, ".codex"))) {
-    linkDirEntries(path.join(ROOT, "codex-hooks"), codexHooksDir);
+    linkDirEntries(path.join(ROOT, "executors", "tmux", "legacy", "codex-hooks"), codexHooksDir);
 }
 
 // 5. Gemini hooks (only if gemini is installed)
+// Canonical source: executors/tmux/legacy/gemini-hooks/
 const geminiHooksDir = path.join(HOME, ".gemini", "hooks");
 if (fs.existsSync(path.join(HOME, ".gemini"))) {
-    linkDirEntries(path.join(ROOT, "gemini-hooks"), geminiHooksDir);
+    linkDirEntries(path.join(ROOT, "executors", "tmux", "legacy", "gemini-hooks"), geminiHooksDir);
 }
 
 // 6. Fleet prompt — copy, not symlink (agents read once at spawn; stable file).
