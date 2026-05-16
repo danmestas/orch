@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# orch-nats-bridge-in — subscribe to NATS and inject prompts into tmux panes.
+#
+# Subscribes to a single subject (default `orch.tell`). Each message body is
+# JSON shaped:
+#
+#   {"pane": "%37", "prompt": "Run plan A from /path/to/plan.md"}
+#
+#   - pane:   tmux pane id, including the `%` prefix (or an alias resolvable
+#             by orch-tell — see `orch-tell --list`)
+#   - prompt: the prompt text to inject. Multi-line OK.
+#
+# Calls `orch-tell <pane> -` with the prompt piped in. Serial-by-default
+# (one message at a time); orch-tell's own idle-wait protects against
+# back-to-back prompts arriving while the agent is still rendering the
+# previous one.
+#
+# Why single-subject + JSON-body instead of per-pane subjects?
+#   * NATS subject tokens can't contain `%`, so per-pane subjects would
+#     need lossy encoding of pane ids.
+#   * The nats CLI's --translate hook doesn't expose $NATS_SUBJECT to the
+#     translator, so a single subscriber can't reliably pair subject with
+#     body in shell. JSON-body sidesteps both issues.
+#   * Outbound (harness → NATS) stays subject-per-pane (`orch.stop.<num>`)
+#     because the publisher already knows the subject — no parsing problem
+#     on that side.
+#
+# Usage:
+#   orch-nats-bridge-in
+#   orch-nats-bridge-in --subject=orch.tell.fleet1
+#   orch-nats-bridge-in --server=nats://localhost:4223
+#   orch-nats-bridge-in --background
+#
+# Env:
+#   ORCH_NATS_SUBJECT       Subject to subscribe to (default: orch.tell)
+#   ORCH_NATS_BRIDGE_LOG    Log file (default: ~/.cache/orch-nats-bridge.log)
+#   NATS_URL                   Standard nats CLI server URL override
+#
+set -euo pipefail
+
+SUBJECT="${ORCH_NATS_SUBJECT:-orch.tell}"
+SERVER=""
+BACKGROUND=0
+
+usage() {
+    cat <<EOF
+orch-nats-bridge-in — subscribe to NATS, inject JSON-bodied prompts into panes.
+
+Usage: orch-nats-bridge-in [--subject=<s>] [--server=<url>] [--background]
+
+Subscribes to <subject> (default: orch.tell). Body must be JSON:
+  {"pane": "%37", "prompt": "..."}
+
+For each message, calls \`orch-tell <pane> -\` with the prompt piped in.
+
+Options:
+  --subject=<s>     Subscribe subject (default: orch.tell)
+  --server=<url>    NATS URL (default: NATS_URL env or nats://localhost:4222)
+  --background      Detach and print PID to stdout
+  --help            This message
+
+Publish example:
+  nats pub orch.tell '{"pane":"%37","prompt":"say hello"}'
+EOF
+}
+
+for arg in "$@"; do
+    case $arg in
+        --subject=*) SUBJECT="${arg#--subject=}" ;;
+        --server=*)  SERVER="${arg#--server=}" ;;
+        --background) BACKGROUND=1 ;;
+        --help|-h) usage; exit 0 ;;
+        *) echo "orch-nats-bridge-in: unknown arg: $arg" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+command -v nats >/dev/null 2>&1 || {
+    echo "orch-nats-bridge-in: nats CLI not found on PATH" >&2
+    exit 1
+}
+command -v orch-tell >/dev/null 2>&1 || {
+    echo "orch-nats-bridge-in: orch-tell not found on PATH" >&2
+    exit 1
+}
+command -v jq >/dev/null 2>&1 || {
+    echo "orch-nats-bridge-in: jq is required (bodies are JSON)" >&2
+    exit 1
+}
+
+LOG="${ORCH_NATS_BRIDGE_LOG:-$HOME/.cache/orch-nats-bridge.log}"
+mkdir -p "$(dirname "$LOG")"
+
+NATS_ARGS=()
+[ -n "$SERVER" ] && NATS_ARGS+=(--server="$SERVER")
+
+# Background mode: re-exec self without --background; nohup detach.
+if [ $BACKGROUND -eq 1 ]; then
+    REEXEC_ARGS=()
+    for arg in "$@"; do
+        [ "$arg" = "--background" ] || REEXEC_ARGS+=("$arg")
+    done
+    nohup "$0" "${REEXEC_ARGS[@]+"${REEXEC_ARGS[@]}"}" >>"$LOG" 2>&1 &
+    pid=$!
+    disown "$pid" 2>/dev/null || true
+    echo "$pid"
+    exit 0
+fi
+
+log() {
+    printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)" "$*" >> "$LOG"
+}
+
+log "starting subscribe subject=${SUBJECT} server=${SERVER:-default}"
+
+# Use --raw so stdout is one line per body (well — one MESSAGE per body, which
+# may contain newlines; nats CLI emits each as a contiguous block). We chunk
+# messages by reading "until JSON parses" — robust against multi-line prompts.
+#
+# Implementation: accumulate lines into a buffer; on each line, try `jq -e .`
+# on the accumulated buffer. If it parses, dispatch and reset. If not, append
+# the next line and try again. This works because our envelope is always a
+# single JSON object.
+buffer=""
+nats sub --raw "${NATS_ARGS[@]+"${NATS_ARGS[@]}"}" "$SUBJECT" 2>>"$LOG" |
+while IFS= read -r line; do
+    if [ -z "$buffer" ]; then
+        buffer="$line"
+    else
+        buffer="$buffer"$'\n'"$line"
+    fi
+
+    # Try to parse the buffer as JSON. If it parses, we have a full message.
+    if ! parsed=$(printf '%s' "$buffer" | jq -c . 2>/dev/null); then
+        continue
+    fi
+
+    # Extract pane + prompt.
+    pane=$(printf '%s' "$parsed" | jq -r '.pane // ""')
+    prompt=$(printf '%s' "$parsed" | jq -r '.prompt // ""')
+    buffer=""
+
+    if [ -z "$pane" ] || [ -z "$prompt" ]; then
+        log "skip: missing pane or prompt: $(printf '%s' "$parsed" | head -c 200)"
+        continue
+    fi
+
+    log "tell pane=${pane} bytes=${#prompt}"
+
+    # orch-tell with `-` reads prompt from stdin; safe for multi-line.
+    if ! printf '%s' "$prompt" | orch-tell "$pane" - 2>>"$LOG"; then
+        log "orch-tell pane=${pane} FAILED (continuing)"
+    fi
+done
+
+log "subscribe loop exited"
