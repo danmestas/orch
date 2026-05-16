@@ -279,9 +279,12 @@ MOCK
         FAKE_JSONL2="$ENC_DIR/abc.jsonl"
         echo '{"type":"system"}' > "$FAKE_JSONL2"
 
-        # Replace the operator fixture with both operator + a %900 worker.
-        # %900's metadata.cwd points at WORKER_CWD so the JSONL lookup hits.
-        set_agents "$MOCK_PANE operator $OP_CWD" "%900 worker $WORKER_CWD"
+        # Replace the operator fixture with operator + a %900 worker, plus
+        # REG_PANE (the spawn-target). In production, orch-spawn registers
+        # the new pane on the bus via the shim before orch-spy briefs it;
+        # the mock here doesn't run a real shim, so we pre-register REG_PANE
+        # in the fixture so orch-tell's discovery finds it.
+        set_agents "$MOCK_PANE operator $OP_CWD" "%900 worker $WORKER_CWD" "$REG_PANE worker $WORKER_CWD"
 
         # Update mock to return REG_PANE so orch-tell hits a different live pane.
         cat > "$MOCK_BIN/orch-spawn" <<MOCK
