@@ -5,7 +5,9 @@
 //   1. Symlink hooks/*           → ~/.claude/hooks/
 //   2. Symlink skills/*          → ~/.claude/skills/
 //   3. Symlink pi-extensions/*   → ~/.pi/agent/extensions/  (only if that dir exists)
-//   4. Copy fleet-prompt.md      → ~/.cache/orch-fleet-prompt.md  (stable file, not symlink)
+//   4. Symlink codex-hooks/*     → ~/.codex/hooks/          (only if ~/.codex exists)
+//   5. Symlink gemini-hooks/*    → ~/.gemini/hooks/         (only if ~/.gemini exists)
+//   6. Copy fleet-prompt.md      → ~/.cache/orch-fleet-prompt.md  (stable file, not symlink)
 //
 // What we do NOT do (intentionally):
 //   * Modify ~/.claude/settings.json  — the user merges settings-snippet.json by hand.
@@ -65,7 +67,19 @@ if (fs.existsSync(path.join(HOME, ".pi"))) {
     linkDirEntries(path.join(ROOT, "pi-extensions"), piExtDir);
 }
 
-// 4. Fleet prompt — copy, not symlink (agents read once at spawn; stable file).
+// 4. Codex hooks (only if codex is installed)
+const codexHooksDir = path.join(HOME, ".codex", "hooks");
+if (fs.existsSync(path.join(HOME, ".codex"))) {
+    linkDirEntries(path.join(ROOT, "codex-hooks"), codexHooksDir);
+}
+
+// 5. Gemini hooks (only if gemini is installed)
+const geminiHooksDir = path.join(HOME, ".gemini", "hooks");
+if (fs.existsSync(path.join(HOME, ".gemini"))) {
+    linkDirEntries(path.join(ROOT, "gemini-hooks"), geminiHooksDir);
+}
+
+// 6. Fleet prompt — copy, not symlink (agents read once at spawn; stable file).
 const fleetSrc = path.join(ROOT, "fleet-prompt.md");
 const fleetDst = path.join(HOME, ".cache", "orch-fleet-prompt.md");
 fs.mkdirSync(path.dirname(fleetDst), { recursive: true });
@@ -74,9 +88,14 @@ log(`fleet doctrine cached at ${fleetDst}`);
 
 // 5. Tell the user about the one manual step.
 process.stderr.write(`\n`);
-process.stderr.write(`orch installed. One manual step remaining:\n`);
+process.stderr.write(`orch installed. Manual steps remaining:\n`);
 process.stderr.write(`  Merge ${path.join(ROOT, "settings-snippet.json")} into ~/.claude/settings.json\n`);
 process.stderr.write(`  under the existing "hooks" object. Preserve any hooks already there.\n`);
+process.stderr.write(`\n`);
+process.stderr.write(`  For NATS-bridge fan-out on other harnesses, also merge:\n`);
+process.stderr.write(`    ${path.join(ROOT, "codex-hooks-snippet.json")} → ~/.codex/hooks.json\n`);
+process.stderr.write(`    ${path.join(ROOT, "gemini-settings-snippet.json")} → ~/.gemini/settings.json\n`);
+process.stderr.write(`  Pi extensions auto-load — no merge needed.\n`);
 process.stderr.write(`\n`);
 process.stderr.write(`Runtime deps not installed by npm: tmux, fswatch, jq.\n`);
 process.stderr.write(`  macOS:  brew install tmux fswatch jq\n`);

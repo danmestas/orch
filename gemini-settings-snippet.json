@@ -1,0 +1,15 @@
+{
+  "_INSTRUCTIONS": "Merge this fragment into ~/.gemini/settings.json under the top-level 'hooks' key. Where you already have hooks for an event, append to the existing hooks[] array. Replace $HOME with your actual home path — gemini does NOT expand env vars in the command string. Remove this _INSTRUCTIONS field after merging. NOTE: gemini's hook system is nascent — Stop is confirmed but SessionStart-JSONL and Notification publishers are not yet available; those subjects (orch.events.<num>, orch.notify.<num>) stay dark for gemini workers until gemini-cli ships those event hooks.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.gemini/hooks/orch-nats-publish-stop.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

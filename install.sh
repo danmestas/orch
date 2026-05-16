@@ -53,6 +53,26 @@ if [ -d "$ROOT/pi-extensions" ]; then
     done
 fi
 
+# codex hooks (referenced from user's ~/.codex/hooks.json — see
+# codex-hooks-snippet.json for the JSON fragment to merge there)
+if [ -d "$ROOT/codex-hooks" ]; then
+    for f in "$ROOT"/codex-hooks/*; do
+        [ -f "$f" ] || continue
+        link_one "$f" "$HOME/.codex/hooks/$(basename "$f")"
+        chmod +x "$f"
+    done
+fi
+
+# gemini hooks (referenced from user's ~/.gemini/settings.json — see
+# gemini-settings-snippet.json for the JSON fragment to merge there)
+if [ -d "$ROOT/gemini-hooks" ]; then
+    for f in "$ROOT"/gemini-hooks/*; do
+        [ -f "$f" ] || continue
+        link_one "$f" "$HOME/.gemini/hooks/$(basename "$f")"
+        chmod +x "$f"
+    done
+fi
+
 # fleet doctrine — copy (not symlink — agents read it once at spawn so we
 # want a stable file, not one that disappears if the repo is moved).
 mkdir -p "$HOME/.cache"
@@ -116,6 +136,10 @@ Done.
 Manual step remaining:
   1. Merge settings-snippet.json into ~/.claude/settings.json under the
      existing "hooks" object. Preserve any hooks that are already there.
+     For NATS-bridge fan-out on other harnesses, also merge:
+       - codex-hooks-snippet.json    → ~/.codex/hooks.json
+       - gemini-settings-snippet.json → ~/.gemini/settings.json
+     Pi extensions are auto-discovered — no merge needed.
   2. Install runtime dependencies:
        $DEPS_HINT
      (tmux is the runtime substrate; fswatch is used by orch-listen;

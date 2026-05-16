@@ -1,6 +1,6 @@
 # NATS comms bridge
 
-**Status:** Proposal — implementation drafted (snapshot in `~/projects/orch-nats-bridge-snapshot/`), not yet landed in this repo.
+**Status:** Landed. Claude-code coverage shipped in #49 (subscriber + 3 publish hooks). Multi-harness coverage (codex / pi / gemini publish-side) shipped alongside — see the [Multi-harness coverage](#multi-harness-coverage) section below for per-harness scope and gaps.
 
 A small adapter that lets a parent Claude Code session ("orchestrator") drive N spawned orch builder panes ("subagents") through NATS pub/sub in addition to orch's default tmux + filesystem-marker IPC. Marker behavior is preserved; NATS is additional fan-out.
 
@@ -106,6 +106,45 @@ nats sub --raw 'orch.events.373' | jq -c 'select(.message.content[]?|.type=="tex
 Compared to the bare `orch-tell` / `orch-listen` / fswatch path: equivalent capability, but the events flow over a substrate that supports multiple subscribers and (with JetStream behind it) durable replay.
 
 ---
+
+## Multi-harness coverage
+
+The original snapshot only shipped claude-code publish hooks. Coverage for the
+other harnesses orch supports lives alongside, in per-harness directories:
+
+| Harness | Stop | SessionStart-JSONL | Notification | Files |
+|---|---|---|---|---|
+| **claude-code** | ✓ | ✓ | ✓ | `hooks/orch-nats-publish-{stop,notify,jsonl}.sh` |
+| **codex** | ✓ | ✓ | ✗ no event | `codex-hooks/orch-nats-publish-{stop,jsonl}.sh` |
+| **pi** | ✓ | ✓ | ✗ no event | `pi-extensions/orch-nats-publish-{stop,jsonl}.ts` |
+| **gemini** | ✓ | ✗ deferred | ✗ deferred | `gemini-hooks/orch-nats-publish-stop.sh` |
+
+**Notification gap (codex / pi):** neither harness exposes a mid-turn
+"agent waiting for input" event analogous to claude-code's Notification hook.
+The Stop signal is the only reliable substitute today — when one of these
+agents finishes a turn, it is by definition idle and waiting. Future work:
+proxy via `UserPromptSubmit` (codex) or extension events (pi) once we map
+their semantics.
+
+**Gemini SessionStart-JSONL deferral:** gemini-cli's hook system is nascent
+(as of mid-2026). Stop is the only event currently confirmed in the wild.
+SessionStart with transcript-path delivery and JSONL streaming are deferred
+until those event hooks land upstream.
+
+**Subject namespace stays uniform across harnesses.** Each publisher emits on
+`orch.{stop,notify,events}.<pane_num>` with a `harness:` field in the body so
+subscribers can filter or aggregate by harness without parsing subject tokens.
+
+**Install:**
+- `claude-code` — merge `settings-snippet.json` into `~/.claude/settings.json`
+- `codex` — merge `codex-hooks-snippet.json` into `~/.codex/hooks.json`
+- `pi` — auto-discovered, no merge needed (extensions land in `~/.pi/agent/extensions/`)
+- `gemini` — merge `gemini-settings-snippet.json` into `~/.gemini/settings.json`
+
+`install.sh` / postinstall symlinks every harness's hook files into the right
+per-harness directory, but only when that harness's home dir already exists —
+no `~/.codex` means no codex symlinks, etc., so installs on machines that
+don't run a given harness stay clean.
 
 ## NATS server: sesh hub or standalone
 
