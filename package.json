@@ -42,12 +42,16 @@
   "files": [
     "bin/",
     "hooks/",
+    "codex-hooks/",
+    "gemini-hooks/",
     "skills/",
     "references/",
     "pi-extensions/",
     "scripts/",
     "fleet-prompt.md",
     "settings-snippet.json",
+    "codex-hooks-snippet.json",
+    "gemini-settings-snippet.json",
     "LICENSE",
     "README.md"
   ],

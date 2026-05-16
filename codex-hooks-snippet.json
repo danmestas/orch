@@ -1,0 +1,25 @@
+{
+  "_INSTRUCTIONS": "Merge this fragment into ~/.codex/hooks.json under the top-level 'hooks' key. The 'Stop' and 'SessionStart' entries each merge under their respective top-level keys. Where you already have hooks for an event (e.g. context-mode under PreToolUse / SessionStart), append to the existing hooks[] array. Replace $HOME with your actual home path — codex does NOT expand env vars in the command string. Remove this _INSTRUCTIONS field after merging.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.codex/hooks/orch-nats-publish-stop.sh"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.codex/hooks/orch-nats-publish-jsonl.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
