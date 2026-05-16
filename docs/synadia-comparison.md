@@ -45,7 +45,7 @@ the control-plane work only orch can do.
 |---|---|
 | Spawn | `orch-spawn <agent>` — tmux split + outfit + role; multi-executor sketched in `docs/multi-executor-workers.md` |
 | Address | tmux pane id (`%37`) + alias file `~/.config/orch-aliases` |
-| Send | `orch-tell` (literal keystrokes via tmux send-keys), `orch-ask` (tell + wait-settle + return new chunk) |
+| Send | `orch-tell` (publishes to `agents.prompt.…` via `$SRV.INFO.agents` discovery; `--legacy-keystrokes` falls back to tmux send-keys), `orch-ask` (= `orch-tell --collect`: streams response chunks until terminator) |
 | Listen | `orch-listen` (one-shot or `--stream` over fswatch markers), `orch-subscribe` (peer push) |
 | Track | `orch-register` (per-pane JSON cache), `orch-claim-operator`, `orch-peek`, `orch-spy` |
 | Lifecycle | `orch-up`, `orch-down`, `orch-bundle-gc` |
@@ -147,16 +147,17 @@ Notification parity. The wire shape is uniform. New harness support is one
 new adapter file, not three new hook scripts plus a settings snippet
 fragment.
 
-### 4. `orch-tell` becomes a thin Synadia caller
+### 4. `orch-tell` is a thin Synadia caller (Plan 9 — landed in #59)
 
-Today: `orch-tell` injects literal keystrokes into a tmux pane.
+Today: `orch-tell` resolves `<pane|alias>` → Synadia subject via
+`$SRV.INFO.agents`, publishes the prompt to `endpoints[name=="prompt"].subject`,
+and (with `--collect`) consumes the response chunk stream until the
+inactivity timeout fires. Keystroke injection is the implementation detail
+of the shim. `--legacy-keystrokes` is the explicit escape hatch for panes
+without a shim (operator UX unchanged; wire under it is now standard).
 
-After: `orch-tell` resolves `<pane|alias>` → Synadia subject via
-`$SRV.INFO.agents`, publishes a prompt, optionally consumes the response
-chunk stream. Keystroke injection becomes an implementation detail of the
-shim (so the operator UX is unchanged but the wire under it is standard).
-
-`orch-ask` becomes `orch-tell --collect-until-terminator`.
+`orch-ask` is `orch-tell --collect` — streams `response` chunk `.data` to
+stdout as each chunk arrives.
 
 ### 5. Channel-plugin pattern matches orch's multi-executor proposal
 
