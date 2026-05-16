@@ -112,9 +112,10 @@ Every worker, regardless of executor, performs the same sequence:
 6. Exec the agent loop:
    - **Native flavor**: invoke `claude` / `codex` / `pi` / `gemini` with
      the bundle's config.
-   - **WASM flavor**: drive `@anthropic-ai/sdk` (or equivalent) directly,
-     using the WASM module's exposed `edgesync.*` globals for substrate
-     access.
+   - **WASM flavor**: `runBridge()` from `@synadia-ai/open-agent` owns the
+     NATS wiring and `ToolLoopAgent` loop. The executor supplies a
+     `sandboxFactory` that returns an environment-appropriate `Sandbox`
+     implementation (stub, Vercel sandbox, or sidecar-backed).
 7. On exit, publish a final event and commit any pending Fossil state.
 
 Two flavors, one contract. Anything an executor wants to swap out is
@@ -321,15 +322,27 @@ EdgeSync.
 | 1 | `tmux` (with sesh substrate) | native | NATS plumbing, stdin-bridge sidecar, NATS-publishing hooks, `orch-spawn-sesh` entrypoint | ~250 bash |
 | 2 | `docker` | native | image with agent CLIs baked, mount-based Fossil checkout, host-network NATS | ~100 bash + Dockerfile |
 | 3 | `ssh` | native | remote bootstrap, iroh-enabled EdgeSync on target host | ~50 bash + setup script |
-| 4 | `cf-worker` | WASM | generic agent-loop JS module, `wrangler` deploy, `leaf-browser.wasm` integration | ~300-500 JS + Worker config |
-| 5 | `cf-durable-object` | WASM | DO class wrapping the agent-loop with state persistence | ~150 JS on top of phase 4 |
+| 4 | `cf-worker` | WASM | **Synadia `open-agent` plugin** as the agent harness; `wrangler` deploy; NATS-over-WebSocket transport | ~60 TS + wrangler config |
+| 5 | `cf-durable-object` | WASM | DO class wrapping the open-agent bridge for stateful multi-turn sessions | ~150 JS on top of phase 4 |
 | 6 | `wasmtime` | WASM | wasmtime host harness for local sandboxed execution | ~150 Go or Rust |
-| 7 | `browser` | WASM | minimal HTML host loading `leaf-browser.wasm` + agent-loop | ~50 HTML + reuse phase 4 JS |
+| 7 | `browser` | WASM | minimal HTML host loading `leaf-browser.wasm` + open-agent bridge | ~50 HTML + reuse phase 4 |
 
-Phases 1–3 are unblocked today. Phase 4 depends on the generic
-agent-loop module landing (see Open questions). Phases 5–7 build on
-phase 4. Each phase ships independently; nothing in phase N requires
-phase N+1.
+**Phase 4 decision (resolved):** Phases 4–7 use Synadia's
+[`agents/open-agent/`](https://github.com/synadia-ai/synadia-agents/tree/main/agents/open-agent)
+as the agent harness. `open-agent` already speaks the Synadia Agent Protocol
+for NATS, exposes a `ToolLoopAgent`, and has a swappable `Sandbox` seam.
+Orch contributes the placement (wrangler deploy, DO instantiation, browser
+host) and a `Sandbox` stub; `open-agent`'s `runBridge()` owns the NATS
+wiring, heartbeats, and prompt streaming. No bespoke bootstrap code needed.
+
+The proof-of-concept lives in `executors/wasm/cf-worker/` (NATS-over-WebSocket,
+stub sandbox); `examples/cf-worker-agent/README.md` documents the deploy and
+verify flow. Iroh-bridged NATS and a real sandbox impl are future work.
+
+Phases 1–3 are unblocked today. Phase 4 proof-of-concept is in
+`executors/wasm/cf-worker/`. Phases 5–7 build on phase 4 by swapping the
+host (Durable Object, wasmtime, browser) while reusing `open-agent`
+verbatim. Each phase ships independently.
 
 ---
 
@@ -410,24 +423,17 @@ Decided; flagged here for future reference.
 
 ### Generic agent-loop module vs outfit-specific bundles
 
-For WASM executors (`cf-worker`, `cf-durable-object`, `browser`,
-`wasmtime`), the agent-loop is JS / WASM code driving `@anthropic-ai/sdk`
-against the subject contract. Two shapes:
+**Resolved:** Use Synadia's `open-agent` plugin verbatim. Do not fork and do
+not write a bespoke agent-loop module.
 
-- **Generic + outfit-parameterized.** One module, deployed once. On
-  spawn, reads outfit bundle from Fossil (system prompt, tool
-  allowlist, model choice, MCP configs), configures itself, runs. Any
-  outfit → same worker code. Cheap to iterate; one deploy per
-  agent-runtime change.
-- **Outfit-specific bundles.** Each outfit compiles to its own module
-  with config baked in. Rigid, predictable, slightly faster cold start;
-  every new outfit = new deploy.
+`open-agent`'s `runBridge()` is already generic and outfit-parameterized via
+its `sandboxFactory`, `modelFactory`, and `modelId` arguments. Outfit
+configuration (system prompt, tool allowlist, model choice) is passed at
+runtime via env vars or a thin wrapper — no per-outfit redeploy required.
 
-Tentative: **generic + outfit-parameterized**, because it preserves the
-"spawn any agent on any executor" property that's the point of the
-abstraction, and matches how `suit prepare` already works (bundles are
-data, not code). Locks the contract for WASM executors — worth
-resolving before phase 4.
+The one remaining decision (how to hydrate an outfit bundle from Fossil inside
+a CF Worker) is deferred to the DO phase (phase 5), which has persistent
+storage and can hold the bundle in DO storage.
 
 ### First cloud executor: ssh or cf-worker?
 
