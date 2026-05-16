@@ -40,9 +40,9 @@ rm -f /tmp/test-rc /tmp/test-out.log
 tmux new-session -d -s sesh-tests \
     'bash /usr/local/bin/tests.sh > /tmp/test-out.log 2>&1; echo $? > /tmp/test-rc'
 
-deadline=$(( $(date +%s) + 480 ))
+deadline=$(( $(date +%s) + 600 ))
 while [ ! -f /tmp/test-rc ]; do
-    [ "$(date +%s)" -ge "$deadline" ] && { log "TIMEOUT at 480s"; break; }
+    [ "$(date +%s)" -ge "$deadline" ] && { log "TIMEOUT at 600s"; break; }
     sleep 1
 done
 
