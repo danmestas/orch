@@ -110,6 +110,26 @@ log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)" "$*" >> "$LOG"
 }
 
+# Enumerate currently-live worker panes from the orch registry. Filters out
+# observers (role=observer) and stale entries whose pane no longer exists in
+# tmux. Used to fan a broadcast message out to every worker.
+list_active_workers() {
+    local reg="${ORCH_REGISTRY_DIR:-$HOME/.cache/orch-registry}"
+    [ -d "$reg" ] || return 0
+    local live
+    live=$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null) || return 0
+    for f in "$reg"/*.json; do
+        [ -f "$f" ] || continue
+        local pane role
+        pane=$(jq -r '.pane_id // ""' "$f" 2>/dev/null)
+        role=$(jq -r '.role // "worker"' "$f" 2>/dev/null)
+        [ -n "$pane" ] || continue
+        [ "$role" = "observer" ] && continue
+        printf '%s\n' "$live" | grep -qx "$pane" || continue
+        printf '%s\n' "$pane"
+    done
+}
+
 log "starting subscribe subject=${SUBJECT} server=${SERVER:-default}"
 
 # Use --raw so stdout is one line per body (well — one MESSAGE per body, which
@@ -139,8 +159,31 @@ while IFS= read -r line; do
     prompt=$(printf '%s' "$parsed" | jq -r '.prompt // ""')
     buffer=""
 
-    if [ -z "$pane" ] || [ -z "$prompt" ]; then
-        log "skip: missing pane or prompt: $(printf '%s' "$parsed" | head -c 200)"
+    if [ -z "$prompt" ]; then
+        log "skip: missing prompt: $(printf '%s' "$parsed" | head -c 200)"
+        continue
+    fi
+
+    # Broadcast: pane absent, "*", or "broadcast" → enumerate live workers
+    # from the registry and dispatch the prompt to each (one orch-tell per
+    # pane). Observers are excluded; stale registry entries whose pane is
+    # gone are skipped. With one targeted publish costing N orch-tell calls,
+    # this is operator-side fan-out: a single nats pub reaches N workers.
+    if [ -z "$pane" ] || [ "$pane" = "*" ] || [ "$pane" = "broadcast" ]; then
+        workers=$(list_active_workers)
+        if [ -z "$workers" ]; then
+            log "broadcast: no active workers; skip"
+            continue
+        fi
+        count=$(printf '%s\n' "$workers" | grep -c .)
+        log "broadcast bytes=${#prompt} target_count=${count}"
+        while IFS= read -r w; do
+            [ -n "$w" ] || continue
+            log "  broadcast → $w"
+            if ! printf '%s' "$prompt" | orch-tell "$w" - 2>>"$LOG"; then
+                log "  broadcast → $w FAILED (continuing)"
+            fi
+        done <<< "$workers"
         continue
     fi
 
