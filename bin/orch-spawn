@@ -348,7 +348,7 @@ if [ $VERIFY -eq 1 ]; then
                 # Title-rename not yet — try banner-match as the cheap
                 # fallback. If BANNER is empty we skip and keep polling.
                 if [ -n "$BANNER" ] && \
-                   tmux capture-pane -p -t "$PANE" 2>/dev/null | grep -qF "$BANNER"; then
+                   tmux capture-pane -p -J -t "$PANE" 2>/dev/null | grep -qF "$BANNER"; then
                     verify_state="ready"; break
                 fi
                 ;;

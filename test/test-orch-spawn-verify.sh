@@ -150,7 +150,7 @@ if [ -n "$FAKE" ]; then
     esac
     assert "banner-match: fake pane keeps shell title (no title rename)" "shell" "$title_state"
 
-    captured=$(tmux capture-pane -p -t "$FAKE" 2>/dev/null || echo "")
+    captured=$(tmux capture-pane -p -J -t "$FAKE" 2>/dev/null || echo "")
     if printf '%s' "$captured" | grep -qF "Claude Code"; then
         match="found"
     else
