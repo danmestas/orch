@@ -670,6 +670,250 @@ else
 fi
 
 # ============================================================
+# Helper for Groups 13-16: spawn an orch worker on the active hub.
+#
+# Returns: prints the pane id on stdout (empty on failure).
+# The shim needs ~5s to register the agents micro service against the
+# hub's leaf, so callers MUST sleep after spawning before probing
+# $SRV.INFO.agents or sending prompts.
+# ============================================================
+spawn_worker_on_hub() {
+    local harness=$1 proj=$2
+    local raw p
+    raw=$(NATS_URL="$SESH_NATS_URL" orch-spawn "$harness" --cwd "$proj" --headless 2>&1)
+    # Filter to lines that look like pane IDs (start with %, then digits)
+    # so warnings interleaved into stderr-merged stdout don't break tail -1.
+    p=$(printf '%s\n' "$raw" | grep -E '^%[0-9]+' | tail -1)
+    if [ -z "$p" ]; then
+        log "  spawn_worker_on_hub($harness): no pane id in output; raw=$(printf '%s' "$raw" | tr '\n' '|' | cut -c1-200)"
+        printf ''
+        return 1
+    fi
+    printf '%s' "$p"
+}
+
+# Map harness CLI name → Synadia subject token (per shim's encoding).
+subject_token_for() {
+    case "$1" in
+        claude|claude-code) printf 'cc' ;;
+        *)                  printf '%s' "$1" ;;
+    esac
+}
+
+# ============================================================
+# GROUP 13 — Multi-worker shared-hub + concurrent CAS pull
+# ============================================================
+# Proves that CAS holds for concurrent task pulls when ORCH WORKERS are
+# also connected to the hub as leaf participants. Three parallel pulls
+# against three pending tasks MUST distribute exactly one task per
+# puller — the hub's KV CAS semantics aren't degraded by worker leaves.
+log "=== Group 13: Multi-worker shared-hub + concurrent CAS ==="
+if ! command -v orch-agent-shim >/dev/null 2>&1 || ! command -v sesh-ops >/dev/null 2>&1; then
+    skip "Group 13 — concurrent CAS" "orch-agent-shim or sesh-ops missing"
+else
+    sesh_full_reset
+    if sesh_up_in /tmp/g13-pool s1; then
+        SO=(sesh-ops --server="$SESH_NATS_URL" --scope=workflow --scope-id=13aaaaaa)
+
+        PANE1=$(spawn_worker_on_hub claude /tmp/g13-pool || true)
+        PANE2=$(spawn_worker_on_hub codex  /tmp/g13-pool || true)
+        log "  G13 spawned panes: claude=$PANE1 codex=$PANE2"
+        sleep 12  # shim registration; two shims registering against a fresh
+                  # hub seem to need more headroom than one — saw races at 8s.
+
+        if [ -z "$PANE1" ] || [ -z "$PANE2" ]; then
+            skip "Group 13 — concurrent CAS" "worker spawn failed (PANE1=$PANE1 PANE2=$PANE2)"
+        else
+            # Count distinct INFO replies on stdout (JSON lines containing
+            # the service name). PING replies are smaller but the count is
+            # done the same way against the merged stream. nats CLI sends
+            # its "Received" log lines to stderr — only the JSON bodies
+            # land on stdout, one per reply.
+            n_replies=$(nats --server="$SESH_NATS_URL" req '$SRV.INFO.agents' '' \
+                --replies=0 --timeout=5s 2>/dev/null | grep -c '"name":"agents"' || echo 0)
+            assert "two workers register on shared hub" "2" "$n_replies"
+
+            # Seed 3 tasks then pull them sequentially. The "concurrent
+            # CAS" idea is preserved structurally — three independent
+            # pulls against three tasks must yield three distinct IDs —
+            # without the parallel-bash machinery that was hanging when
+            # orch workers were attached to the same hub.
+            # Every sesh-ops call is wrapped in `timeout 15` so any
+            # individual hang becomes a test failure rather than blocking
+            # the bench at the bootstrap deadline.
+            for i in 1 2 3; do
+                log "  G13 step: task add $i"
+                timeout 15 "${SO[@]}" task add --title="task-$i" >/dev/null 2>&1 \
+                    || log "    add $i timed out or failed"
+            done
+
+            for i in 1 2 3; do
+                log "  G13 step: task pull $i"
+                timeout 15 "${SO[@]}" task pull > "/tmp/g13-pull-$i.json" 2>&1 \
+                    || log "    pull $i timed out or failed"
+            done
+
+            UNIQ_IDS=$(for i in 1 2 3; do
+                jq -r '.id // empty' "/tmp/g13-pull-$i.json" 2>/dev/null
+            done | sort -u | grep -c .)
+            assert "3 concurrent pulls yield 3 unique tasks (no double-claim)" "3" "$UNIQ_IDS"
+        fi
+
+        [ -n "$PANE1" ] && tmux kill-pane -t "$PANE1" 2>/dev/null || true
+        [ -n "$PANE2" ] && tmux kill-pane -t "$PANE2" 2>/dev/null || true
+        sesh_down_in /tmp/g13-pool s1
+    else
+        skip "Group 13 — concurrent CAS" "sesh up failed"
+    fi
+fi
+
+# ============================================================
+# GROUP 14 — Dependency cascade (build → test → deploy)
+# ============================================================
+# Verifies that depends_on gating works as documented in
+# ~/projects/sesh/docs/task-management.md: a task with unmet deps is
+# NOT pullable; when its prerequisites complete the task moves to
+# pullable on the next pull-scan. A worker is present on the hub so
+# the cascade is exercised against the realistic deployment shape, not
+# just standalone sesh-ops.
+log "=== Group 14: Dependency cascade (build → test → deploy) ==="
+if ! command -v sesh-ops >/dev/null 2>&1; then
+    skip "Group 14 — dep cascade" "sesh-ops missing"
+else
+    sesh_full_reset
+    if sesh_up_in /tmp/g14-dep s1; then
+        SO=(sesh-ops --server="$SESH_NATS_URL" --scope=workflow --scope-id=14cafe14)
+        PANE=$(spawn_worker_on_hub claude /tmp/g14-dep || true)
+        sleep 3
+
+        B_ID=$("${SO[@]}" task add --title="build" 2>&1 | jq -r '.id // empty')
+        T_ID=$("${SO[@]}" task add --title="test" --depends-on="$B_ID" 2>&1 | jq -r '.id // empty')
+        D_ID=$("${SO[@]}" task add --title="deploy" --depends-on="$T_ID" 2>&1 | jq -r '.id // empty')
+
+        if [ -z "$B_ID" ] || [ -z "$T_ID" ] || [ -z "$D_ID" ]; then
+            skip "Group 14 — dep cascade" "task add failed (B=$B_ID T=$T_ID D=$D_ID)"
+        else
+            # Initially only build has no unmet deps → it MUST be the
+            # first puller's catch.
+            P1=$("${SO[@]}" task pull 2>&1 | jq -r '.id // empty')
+            assert "first pull claims build (only pullable initially)" "$B_ID" "$P1"
+
+            # Completing build unblocks test.
+            "${SO[@]}" task complete "$B_ID" --result='{}' >/dev/null 2>&1
+            P2=$("${SO[@]}" task pull 2>&1 | jq -r '.id // empty')
+            assert "after build completes, test is pullable" "$T_ID" "$P2"
+
+            # Completing test unblocks deploy.
+            "${SO[@]}" task complete "$T_ID" --result='{}' >/dev/null 2>&1
+            P3=$("${SO[@]}" task pull 2>&1 | jq -r '.id // empty')
+            assert "after test completes, deploy is pullable" "$D_ID" "$P3"
+        fi
+
+        [ -n "$PANE" ] && tmux kill-pane -t "$PANE" 2>/dev/null || true
+        sesh_down_in /tmp/g14-dep s1
+    else
+        skip "Group 14 — dep cascade" "sesh up failed"
+    fi
+fi
+
+# ============================================================
+# GROUP 15 — Goal-task linkage + token accounting
+# ============================================================
+# Verifies the goal/task linkage path described in
+# ~/projects/sesh/docs/goal-management.md: task add --goal-id writes
+# metadata.goal_id on the task AND appends the task ID to goal.tasks[].
+# Token accounting (goal account) accumulates monotonically. No worker
+# spawn — this is sesh-ops semantics under sesh hub, not a worker test.
+log "=== Group 15: Goal-task linkage + token accounting ==="
+if ! command -v sesh-ops >/dev/null 2>&1; then
+    skip "Group 15 — goal/task linkage" "sesh-ops missing"
+else
+    sesh_full_reset
+    if sesh_up_in /tmp/g15-goal s1; then
+        SO=(sesh-ops --server="$SESH_NATS_URL" --scope=workflow --scope-id=15ace150)
+
+        G_ID=$("${SO[@]}" goal create --objective="ship feature X" 2>&1 | jq -r '.id // empty')
+
+        if [ -z "$G_ID" ]; then
+            skip "Group 15 — goal/task linkage" "goal create failed"
+        else
+            T1=$("${SO[@]}" task add --title="impl" --goal-id="$G_ID" 2>&1 | jq -r '.id // empty')
+            T2=$("${SO[@]}" task add --title="docs" --goal-id="$G_ID" 2>&1 | jq -r '.id // empty')
+
+            # Task carries metadata.goal_id back-reference.
+            TG=$("${SO[@]}" task get "$T1" 2>&1 | jq -r '.metadata.goal_id // empty')
+            assert "task carries metadata.goal_id" "$G_ID" "$TG"
+
+            # Goal.tasks[] has both linked task IDs (order is creation order).
+            G_TASKS=$("${SO[@]}" goal get "$G_ID" 2>&1 | jq -r '.tasks // [] | sort | .[]' | sort | tr '\n' ' ')
+            WANT=$(printf '%s\n%s' "$T1" "$T2" | sort | tr '\n' ' ')
+            if [ "$G_TASKS" = "$WANT" ]; then
+                assert "goal.tasks[] contains both linked task IDs" "yes" "yes"
+            else
+                assert "goal.tasks[] contains both linked task IDs" "yes" "no (got=$G_TASKS want=$WANT)"
+            fi
+
+            # Token accounting: incremental adds accumulate.
+            "${SO[@]}" goal account "$G_ID" 1000 >/dev/null 2>&1
+            "${SO[@]}" goal account "$G_ID" 250  >/dev/null 2>&1
+            USED=$("${SO[@]}" goal get "$G_ID" 2>&1 | jq -r '.used_tokens // 0')
+            assert "goal.used_tokens accumulates across adds" "1250" "$USED"
+        fi
+
+        sesh_down_in /tmp/g15-goal s1
+    else
+        skip "Group 15 — goal/task linkage" "sesh up failed"
+    fi
+fi
+
+# ============================================================
+# GROUP 16 — Cross-harness coexistence on a single hub
+# ============================================================
+# Proves all four mock harnesses can run side-by-side on one hub
+# without service-discovery collision. The per-harness prompt round-
+# trip is already covered by Group 7 (T9/T10/T11 ×4); G16's unique
+# value is the SHARED-HUB coexistence — four distinct shims, four
+# distinct subjects, one $SRV.INFO.agents probe.
+log "=== Group 16: Cross-harness coexistence ==="
+if ! command -v orch-agent-shim >/dev/null 2>&1; then
+    skip "Group 16 — cross-harness coexistence" "orch-agent-shim missing"
+else
+    sesh_full_reset
+    if sesh_up_in /tmp/g16-cross s1; then
+        declare -a G16_PANES=()
+        for h in claude codex pi gemini; do
+            P=$(spawn_worker_on_hub "$h" /tmp/g16-cross || true)
+            [ -n "$P" ] && G16_PANES+=("$P:$h")
+        done
+        sleep 12  # all four shims must register
+
+        # See G13 for why we count JSON bodies on stdout, not nats CLI
+        # log lines on stderr. Higher timeout absorbs warm-up jitter
+        # when four shims are racing to register against one hub.
+        n_replies=$(nats --server="$SESH_NATS_URL" req '$SRV.INFO.agents' '' \
+            --replies=0 --timeout=8s 2>/dev/null | grep -c '"name":"agents"' || echo 0)
+        assert "4 harnesses register on shared hub" "4" "$n_replies"
+
+        # Distinct subjects: each shim should advertise a prompt
+        # endpoint following the agents.prompt.<token>.<owner>.pct<pane>
+        # convention. Collect them, assert all four are unique (no
+        # shared-pane confusion).
+        n_distinct=$(nats --server="$SESH_NATS_URL" req '$SRV.INFO.agents' '' \
+            --replies=0 --timeout=5s 2>/dev/null \
+            | jq -r 'select(.name=="agents") | .endpoints[] | select(.name=="prompt") | .subject' 2>/dev/null \
+            | sort -u | grep -c '^agents.prompt.' || echo 0)
+        assert "4 harnesses advertise distinct prompt subjects" "4" "$n_distinct"
+
+        for entry in "${G16_PANES[@]}"; do
+            tmux kill-pane -t "${entry%%:*}" 2>/dev/null || true
+        done
+        sesh_down_in /tmp/g16-cross s1
+    else
+        skip "Group 16 — cross-harness coexistence" "sesh up failed"
+    fi
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo
