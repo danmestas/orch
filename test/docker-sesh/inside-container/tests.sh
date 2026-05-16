@@ -491,9 +491,38 @@ else
 fi
 
 # ============================================================
-# GROUP 8+ — Task/Goal/Envelope/KV: defer if sesh-ops not installed
+# GROUP 8 — Mixed-executor broadcast (tmux + wasm/cf-worker)
 # ============================================================
-log "=== Group 7+: sesh-ops dependent tests ==="
+# Operators should be able to address tmux-spawned workers AND
+# wasm/cf-worker-spawned workers uniformly via the same Synadia
+# primitives — one broadcast publish, all workers receive.
+#
+# Status of upstream gaps:
+#
+#   ✓ orch#110 / merged #112 — phase 5 cf-durable-object executor
+#     (persistent open-agent bridge via Durable Object). Cf-side
+#     persistence gap is closed.
+#
+#   ✗ sesh#59 — Expose WebSocket NATS endpoint on hub leaf.
+#     CF Workers can't open TCP sockets; need ws:// transport via
+#     @nats-io/transport-websockets. Sesh's embedded NATS server
+#     doesn't expose a WS port today. Without it, the cf-DO can't
+#     join the sesh hub mesh. Workaround would be a sidecar nats-server
+#     with `websocket { port: 8080, no_tls: true }`, but that doesn't
+#     validate the actual sesh hub topology — pure workaround. Per
+#     futility-handoff stance, holding for sesh#59 to land upstream.
+#
+# When sesh#59 closes: drop the SKIP, install miniflare + the DO,
+# spawn 2 tmux workers + 1 cf-DO against the same sesh leaf, assert
+# all 3 in $SRV.INFO.agents, broadcast pub, assert all 3 received,
+# assert heartbeats from all 3 on agents.hb.>.
+log "=== Group 8: Mixed-executor broadcast (tmux + wasm/cf-worker) ==="
+skip "Group 8 — mixed-executor broadcast" "deferred — sesh#59 (WS NATS on hub) blocks; orch#110 closed by #112. SKIP slot flips to real test when sesh#59 lands."
+
+# ============================================================
+# GROUP 9+ — Task/Goal/Envelope/KV: defer if sesh-ops not installed
+# ============================================================
+log "=== Group 9+: sesh-ops dependent tests ==="
 if command -v sesh-ops >/dev/null 2>&1; then
     log "  (sesh-ops present — adding task/goal/envelope tests in follow-up)"
     skip "Task CAS pull protocol" "tests not yet implemented in this bench; pattern verified manually elsewhere"
