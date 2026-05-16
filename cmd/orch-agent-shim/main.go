@@ -56,6 +56,7 @@ func run() error {
 		role     = flag.String("role", "", "role override (default $ORCH_ROLE, fallback worker)")
 		cwd      = flag.String("cwd", "", "working directory (default resolved via tmux)")
 		interval = flag.Duration("interval", 30*time.Second, "heartbeat interval")
+		taskID   = flag.String("task-id", "", "Sesh-Task-Id envelope header (default $ORCH_TASK_ID, empty omits header)")
 	)
 	flag.Parse()
 
@@ -74,6 +75,7 @@ func run() error {
 		Role:     firstNonEmpty(*role, os.Getenv("ORCH_ROLE")),
 		CWD:      firstNonEmpty(*cwd, resolveCWD(*pane)),
 		Interval: *interval,
+		TaskID:   firstNonEmpty(*taskID, os.Getenv("ORCH_TASK_ID")),
 	}
 
 	a, err := buildAdapter(*agent, *pane, cfg.CWD)

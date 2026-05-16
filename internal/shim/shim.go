@@ -37,6 +37,13 @@ import (
 	"github.com/nats-io/nats.go/micro"
 )
 
+// firstAttempt is the Sesh-Attempt value the shim emits on outbound
+// publishes. The shim does not implement publish-level retries (failures
+// surface to the operator-facing publish-error channel and we move on)
+// so every header sets attempt=1. The wiring stays in place so retry
+// logic added later can increment without restructuring the call sites.
+const firstAttempt = 1
+
 // ProtocolVersion is the Synadia Agent Protocol revision this shim
 // implements (§11.1). MAJOR.MINOR only; patch has no compatibility
 // meaning. v0.3 introduced the verb-first subject layout and the
@@ -119,6 +126,13 @@ type Config struct {
 	Role    string
 	CWD     string
 	Harness string
+
+	// TaskID populates the Sesh-Task-Id envelope header on outbound
+	// publishes. Empty omits the header — most callers leave this
+	// unset until orch adopts sesh's task-CAS pull protocol. See
+	// docs/message-envelope.md and docs/task-management.md in
+	// ~/projects/sesh for the header semantics.
+	TaskID string
 
 	// Interval is the heartbeat cadence (§8.2). Defaults to 30s.
 	Interval time.Duration
@@ -288,12 +302,33 @@ type shim struct {
 	// "transition from busy to idle" check in handlePrompt is atomic
 	// with the store.
 	activeReply atomic.Value // string
-	activeMu    sync.Mutex
+
+	// activeTrace is the W3C trace_id extracted from the inbound
+	// prompt's traceparent header. Propagated onto every reply chunk
+	// + terminator + error in the stream's lifetime so downstream
+	// observability can correlate the whole turn to one trace. Empty
+	// when the inbound prompt had no traceparent — outbound publishes
+	// then mint fresh traces.
+	activeTrace atomic.Value // string
+
+	activeMu sync.Mutex
 }
 
 // loadActiveReply returns the current active reply subject or "" if idle.
 func (s *shim) loadActiveReply() string {
 	v := s.activeReply.Load()
+	if v == nil {
+		return ""
+	}
+	return v.(string)
+}
+
+// loadActiveTrace returns the inbound traceparent's trace_id for the
+// active stream or "" when no parent context is propagating. Mid-stream
+// callers (eventPump, watchdog) use this to feed envelopeHeaders so
+// every reply chunk on a turn shares one trace.
+func (s *shim) loadActiveTrace() string {
+	v := s.activeTrace.Load()
 	if v == nil {
 		return ""
 	}
@@ -455,7 +490,14 @@ func (s *shim) publishHeartbeat() {
 	if err != nil {
 		return
 	}
-	_ = s.nc.Publish(s.heartbeatSubject(), body)
+	// Heartbeats are not part of any prompt's trace; mint fresh.
+	hdr := envelopeHeaders(s.cfg.Role, s.cfg.TaskID, "", firstAttempt)
+	msg := &nats.Msg{
+		Subject: s.heartbeatSubject(),
+		Header:  hdr,
+		Data:    body,
+	}
+	_ = s.nc.PublishMsg(msg)
 }
 
 // heartbeatPayload is the wire shape from §8.3. snake_case keys match
@@ -472,13 +514,19 @@ type heartbeatPayload struct {
 // handleStatus implements §8.7 — request body ignored, reply is a
 // freshly-built §8.3 heartbeat payload.
 func (s *shim) handleStatus(req micro.Request) {
+	parentTrace := traceFromHeaders(nats.Header(req.Headers()))
+	if parentTrace == "" {
+		parentTrace = newTraceID()
+	}
+	hdr := envelopeHeaders(s.cfg.Role, s.cfg.TaskID, parentTrace, firstAttempt)
+	opt := micro.WithHeaders(micro.Headers(hdr))
 	body, err := json.Marshal(s.buildHeartbeat())
 	if err != nil {
 		// §8.7.1: build failures MUST be a 500.
-		_ = req.Error("500", "status payload build failed", nil)
+		_ = req.Error("500", "status payload build failed", nil, opt)
 		return
 	}
-	_ = req.Respond(body)
+	_ = req.Respond(body, opt)
 }
 
 // requestEnvelope is the §5.1 JSON envelope (only the fields the shim
@@ -524,6 +572,18 @@ func parseEnvelope(body []byte) (requestEnvelope, error) {
 // but we keep the option open). We accept new prompts only when no
 // other stream is active.
 func (s *shim) handlePrompt(req micro.Request) {
+	// Extract the inbound traceparent's trace_id once so every outbound
+	// publish on this prompt — early-exit rejection, ack, reply chunks,
+	// error chunk — shares the same trace. When the inbound carries no
+	// traceparent we mint a per-turn trace at the boundary so chunks
+	// within the turn still correlate as one workflow span on the
+	// observability backend; without this each chunk would be its own
+	// trace and downstream tools couldn't group them.
+	parentTrace := traceFromHeaders(nats.Header(req.Headers()))
+	if parentTrace == "" {
+		parentTrace = newTraceID()
+	}
+
 	body := req.Data()
 	env, err := parseEnvelope(body)
 	if err != nil {
@@ -531,12 +591,12 @@ func (s *shim) handlePrompt(req micro.Request) {
 		// error-headered message THEN the terminator (§9.3 / B.10) —
 		// even pre-ack, so callers waiting on the inactivity timeout
 		// (§6.6) see a clean close instead of timing out.
-		s.respondError(req, 400, err.Error(), nil)
+		s.respondError(req, 400, err.Error(), nil, parentTrace)
 		s.publishTerminator(req.Reply())
 		return
 	}
 	if !defaultAttachmentsOK && len(env.Attachments) > 0 {
-		s.respondError(req, 400, "attachments not accepted by this agent", nil)
+		s.respondError(req, 400, "attachments not accepted by this agent", nil, parentTrace)
 		s.publishTerminator(req.Reply())
 		return
 	}
@@ -548,16 +608,19 @@ func (s *shim) handlePrompt(req micro.Request) {
 		s.activeMu.Unlock()
 		// §9.2 503 (service unavailable) is the cleanest mapping for
 		// "agent busy with another turn". Caller can retry.
-		s.respondError(req, 503, "agent busy", nil)
+		s.respondError(req, 503, "agent busy", nil, parentTrace)
 		s.publishTerminator(req.Reply())
 		return
 	}
 	s.activeReply.Store(req.Reply())
+	// Stash the inbound trace so mid-stream publishes (eventPump,
+	// watchdog) propagate it onto every chunk + terminator + error.
+	s.activeTrace.Store(parentTrace)
 	s.activeMu.Unlock()
 
 	// §6.4: mandatory `ack` is the FIRST message on the reply subject,
 	// before any latency-inducing work. Send before invoking the adapter.
-	if err := s.publishChunk(req.Reply(), Chunk{Type: ChunkStatus, Data: "ack"}); err != nil {
+	if err := s.publishChunk(req.Reply(), Chunk{Type: ChunkStatus, Data: "ack"}, parentTrace); err != nil {
 		s.clearActive(req.Reply())
 		return
 	}
@@ -573,7 +636,7 @@ func (s *shim) handlePrompt(req micro.Request) {
 		_ = s.publishErrorOnReply(req.Reply(), &Error{
 			Code:    500,
 			Message: err.Error(),
-		})
+		}, parentTrace)
 		s.publishTerminator(req.Reply())
 		s.clearActive(req.Reply())
 		return
@@ -616,6 +679,7 @@ func (s *shim) finishStream(reply string) bool {
 		return false
 	}
 	s.activeReply.Store("")
+	s.activeTrace.Store("")
 	s.activeMu.Unlock()
 	s.publishTerminator(reply)
 	return true
@@ -645,8 +709,9 @@ func (s *shim) eventPump(ctx context.Context) {
 				// nowhere to send it.
 				continue
 			}
+			trace := s.loadActiveTrace()
 			if c.Err != nil {
-				_ = s.publishErrorOnReply(reply, c.Err)
+				_ = s.publishErrorOnReply(reply, c.Err, trace)
 				s.publishTerminator(reply)
 				s.clearActive(reply)
 				continue
@@ -656,29 +721,40 @@ func (s *shim) eventPump(ctx context.Context) {
 				s.clearActive(reply)
 				continue
 			}
-			_ = s.publishChunk(reply, c)
+			_ = s.publishChunk(reply, c, trace)
 		}
 	}
 }
 
 // clearActive resets activeReply iff it matches `reply`. Guards against
 // a race where two streams' terminators arrive in quick succession.
+// Also clears activeTrace so the next prompt's trace doesn't inherit
+// stale context if the new prompt happens to lack a traceparent.
 func (s *shim) clearActive(reply string) {
 	s.activeMu.Lock()
 	if s.loadActiveReply() == reply {
 		s.activeReply.Store("")
+		s.activeTrace.Store("")
 	}
 	s.activeMu.Unlock()
 }
 
-// publishChunk encodes a non-terminator §6.2 chunk and publishes it.
-// Returns publish error so callers can decide whether to keep streaming.
-func (s *shim) publishChunk(reply string, c Chunk) error {
+// publishChunk encodes a non-terminator §6.2 chunk and publishes it
+// with sesh envelope headers (W3C traceparent + Sesh-*). parentTrace
+// is the trace_id to propagate from the inbound prompt; pass "" to mint
+// a fresh trace. Returns publish error so callers can decide whether to
+// keep streaming.
+func (s *shim) publishChunk(reply string, c Chunk, parentTrace string) error {
 	body, err := encodeChunk(c)
 	if err != nil {
 		return err
 	}
-	return s.nc.Publish(reply, body)
+	hdr := envelopeHeaders(s.cfg.Role, s.cfg.TaskID, parentTrace, firstAttempt)
+	return s.nc.PublishMsg(&nats.Msg{
+		Subject: reply,
+		Header:  hdr,
+		Data:    body,
+	})
 }
 
 // encodeChunk produces the JSON bytes for a §6.2 chunk. Separated from
@@ -699,49 +775,60 @@ func encodeChunk(c Chunk) ([]byte, error) {
 }
 
 // publishTerminator emits the §6.5 zero-byte headerless terminator.
+// Sesh envelope headers (traceparent + Sesh-*) are NOT attached here:
+// Synadia §6.5 / §9.3 specify the terminator as "no headers" and the
+// conformance test enforces it. Trace correlation is preserved across
+// the rest of the turn via the ack + response chunks + (when relevant)
+// the error chunk — every one of those carries the same trace_id. The
+// terminator is the one publish that intentionally drops envelope
+// metadata so it stays distinguishable from an error reply (which
+// always carries Nats-Service-Error-* headers) and from a normal
+// response chunk (which has body bytes).
+//
 // Best-effort; a publish error here means the caller's stream will
 // time out via §6.6 inactivity, which is acceptable degradation.
 func (s *shim) publishTerminator(reply string) {
-	// nats.Publish sends a zero-byte body with no headers — exactly the
-	// §6.5 / B.9 terminator.
 	_ = s.nc.Publish(reply, nil)
 }
 
 // respondError emits the FIRST message of an error-terminated stream:
 // a message carrying `Nats-Service-Error-Code` / `Nats-Service-Error`
-// headers per §9.1 / B.10 (message 1). Callers MUST publish the §6.5
-// empty terminator separately afterward — `nats.go/micro`'s
-// `request.Error` only publishes the single header-bearing message; it
-// does NOT also emit the terminator. We invoke publishTerminator from
-// the call sites so the invariant is uniform across pre-ack rejection
-// (handlePrompt's early-exit paths) and mid-stream errors (eventPump's
-// error-chunk path) — every error path produces exactly two messages:
-// the header-bearing signal, then the empty terminator.
-func (s *shim) respondError(req micro.Request, code int, msg string, body map[string]any) {
+// headers per §9.1 / B.10 (message 1), plus sesh envelope headers for
+// trace correlation. Callers MUST publish the §6.5 empty terminator
+// separately afterward — `nats.go/micro`'s `request.Error` only
+// publishes the single header-bearing message; it does NOT also emit
+// the terminator. We invoke publishTerminator from the call sites so
+// the invariant is uniform across pre-ack rejection (handlePrompt's
+// early-exit paths) and mid-stream errors (eventPump's error-chunk
+// path) — every error path produces exactly two messages: the
+// header-bearing signal, then the terminator.
+func (s *shim) respondError(req micro.Request, code int, msg string, body map[string]any, parentTrace string) {
 	codeStr := strconv.Itoa(code)
 	var raw []byte
 	if body != nil {
 		raw, _ = json.Marshal(body)
 	}
-	_ = req.Error(codeStr, msg, raw)
+	hdr := envelopeHeaders(s.cfg.Role, s.cfg.TaskID, parentTrace, firstAttempt)
+	_ = req.Error(codeStr, msg, raw, micro.WithHeaders(micro.Headers(hdr)))
 }
 
 // publishErrorOnReply is the §9.3 / B.10 path: error mid-stream. The
 // caller publishes one header-bearing message, then the empty terminator
-// (which publishTerminator emits separately).
-func (s *shim) publishErrorOnReply(reply string, e *Error) error {
+// (which publishTerminator emits separately). Envelope headers ride
+// alongside the Nats-Service-Error-* headers so the error event itself
+// is traceable.
+func (s *shim) publishErrorOnReply(reply string, e *Error, parentTrace string) error {
 	if e == nil {
 		return nil
 	}
-	hdr := nats.Header{}
+	hdr := envelopeHeaders(s.cfg.Role, s.cfg.TaskID, parentTrace, firstAttempt)
 	hdr.Set("Nats-Service-Error-Code", strconv.Itoa(e.Code))
 	hdr.Set("Nats-Service-Error", e.Message)
 	var body []byte
 	if e.Body != nil {
 		body, _ = json.Marshal(e.Body)
 	}
-	msg := &nats.Msg{Subject: reply, Header: hdr, Data: body}
-	return s.nc.PublishMsg(msg)
+	return s.nc.PublishMsg(&nats.Msg{Subject: reply, Header: hdr, Data: body})
 }
 
 // NewResponseChunk is a constructor for `response` chunks. `data` may be
