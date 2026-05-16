@@ -16,7 +16,7 @@ command -v nats >/dev/null 2>&1 || exit 0
 
 # NATS subject tokens can't contain `%`; strip the prefix to get the numeric id.
 PANE_NUM="${ORCH_PANE_ID#%}"
-SUBJECT_PREFIX="${ORCH_NATS_SUBJECT_PREFIX:-harness}"
+SUBJECT_PREFIX="${ORCH_NATS_SUBJECT_PREFIX:-orch}"
 SUBJECT="${SUBJECT_PREFIX}.stop.${PANE_NUM}"
 
 # Read the Stop payload — same shape the marker hook consumes.

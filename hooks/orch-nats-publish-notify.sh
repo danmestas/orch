@@ -10,7 +10,7 @@
 command -v nats >/dev/null 2>&1 || exit 0
 
 PANE_NUM="${ORCH_PANE_ID#%}"
-SUBJECT_PREFIX="${ORCH_NATS_SUBJECT_PREFIX:-harness}"
+SUBJECT_PREFIX="${ORCH_NATS_SUBJECT_PREFIX:-orch}"
 SUBJECT="${SUBJECT_PREFIX}.notify.${PANE_NUM}"
 
 PAYLOAD=$(cat)

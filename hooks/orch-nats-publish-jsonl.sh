@@ -35,7 +35,7 @@ ENCODED="${ENCODED//./-}"
 JSONL="$HOME/.claude/projects/${ENCODED}/${SESSION_ID}.jsonl"
 
 PANE_NUM="${ORCH_PANE_ID#%}"
-SUBJECT_PREFIX="${ORCH_NATS_SUBJECT_PREFIX:-harness}"
+SUBJECT_PREFIX="${ORCH_NATS_SUBJECT_PREFIX:-orch}"
 SUBJECT="${SUBJECT_PREFIX}.events.${PANE_NUM}"
 
 # Pid gate: one tailer per (pane, session). Prevents double-spawn if SessionStart
