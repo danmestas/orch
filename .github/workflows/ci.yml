@@ -99,6 +99,7 @@ jobs:
             test/test-orch-version.sh
             test/test-orch-observer-role.sh
             test/test-orch-spy.sh
+            test/test-cc-subagent-bridge.sh
           )
           for t in "${tests[@]}"; do
             echo "=== $t ==="

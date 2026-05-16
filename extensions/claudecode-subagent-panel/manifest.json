@@ -1,0 +1,9 @@
+{
+  "name": "claudecode-subagent-panel",
+  "version": "0.1.0",
+  "description": "Surface orch-spawned panes in Claude Code's subagent panel by mirroring SAP chunks into synthetic CC subagent JSONLs.",
+  "lifecycle": "daemon",
+  "binary": "cmd/orch-cc-subagent-bridge",
+  "trigger": "orch-up",
+  "env": ["NATS_URL", "ORCH_BRIDGE_CC_PROJECTS_DIR", "ORCH_BRIDGE_KEEP_FILES"]
+}

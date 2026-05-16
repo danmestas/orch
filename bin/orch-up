@@ -43,7 +43,7 @@ say
 # ───────────────────────────────────────────────────────────────────
 # 1. Verify runtime deps
 # ───────────────────────────────────────────────────────────────────
-say "[1/3] checking runtime deps"
+say "[1/4] checking runtime deps"
 missing=()
 for cmd in tmux jq; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -73,7 +73,7 @@ say
 # ───────────────────────────────────────────────────────────────────
 # 2. Symlink farm (idempotent — postinstall handles this; here as fallback)
 # ───────────────────────────────────────────────────────────────────
-say "[2/3] symlinking hooks + skills into Claude Code tree"
+say "[2/4] symlinking hooks + skills into Claude Code tree"
 if [ $DRY_RUN -eq 1 ]; then
     say "  would run: node $PKG_ROOT/scripts/postinstall.js"
 elif [ -f "$PKG_ROOT/scripts/postinstall.js" ]; then
@@ -93,7 +93,7 @@ say
 # ───────────────────────────────────────────────────────────────────
 # 3. Register hooks in ~/.claude/settings.json
 # ───────────────────────────────────────────────────────────────────
-say "[3/3] registering hooks in ~/.claude/settings.json"
+say "[3/4] registering hooks in ~/.claude/settings.json"
 SETTINGS="$HOME/.claude/settings.json"
 SNIPPET="$PKG_ROOT/settings-snippet.json"
 
@@ -167,6 +167,106 @@ else
 
     merged=$(merge_hook_for_event "$existing" SessionStart)
     echo "$merged" | jq '.' > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+fi
+say
+
+# ───────────────────────────────────────────────────────────────────
+# 4. Launch extensions (extensions/*/manifest.json with lifecycle=daemon)
+#
+# orch-up MUST stay oblivious to which extensions exist or what they do — it
+# reads only the manifest's `name`, `lifecycle`, `trigger`, and `binary`
+# fields. New extensions land by dropping a directory under extensions/;
+# orch-up picks them up next time it runs. See extensions/README.md for the
+# manifest contract.
+# ───────────────────────────────────────────────────────────────────
+say "[4/4] launching extensions"
+EXTENSIONS_DIR="$PKG_ROOT/extensions"
+if [ -d "$EXTENSIONS_DIR" ]; then
+    shopt -s nullglob 2>/dev/null || true
+    found_any=0
+    for manifest in "$EXTENSIONS_DIR"/*/manifest.json; do
+        found_any=1
+        ext_dir=$(dirname "$manifest")
+        name=$(jq -r '.name // ""' "$manifest")
+        lifecycle=$(jq -r '.lifecycle // ""' "$manifest")
+        trigger=$(jq -r '.trigger // ""' "$manifest")
+        binary=$(jq -r '.binary // ""' "$manifest")
+
+        if [ -z "$name" ] || [ -z "$binary" ]; then
+            warn "  skipping $manifest (missing name or binary)"
+            continue
+        fi
+        if [ "$lifecycle" != "daemon" ] || [ "$trigger" != "orch-up" ]; then
+            say "  skipping $name (lifecycle=$lifecycle, trigger=$trigger)"
+            continue
+        fi
+
+        bin_path="$ext_dir/$binary"
+        # For Go binaries, the manifest points at a source dir; build the
+        # binary lazily into the same dir. Operators on installed npm
+        # packages will get a prebuilt binary checked in, but in repo
+        # development we `go build` on first run.
+        if [ -d "$bin_path" ] && [ -f "$bin_path/main.go" ]; then
+            built="$ext_dir/.bin/$(basename "$bin_path")"
+            needs_build=0
+            if [ ! -x "$built" ] || [ "$bin_path/main.go" -nt "$built" ]; then
+                needs_build=1
+            fi
+            if [ $needs_build -eq 1 ] && [ $DRY_RUN -eq 1 ]; then
+                say "  would build: go build -o $built $bin_path"
+                # Dry-run: skip launch step too (we'd be claiming success on a
+                # binary we haven't built yet).
+                continue
+            fi
+            if [ $needs_build -eq 1 ]; then
+                if ! command -v go >/dev/null 2>&1; then
+                    warn "  $name: 'go' not on PATH; cannot build $bin_path — skipping"
+                    continue
+                fi
+                mkdir -p "$ext_dir/.bin"
+                # Build using the absolute source dir as the package
+                # path. `go build /abs/path` is portable since Go 1.11
+                # (modules); it walks up to find go.mod. We cd into
+                # PKG_ROOT first so the right module is selected.
+                (cd "$PKG_ROOT" && go build -o "$built" "$bin_path") \
+                    || { warn "  $name: build failed — skipping"; continue; }
+            fi
+            bin_path="$built"
+        fi
+        if [ ! -x "$bin_path" ]; then
+            warn "  $name: $bin_path not executable — skipping"
+            continue
+        fi
+
+        run_dir="$HOME/.orch/extensions/$name"
+        pid_file="$run_dir/daemon.pid"
+        log_file="$run_dir/daemon.log"
+
+        # Don't double-launch: if pid file exists and process is alive, skip.
+        if [ -f "$pid_file" ]; then
+            old_pid=$(cat "$pid_file" 2>/dev/null || true)
+            if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+                say "  $name: already running (pid=$old_pid)"
+                continue
+            fi
+            rm -f "$pid_file"
+        fi
+
+        if [ $DRY_RUN -eq 1 ]; then
+            say "  would launch: $bin_path (log → $log_file)"
+            continue
+        fi
+
+        mkdir -p "$run_dir"
+        nohup "$bin_path" >>"$log_file" 2>&1 < /dev/null &
+        echo $! > "$pid_file"
+        say "  launched $name (pid=$(cat "$pid_file"), log=$log_file)"
+    done
+    if [ $found_any -eq 0 ]; then
+        say "  no extensions found under $EXTENSIONS_DIR"
+    fi
+else
+    say "  no extensions/ directory — skipping"
 fi
 say
 

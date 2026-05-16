@@ -44,6 +44,7 @@
     "go.mod",
     "go.sum",
     "executors/",
+    "extensions/",
     "hooks/",
     "skills/",
     "references/",
