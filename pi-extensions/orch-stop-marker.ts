@@ -1,3 +1,10 @@
+/**
+ * @deprecated Superseded by the pi adapter in internal/adapter/pi/pi.go (orch#62).
+ * This extension is retained for one release cycle for users who have not yet
+ * migrated to the unified shim. It will be removed in a future release.
+ *
+ * See docs/orch-agent-shim.md for the migration path.
+ */
 // Harness Stop-marker extension for pi.
 //
 // Mirrors what `~/.claude/hooks/orch-stop-marker.sh` does for claude/codex:
