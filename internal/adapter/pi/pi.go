@@ -1,25 +1,23 @@
 // Package pi bridges the orch-agent-shim to the pi coding agent CLI.
 // It does three things:
 //
-//  1. Tails the agent's transcript JSONL written by pi — the same
-//     sessions directory that orch-nats-publish-jsonl.ts resolves at
-//     runtime — and emits a Synadia response chunk per content line.
-//  2. Watches the orch stop-marker file that orch-stop-marker.ts (or
-//     orch-nats-publish-stop.ts) writes to ~/.cache/orch-stop/<pane>.event
-//     when pi's agent_end event fires. This terminates the active stream.
+//  1. Tails the agent's transcript JSONL under ~/.pi/agent/sessions/ and
+//     emits a Synadia response chunk per content line.
+//  2. Watches ~/.cache/orch-stop/<pane>.event to terminate the active
+//     stream. NOTE (orch#94): the production marker-writer (the legacy
+//     pi-extension orch-stop-marker.ts) was retired; this watch survives
+//     for the test suite and as substrate for a future bus-native
+//     turn-end detector.
 //  3. Synthesizes §7 query chunks via the idle-with-prompt heuristic
-//     (Plan 11): when the pane's turn ends, pi has no native Notification
-//     event, so we emit a synthetic Query at the same moment as the
-//     Terminator — the caller can inspect the query and decide whether
-//     the agent is waiting for input on the next turn.
+//     (Plan 11): pi has no native Notification event, so we emit a
+//     synthetic Query at the same moment as the Terminator.
 //
 // Inbound prompts are delivered via tmux send-keys, identical to the
 // claude-code adapter.
 //
 // Transcript path: ~/.pi/agent/sessions/<encoded-cwd>/<ts>_<sid>.jsonl
 // where <encoded-cwd> replaces both `/` and `.` with `-` — e.g.
-// `/Users/d/p/proj` → `-Users-d-p-proj` (pi convention, verified from
-// orch-nats-publish-jsonl.ts: `cwd.replace(/[/.]/g, "-")`).
+// `/Users/d/p/proj` → `-Users-d-p-proj` (pi convention).
 //
 // This adapter follows the backpressure patterns established in the
 // claude-code adapter (cc.go): Start binds watchers to shim lifetime ctx;
@@ -215,8 +213,10 @@ func (a *Adapter) sessionsDir() string {
 }
 
 // markerLoop reacts to fsnotify CREATE / WRITE events on the stop-marker
-// directory. orch-stop-marker.ts atomically renames a tmpfile into place,
-// which surfaces as a single CREATE event on the destination path.
+// directory. The historical producer (the legacy orch-stop-marker.ts
+// pi-extension, retired in #94) used an atomic tmpfile-rename, which
+// surfaces as a single CREATE event on the destination path. Live writers
+// are gone; the loop survives for the test suite.
 //
 // Stop marker → emit Terminator chunk to close the active stream.
 // Synthetic query (Plan 11 idle-with-prompt heuristic): pi has no native
@@ -292,7 +292,7 @@ func (a *Adapter) emit(c shim.Chunk) {
 //	~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<session_uuid>.jsonl
 //
 // where <encoded-cwd> replaces both `/` and `.` with `-` (same rule as
-// claude's encoding; verified from orch-nats-publish-jsonl.ts).
+// claude's encoding).
 //
 // We poll every 250ms for the file's appearance because:
 //   - The pane may not have started pi yet on shim startup.

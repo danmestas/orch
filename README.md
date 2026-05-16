@@ -72,7 +72,7 @@ That's it. Orch handles the spawning, addressing, prompting, listening, and esca
 
 ## How it works
 
-Behind the scenes, each worker is a tmux pane running a full agent CLI with an optional outfit — a config-as-code bundle that ships system prompt, tool allowlist, skills, hooks, and model choice as one versioned artifact. Workers are addressable by pane id; you (or any other harness with addressing rights) send prompts, wait for completion, and survey activity. Hooks fire on every Stop and Notification event, writing marker files that `orch-listen` (blocking wait) and `orch-subscribe` (peer push-notifications) consume on demand — no daemon, no always-on process. Each harness carries a role tag — worker / observer / operator — so the substrate knows who can interrupt whom.
+Behind the scenes, each worker is a tmux pane running a full agent CLI with an optional outfit — a config-as-code bundle that ships system prompt, tool allowlist, skills, hooks, and model choice as one versioned artifact. Workers are addressable by pane id; you (or any other harness with addressing rights) send prompts, wait for completion, and survey activity over the Synadia Agent Protocol bus. Each spawned pane gets an `orch-agent-shim` sibling that publishes typed event chunks (response, thinking, tool_use, status) on `agents.events.>` and heartbeats on `agents.hb.>`; subscribers compose with `nats sub 'agents.>'` and a Monitor. Each harness carries a role tag — worker / observer / operator — surfaced in the shim's `$SRV.INFO.agents` metadata so subscribers know who can interrupt whom.
 
 You don't drive any of this manually. You describe what you want; orch's installed skill suite handles the spawning, the addressing, the listening, and the escalation surface.
 

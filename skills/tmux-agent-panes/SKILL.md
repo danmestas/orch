@@ -169,9 +169,9 @@ Asymmetric grids (3+2, 4+1) save a few cells but cost the eye more than they're 
 
 ## Driving the panes after spawning
 
-Once a pane is spawned, sending prompts to it, waiting for the agent to finish, and observing lifecycle events (Stop hook, Notification hook) live in the **`orch-driver`** skill. The relevant tools are `orch-tell`, `orch-wait`, `orch-ask`, `orch-listen` (parent push), `orch-subscribe` (worker-side peer push), and `orch-register`.
+Once a pane is spawned, sending prompts to it, waiting for the agent to finish, and observing lifecycle events live in the **`orch-driver`** skill. The relevant tools are `orch-tell`, `orch-wait`, `orch-ask`, and `nats sub 'agents.>'` for event streams (post-#94 the legacy `orch-listen` / `orch-subscribe` / `orch-register` are retired — registration is automatic via `orch-agent-shim`).
 
-**One thing to bake into the spawn here**: if the new pane will be auto-driven via `orch-tell`, set `ORCH_PANE_ID=$TMUX_PANE` in the launch command so the CC instance can self-identify in its hooks, and pass `--dangerously-skip-permissions` to claude so a permission prompt doesn't pause the turn indefinitely (Stop won't fire mid-turn). Example:
+**One thing to bake into the spawn here**: if the new pane will be auto-driven via `orch-tell`, set `ORCH_PANE_ID=$TMUX_PANE` in the launch command so the shim can identify the pane on the bus, and pass `--dangerously-skip-permissions` to claude so a permission prompt doesn't pause the turn indefinitely (turn-end won't fire mid-turn). Example:
 
 ```bash
 tmux split-window -d -h -t %27 \

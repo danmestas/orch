@@ -1,6 +1,17 @@
-# NATS comms bridge
+# NATS comms bridge (HISTORICAL)
 
-**Status:** Landed. Claude-code coverage shipped in #49 (subscriber + 3 publish hooks). Multi-harness coverage (codex / pi / gemini publish-side) shipped alongside — see the [Multi-harness coverage](#multi-harness-coverage) section below for per-harness scope and gaps.
+> **Retired in orch#94 (2026-05-16).** This document describes the legacy
+> NATS comms bridge — `bin/orch-nats-bridge-in`, the per-harness
+> `orch-nats-publish-*` hooks, and the filesystem-marker hooks
+> (`orch-stop-marker.sh`, `orch-notify-marker.sh`, `orch-session-jsonl.sh`).
+> All of those have been deleted. The bridge has been superseded by the
+> Synadia Agent Protocol path implemented in `orch-agent-shim` plus the
+> per-harness adapters under `internal/adapter/`. See
+> [`docs/orch-agent-shim.md`](orch-agent-shim.md) and
+> [`docs/synadia-comparison.md`](synadia-comparison.md) for the live
+> architecture. This file is preserved as the migration record.
+
+**Status:** Retired. Originally landed via #49 (subscriber + 3 publish hooks) with multi-harness coverage (codex / pi / gemini publish-side) added alongside. Retired in #94 once the Synadia path subsumed the bridge.
 
 A small adapter that lets a parent Claude Code session ("orchestrator") drive N spawned orch builder panes ("subagents") through NATS pub/sub in addition to orch's default tmux + filesystem-marker IPC. Marker behavior is preserved; NATS is additional fan-out.
 

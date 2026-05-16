@@ -22,7 +22,8 @@
 # harness). The shim is silently skipped if `orch-agent-shim` isn't on
 # PATH (warning to stderr, spawn proceeds — keeps install graceful for
 # shell-only orchs). Harnesses without a loaded adapter (codex/pi/gemini
-# until Plans 11-13) fall back to marker-hook-only path with a warning.
+# until Plans 11-13) spawn with the shim disabled and a warning; the legacy
+# marker-hook fallback was retired in #94 (Synadia is the only path).
 #
 # --position controls where the new pane is split off the current pane in headed
 # mode. Default `right` preserves prior behavior (tmux split-window -h). Mapping:
@@ -52,8 +53,8 @@
 #
 # Role: panes are tagged role=worker by default; role=observer when the outfit
 # or cut indicates a meta/spy class (stasi outfit, wait-watch cut, spy-on-* cut)
-# OR when --role is passed. orch-listen default-excludes observers; explicit
-# --role wins over auto-detection.
+# OR when --role is passed. Subscribers on the Synadia bus can filter on the
+# shim's metadata.role field; explicit --role wins over auto-detection.
 #
 # Default: spawns in the orchestrator's tmux window (headed).
 # With --headless, spawns in the detached `orch-headless` session — the agent
@@ -142,7 +143,7 @@ done
 
 # Resolve role: explicit --role wins; otherwise auto-detect from outfit/cut.
 # Observer-class outfits/cuts are meta panes (spies, auditors) — they watch
-# rather than do work, and orch-listen excludes them from default events.
+# rather than do work, and bus subscribers filter them by metadata.role.
 ROLE="$ROLE_OVERRIDE"
 if [ -z "$ROLE" ]; then
     case "$OUTFIT" in
@@ -289,9 +290,10 @@ PANE=$(export AGENT CWD HEADLESS NO_FLEET POSITION VERIFY OUTFIT BUNDLE GOAL_EXP
 #
 # Adapter-less harnesses (codex/pi/gemini until Plans 11-13): orch-agent-shim
 # exits 2 when invoked with an unknown adapter. We detect this by probing
-# --agent before the real launch; if the exit is 2, we fall back to the
-# marker-hook-only path with a warning. Exit ≠ 2 → try anyway; the shim
-# surfaces real errors in its log (no point pre-empting an unclear failure).
+# --agent before the real launch; if the exit is 2, we skip the shim and
+# emit a warning (the legacy marker-hook fallback was retired in #94). Exit
+# != 2 → try anyway; the shim surfaces real errors in its log (no point
+# pre-empting an unclear failure).
 #
 # Stderr goes to ~/.cache/orch-shim/<pane_id>.log (pane id has %, use
 # pct-form in path). Stdout is discarded (not part of spawn output contract).
@@ -347,10 +349,10 @@ if [ $NO_SHIM -eq 0 ]; then
                 >"$SHIM_LOG" 2>&1 &
             disown
         else
-            echo "orch-spawn: no shim adapter for $AGENT (adapter-less harness) — using marker-hook path only" >&2
+            echo "orch-spawn: no shim adapter for $AGENT (adapter-less harness) — spawning without shim; bus integration is disabled for this pane" >&2
         fi
     else
-        echo "orch-spawn: orch-agent-shim not on PATH — using marker-hook path only (install.sh to add it)" >&2
+        echo "orch-spawn: orch-agent-shim not on PATH — spawning without shim; install via install.sh to enable bus integration" >&2
     fi
 fi
 

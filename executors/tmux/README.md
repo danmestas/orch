@@ -40,34 +40,11 @@ orch-down <pane_id>
 | `executor` | `tmux` |
 | `location` | `local` |
 
-## hooks/
+## Eventing
 
-Contains tmux-executor-specific Claude Code hooks:
-
-- `orch-stop-marker.sh` — fired on agent Stop; writes a marker file that
-  `orch-listen` watches to detect turn boundaries.
-- `orch-notify-marker.sh` — fired on agent Notification; writes a marker for
-  the notification event.
-
-These hooks are symlinked into `~/.claude/hooks/` by `install.sh` and
-`scripts/postinstall.js`. The repo-root paths `hooks/orch-stop-marker.sh` and
-`hooks/orch-notify-marker.sh` are backward-compat symlinks pointing here.
-
-## legacy/
-
-Deprecated adapter scripts retained for one release cycle. Superseded by the
-shim adapters in `internal/adapter/`.
-
-- `codex-hooks/` — codex Stop/SessionStart hook scripts. Replaced by the
-  codex adapter in `internal/adapter/codex/`.
-- `gemini-hooks/` — gemini Stop/Notification hook scripts. Replaced by the
-  gemini adapter in `internal/adapter/gemini/`.
-- `pi-extensions/` — pi TypeScript extensions. Replaced by the pi adapter in
-  `internal/adapter/pi/pi.go`.
-
-The repo-root directories `codex-hooks/`, `gemini-hooks/`, and `pi-extensions/`
-are backward-compat symlinks pointing into `legacy/`. They will be removed in
-the next major release once the deprecation cycle closes.
+Turn-boundary and notification events flow through `orch-agent-shim` on the
+Synadia bus (`agents.>` subjects). The filesystem-marker hooks and per-harness
+NATS-publish hooks were retired in orch#94 — the shim is the only path.
 
 ## Operator notes
 

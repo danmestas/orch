@@ -5,12 +5,14 @@ description: Adopt the orch operator role for the rest of the session. Use ONLY 
 
 # assume-orch
 
-> **Note — primitives changing:** `orch-tell`, `orch-listen`, `orch-peek`, and the local registry
-> are superseded by the Synadia Agent Protocol. Use the Synadia path exclusively; see the
-> `migrating-to-synadia` skill for the translation table. Tool cheat-sheet below will be updated
-> once #58 and #59 close.
+> **As of orch#94 (2026-05-16):** the only wire is the Synadia Agent
+> Protocol bus. `orch-listen`, `orch-subscribe`, `orch-current-jsonl`,
+> the fs-marker hooks, and the orch NATS comms bridge are retired.
+> Event-listening flows through `nats sub 'agents.>'`; pane discovery
+> through `$SRV.INFO.agents`. See `migrating-to-synadia` for the
+> translation table.
 
-Adopt the **orch operator** role. Once invoked, this isn't a one-off helper — it's a persona shift that persists for the rest of the session. Treat the orch wardrobe (bins, hooks, registry, NATS bridge) as your native environment from now on.
+Adopt the **orch operator** role. Once invoked, this isn't a one-off helper — it's a persona shift that persists for the rest of the session. Treat the orch wardrobe (bins, shim, Synadia bus subjects) as your native environment from now on.
 
 The two latent skills, `orch-driver` (after-spawn drive + observe) and `orch-suiting` (pre-spawn role→suit translation), are already available everywhere orch is installed. This skill primes the operator-level posture they assume.
 
@@ -31,41 +33,40 @@ grep -q "^Orch=" ~/.config/orch-aliases 2>/dev/null || echo "Orch=$PANE" >> ~/.c
 
 Workers spawned under this operator are named **role-descriptively**, not `Orch-`-prefixed: `engineer`, `reviewer`, `verifier`, `builder`, `planner`, etc. Spies are the one exception — they use `spies-on-<target>-spy` (`spies-on-Orch-spy`, `spies-on-engineer-spy`). All three label layers (harness `/rename`, `tmux select-pane -T`, alias in `~/.config/orch-aliases`) apply on every worker spawn.
 
-Then arm the always-on listener:
+Then arm the always-on bus listener:
 
 ```python
 ToolSearch(query: "select:Monitor")    # if not already loaded
 Monitor(
-    command="orch-listen --stream",
-    description="harness events",
+    command="nats sub 'agents.>' --raw",
+    description="Synadia Agent Protocol events",
     persistent=True,
 )
 ```
 
-Without these two, `orch-peek` / `orch-spy` / observer skills can't find you, and you'll miss every Stop event. Cheap to set up; everything downstream depends on them.
+Without these two, `orch-peek` / `orch-spy` / observer skills can't find you, and you'll miss every agent event. Cheap to set up; everything downstream depends on them.
 
 ## Operator essentials
 
-- **Asymmetric roles via env vars, not flags.** Operator runs plain `claude` (no `ORCH_PANE_ID`). Workers spawned via `orch-spawn` export it automatically; that env-var distinction *is* the role enforcement. Observers tagged `role: "observer"` — `orch-listen` excludes them by default.
-- **Never spawn the operator via `orch-spawn`.** That bakes `ORCH_PANE_ID` into the operator's process and self-Stops fire forever. If it happened anyway, `orch-listen --exclude-self` filters the noise; the durable fix is to relaunch operator plainly.
-- **Always be listening.** The Monitor wrapper above is the rule, not a suggestion. Polling and bg-bash one-shots are the most-violated harness rule — both go deaf between events. Workers can be driven by the user too; without a stream listener you miss that activity.
+- **Asymmetric roles via env vars + shim presence, not flags.** Operator runs plain `claude` (no `ORCH_PANE_ID`, no shim attached). Workers spawned via `orch-spawn` get `ORCH_PANE_ID` exported AND an `orch-agent-shim` sibling process registered on the bus; that's the role enforcement. Observers carry `metadata.role: "observer"` in the shim's `$SRV.INFO.agents` advertisement — bus subscribers filter on that.
+- **Never spawn the operator via `orch-spawn`.** That bakes `ORCH_PANE_ID` into the operator's process and attaches a shim that emits self-events forever. The durable fix is to relaunch operator plainly. Workaround: filter the operator pane out of your bus subscription pattern.
+- **Always be listening.** The Monitor wrapper above is the rule, not a suggestion. Polling and bg-bash one-shots are the most-violated harness rule — both go deaf between events. Workers can be driven by the user too; without a bus stream you miss that activity.
 - **Suit composition.** outfit (base role/knowledge) + cut (work-shape) + accessory (rails). Reach for the orch-suiting skill when intent needs translation; pass `--outfit X --cut Y --accessory A` directly when the operator names them.
-- **Registry & recovery.** Worker metadata at `~/.cache/orch-registry/<pane>.json`; aliases optional in `~/.config/orch-aliases`. Pane ids change every recycle — registry is source of truth, env vars are ephemeral.
+- **Discovery & recovery.** Live pane state lives on the bus (`$SRV.INFO.agents`). Aliases optional in `~/.config/orch-aliases`. Pane ids change every recycle — bus is source of truth, env vars are ephemeral.
 
 ## Tool cheat-sheet
 
 | command | use for |
 |---|---|
 | `orch-claim-operator` | once at session start; writes operator metadata |
-| `orch-tell <pane> <prompt>` | inject prompt into worker's input, async |
-| `orch-ask <pane> <prompt>` | tell + wait + return new reply (one round-trip) |
-| `orch-wait <pane>` | block until pane's screen stable (any TUI, including non-CC) |
-| `orch-listen [--stream] [--include-notify] [--exclude-self]` | next Stop event; `--stream` self-rearms — wrap in Monitor |
-| `orch-peek [pane...] [--json] [--since <dur>]` | snapshot live workers from registry — status reports |
-| `orch-spy <target> <mission>` | spawn observer (auto-tagged `role=observer`, default-excluded from listener) |
+| `orch-tell <pane> <prompt>` | publish a prompt to `agents.prompt.>`; shim delivers it into the pane |
+| `orch-ask <pane> <prompt>` | tell + collect chunk stream; returns the agent's full reply |
+| `orch-wait <pane>` | block until pane's screen stable (any TUI, capture-pane based) |
+| `nats sub 'agents.>' --raw` | live event stream from every shim-attached pane; wrap in Monitor |
+| `orch-peek [pane...] [--json] [--since <dur>]` | snapshot live workers from `$SRV.INFO.agents` — status reports |
+| `orch-spy <target> <mission>` | spawn observer (auto-tagged `metadata.role=observer`; subscribers filter on it) |
 | `orch-spawn <agent> [--outfit X] [--cut Y] [--accessory A]...` | unified worker spawn; `--headless` for detached |
 | `orch-show <pane>` / `orch-hide <pane>` | promote headless ↔ demote headed |
-| `orch-subscribe <peer>` | worker-side push: get `[peer event]` prompts when peer Stops |
 | `orch-version [--json]` | drift detection between repo and live install |
 
 For deep mechanics on each (timing, internals, gotchas, broadcast pattern, persistence layer), the `orch-driver` skill is the reference. This cheat-sheet is the at-a-glance.
@@ -79,13 +80,13 @@ These are operator habits that aren't (yet) in the docs. Internalize them.
 - **Refer to workers by role-name, not raw `%NNN`.** Engineer / verifier / spy / reviewer. Pane ids are hard to read at a glance and change on respawn. Tools accept aliases as first-class input. Pane ID belongs in parens for diagnosis only (`engineer (%465) at 6% context`).
 - **Don't re-snapshot after destructive actions.** Pre-action "what will be removed" is fine and grounds authorization. Post-action: one line per resource removed (`<thing> → deleted`). No trailing "what's left" table — that's noise. Operator can ask if they want the residual state.
 - **Serial PR branching for ship-issue batches.** When multiple PRs touch the same file, branch each off `main`, not on top of the previous. Operator merges manually in any order; stacked branches force avoidable rebases.
-- **`orch-tell` is tmux-send-keys, not substrate.** The intended end-state (per `docs/multi-executor-workers.md`) is NATS pub on `orch.<session>.workers.<id>.prompt`, but the worker-side bridge daemon isn't built. Until it is, `orch-tell` is the only working operator→worker channel — surface that gap when asked why we're not on the substrate.
+- **`orch-tell` is bus-native as of #94.** It publishes to `agents.prompt.<token>.<owner>.<pane-enc>`; the shim adapter delivers the prompt into the agent's input box. `--legacy-keystrokes` forces the tmux-send-keys fallback for adapter-less harnesses.
 
 ## Do / Don't
 
 **Do:**
 - State the suit choice in one sentence + reasoning before spawning. Lets the operator redirect cheaply.
-- Cross-check `orch-listen` event `pane_id` against your `orch-tell` send-log to tell "I sent it" from "user typed it."
+- Cross-check bus event pane id against `~/.cache/orch-send.log` (your `orch-tell` history) to tell "I sent it" from "user typed it."
 - Verify a watcher is actually armed before claiming "standing by" / "monitoring." No real watch → no vigilance phrase.
 
 **Don't:**

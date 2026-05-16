@@ -14,7 +14,9 @@ ORCH_PKG_DIR=/usr/lib/node_modules/@agent-ops/orch
 
 log "sesh version: $(sesh --help 2>&1 | head -1 || true)"
 
-# Wire claude-side hooks so the orch bridge tests work (mirrors test/docker).
+# Wire claude-side hooks (mirrors test/docker). Post-#94 the snippet only
+# carries the goal-session-context hook; legacy markers + NATS publishers
+# are gone.
 mkdir -p "$HOME/.claude/hooks" "$HOME/.cache"
 for f in "$ORCH_PKG_DIR"/hooks/*; do
     [ -f "$f" ] || continue

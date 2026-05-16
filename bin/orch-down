@@ -2,16 +2,18 @@
 # orch-down — tear down orch's install state on this machine.
 #
 # Reverses what `orch up` (and the npm postinstall) put in place:
-#   1. Remove orch hook entries from ~/.claude/settings.json
-#   2. Sweep symlinks orch owns (hooks, skills, pi-extensions)
+#   1. Remove orch hook entries from ~/.claude/settings.json (including
+#      legacy orch-{stop,notify}-marker entries from pre-#94 installs)
+#   2. Sweep symlinks orch owns (hooks, skills)
 #   3. Remove the fleet-prompt cache
-#   4. Remove runtime state (registry, stop markers, send log, subs, claim)
+#   4. Remove runtime state (registry, send log, subs, claim, plus migration
+#      residue under ~/.cache/orch-stop/ for operators on pre-#94 installs)
 #
 # What it does NOT do:
 #   - Uninstall the npm package — that's `npm uninstall -g @agent-ops/orch`
 #     (which would re-run preuninstall + remove the binaries; orch-down
 #     handles the residue npm uninstall doesn't touch)
-#   - Remove runtime deps (tmux, fswatch, jq) — other tools may use them
+#   - Remove runtime deps (tmux, jq) — other tools may use them
 #   - Strip injected fleet doctrine from ~/.codex/AGENTS.md / ~/.gemini/GEMINI.md
 #     (orch-up doesn't add those automatically; if you added them manually,
 #     remove the marker block manually)
@@ -62,13 +64,16 @@ say "=== orch-down — package: $PKG_ROOT ==="
 say
 say "This will:"
 say "  - Remove orch hook entries from ~/.claude/settings.json (backup first)"
-say "  - Remove symlinks under ~/.claude/hooks/, ~/.claude/skills/,"
-say "    and ~/.pi/agent/extensions/ that point back to this package"
+say "  - Remove symlinks under ~/.claude/hooks/ and ~/.claude/skills/"
+say "    that point back to this package"
 say "  - Delete ~/.cache/orch-fleet-prompt.md"
 if [ $KEEP_STATE -eq 0 ]; then
     say "  - Delete runtime state: ~/.cache/orch-registry/,"
-    say "    ~/.cache/orch-stop/, ~/.cache/orch-subs/,"
-    say "    ~/.cache/orch-send.log, ~/.cache/orch-operator.json"
+    say "    ~/.cache/orch-subs/, ~/.cache/orch-send.log,"
+    say "    ~/.cache/orch-operator.json"
+    say "  - Delete pre-#94 migration residue: ~/.cache/orch-stop/,"
+    say "    ~/.cache/orch-notify/, ~/.cache/orch-nats-bridge.log,"
+    say "    ~/.orch/sessions/"
     say "  - Kill orphaned orch-agent-shim processes and delete ~/.cache/orch-shim/"
 else
     say "  - Preserve runtime state (--keep-state)"
@@ -101,13 +106,14 @@ if [ -f "$SETTINGS" ]; then
         say "  backup: $BACKUP"
     fi
     # Walk every event type; for each, filter out matcher entries whose
-    # hooks all reference orch-{stop,notify}-marker. If a matcher has
-    # mixed hooks (some orch, some not), drop only the orch ones.
+    # hooks reference any orch-owned script (legacy markers + NATS publishers
+    # retired in #94, plus current orch-goal-* hooks). If a matcher has mixed
+    # hooks (some orch, some not), drop only the orch ones.
     new=$(jq '
         if .hooks then
             .hooks |= with_entries(
                 .value |= map(
-                    .hooks |= map(select(.command | test("orch-(stop|notify)-marker") | not))
+                    .hooks |= map(select(.command | test("orch-(stop|notify)-marker|orch-nats-publish-|orch-session-jsonl|orch-goal-(session-context|stop-account)") | not))
                 ) | map(select(.hooks | length > 0))
             )
             | .hooks |= with_entries(select(.value | length > 0))
@@ -150,9 +156,8 @@ else
             esac
         done
     }
-    sweep_dir "$PKG_ROOT/hooks"          "$HOME/.claude/hooks"
-    sweep_dir "$PKG_ROOT/skills"         "$HOME/.claude/skills"
-    sweep_dir "$PKG_ROOT/pi-extensions"  "$HOME/.pi/agent/extensions"
+    sweep_dir "$PKG_ROOT/hooks"   "$HOME/.claude/hooks"
+    sweep_dir "$PKG_ROOT/skills"  "$HOME/.claude/skills"
 fi
 say
 
@@ -171,10 +176,18 @@ if [ $KEEP_STATE -eq 1 ]; then
     say "  --keep-state — preserving runtime caches"
 else
     do_rm "$HOME/.cache/orch-registry"
-    do_rm "$HOME/.cache/orch-stop"
     do_rm "$HOME/.cache/orch-subs"
     do_rm "$HOME/.cache/orch-send.log"
     do_rm "$HOME/.cache/orch-operator.json"
+
+    # Migration residue from the legacy fs-marker IPC + NATS bridge retired
+    # in #94. Live writers are gone; these caches accumulate on operator
+    # machines that ran pre-#94 installs. Sweep them on teardown so re-installs
+    # start clean.
+    do_rm "$HOME/.cache/orch-stop"
+    do_rm "$HOME/.cache/orch-notify"
+    do_rm "$HOME/.cache/orch-nats-bridge.log"
+    do_rm "$HOME/.orch/sessions"
 
     # Kill any orphaned orch-agent-shim processes and remove their logs.
     # Shims are normally bound to their pane's shell lifetime; after an

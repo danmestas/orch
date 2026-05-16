@@ -38,9 +38,9 @@ The proposal touches only orch. Sesh and EdgeSync stay unchanged.
 ### Current orch limitations
 
 - `tmux split-window` is hardcoded as the spawn primitive
-  (`orch-spawn`), `tmux send-keys` as the input channel (`orch-tell`),
-  fswatch over `~/.cache/orch-stop/*.{event,notify}` marker files as the
-  event mechanism (`orch-listen`).
+  (`orch-spawn`); `orch-tell` sends prompts over the Synadia bus
+  (`agents.prompt.…`) with a legacy `tmux send-keys` fallback; the
+  Synadia bus (`agents.>`) is the only event channel after #94.
 - Workers share the parent cwd or live in a tempdir outfit bundle. There
   is no edit isolation between parallel workers.
 - No NATS, no Fossil, no participation in scoped state or task queues.

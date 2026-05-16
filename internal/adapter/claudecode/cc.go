@@ -4,10 +4,12 @@
 //  1. Tails the agent's transcript JSONL — the only source of truth for
 //     "what the assistant said" — and emits a Synadia response chunk
 //     per content-delta line.
-//  2. Watches the orch stop/notify marker files the existing hooks
-//     write (~/.cache/orch-stop/<pane>.event and .notify) so the shim
-//     terminates active streams when claude finishes a turn AND surfaces
-//     "Claude is waiting for input" prompts as §7 query chunks.
+//  2. Watches ~/.cache/orch-stop/<pane>.event and ~/.cache/orch-notify/<pane>.notify
+//     marker files. NOTE (orch#94): the production hook writers were
+//     retired; turn-end is now signalled by the bus terminator chunk and
+//     the test suite drives this loop via a tempdir. Live turn-end
+//     detection in this adapter is currently a follow-up (track in a
+//     future cleanup issue).
 //  3. Injects inbound prompts back into the pane via `tmux send-keys`,
 //     so the claude TUI's input box gets the text.
 //
@@ -239,9 +241,13 @@ func (a *Adapter) notifyMarker() string {
 }
 
 // markerLoop reacts to fsnotify CREATE / WRITE events on the marker
-// directories. The orch-stop-marker.sh and orch-notify-marker.sh hooks
-// atomically write these files via tmpfile-then-rename, so a single
-// CREATE event per turn is what we observe.
+// directories. NOTE (orch#94): the production marker-writer hooks
+// (orch-stop-marker.sh, orch-notify-marker.sh) were retired; in live
+// operation the markers are no longer written. This loop remains so the
+// adapter's test suite can drive it directly (cc_test.go writes markers
+// into a tempdir), and as a substrate for a future turn-end detector
+// rewritten on top of bus signals. Atomic tmpfile-then-rename writes
+// produce one CREATE event per turn, which is what the loop expects.
 //
 // Stop marker → emit Terminator chunk to close the active stream.
 // Notify marker → emit Query chunk so the caller can answer the

@@ -7,23 +7,21 @@ on a sesh hub (or standalone NATS server). v1 ships with one adapter
 
 ## Why
 
-orch already runs panes that publish events to NATS via the
-`hooks/orch-nats-publish-*.sh` scripts. Those scripts are ad-hoc — a
-4-subject convention that orch invented in `docs/nats-bridge.md` —
-and they're emit-only: callers can't *prompt* a pane over NATS, only
-observe it.
+Before #94, orch ran panes that published events to NATS via the
+`hooks/orch-nats-publish-*.sh` scripts — an ad-hoc, 4-subject convention
+documented in the (now-historical) `docs/nats-bridge.md`. Those scripts
+were emit-only: callers couldn't *prompt* a pane over NATS, only observe
+it.
 
 Synadia's protocol fixes both gaps: callers discover panes via
 `$SRV.INFO.agents`, prompt them on a documented subject, and receive
 typed streamed chunks back. Heartbeats and a status request/reply
-endpoint give first-class liveness. The shim is the bridge between
-orch's existing pane lifecycle (tmux + marker files + JSONL transcripts)
-and that protocol.
+endpoint give first-class liveness.
 
-The shim is **additive** to v1. Marker files and the existing publish
-hooks keep working; `orch-tell` and `orch-listen` are unchanged. The
-shim makes every spawned pane *additionally* discoverable on the
-Synadia bus.
+The shim is now the **only** event channel between orch panes and the
+outside world. The legacy bridge + publish hooks + marker hooks were
+retired in #94; every spawned pane reaches the bus exclusively through
+its shim sibling.
 
 ## Architecture
 
@@ -84,12 +82,14 @@ Synadia bus.
 
 `<enc>` in both cases: replace `/` and `.` with `-` in the pane's CWD.
 
-**pi `pi-extensions/` deprecation notice:** `orch-nats-publish-jsonl.ts`,
-`orch-nats-publish-stop.ts`, and `orch-stop-marker.ts` are superseded by the
-`pi` adapter in orch-agent-shim. Keep them installed for backwards compatibility
-with `orch-listen` listeners that read the legacy orch.events / orch.stop
-subjects directly; the shim is additive. Remove them after orch-tell v2 is
-rolled out and all observers have migrated to the Synadia Agent Protocol bus.
+**Marker-watch notice (orch#94):** The shim adapters watch
+`~/.cache/orch-{stop,notify}/<pane>.{event,notify}` files. The legacy
+hook writers (`orch-stop-marker.sh`, `orch-notify-marker.sh`, the
+`pi-extensions/orch-*` scripts) that produced those files were retired in
+#94. The fsnotify watch loops remain so the test suites can drive them
+directly. Replacing the loops with a bus-native turn-end detector is a
+follow-up; in the meantime, live turn-end detection in these adapters
+relies on the transcript-tail signals + the synthetic heuristics.
 
 ## Configuration
 
@@ -234,20 +234,13 @@ The spawn integration test is `test/test-orch-spawn-shim.sh` — it
 starts a test NATS server, forks the shim, and asserts `$SRV.INFO.agents`
 returns the pane within 5 s.
 
-<<<<<<< HEAD
 ## Gemini adapter notes
 
 ### AfterAgent quirk
-gemini-cli's turn-end event is named `AfterAgent`, **not** `Stop`. Wiring a
-hook under `Stop` in `~/.gemini/settings.json` is silently rejected:
-
-```
-⚠ Invalid hook event name: "Stop" from project config. Skipping.
-```
-
-The existing `gemini-hooks/orch-nats-publish-stop.sh` hook is already wired
-under `AfterAgent`. The gemini adapter reads the same stop marker that hook
-writes, and emits the §6.5 Terminator chunk when it fires.
+gemini-cli's turn-end event is named `AfterAgent`, **not** `Stop`. The
+gemini adapter's marker-watch loop survives post-#94 for the test suite
+and as substrate for a future bus-native turn-end detector; the legacy
+hook writer wired under `AfterAgent` is gone.
 
 ### Transcript-path deferral
 gemini stores chat logs at
@@ -258,34 +251,18 @@ v1 emits only the stop terminator and native Notification query chunks.
 
 See the `TODO(transcript)` comment in `internal/adapter/gemini/gemini.go`.
 
-## Open work (out of scope for this PR)
+## Open work
 
-<<<<<<< HEAD
-- **codex / pi adapters.** Plans 11-12. Each is an
-=======
-## Adapter matrix
-
-| Agent value | Adapter | Transcript source | Stop detection | Notification gap |
-|---|---|---|---|---|
-| `claude-code` / `claude` | `claudecode/cc.go` | `~/.claude/projects/<enc-cwd>/<sid>.jsonl` | `~/.cache/orch-stop/<pane>.event` (fsnotify) | `~/.cache/orch-notify/<pane>.notify` (fsnotify) |
-| `codex` | `codex/codex.go` | `~/.codex/sessions/<Y>/<M>/<D>/rollout-<ts>-<uuid>.jsonl` | `~/.cache/orch-stop/<pane>.event` (fsnotify) | Synthetic: idle 5s + TUI prompt pattern → §7 query chunk |
-
-## Open work (out of scope for this PR)
-
-- **pi / gemini adapters.** Plans 12-13. Each is an
->>>>>>> 99b3cac (feat(shim): codex adapter — synthetic query chunks for the Notification gap)
-  `adapter/<name>/<name>.go` with the same three-method interface.
-=======
-- **codex / gemini adapters.** Plans 12-13. Each is an
-  `adapter/<name>/<name>.go` with the same four-method interface.
->>>>>>> 93e50b6 (feat(shim): pi adapter — synthetic query chunks for the Notification gap)
-- **Marker-file retirement.** The Stop hook keeps writing markers for
-  Plan-10 listeners. Plan 9 (orch-tell over Synadia) is what motivates
-  removing the dependency. The `pi-extensions/orch-nats-publish-{stop,jsonl}.ts`
-  and `orch-stop-marker.ts` are deprecated — see Adapter matrix above.
-- **Per-query reply routing.** The adapter emits §7 query chunks but
-  doesn't wire the caller's reply back through `tmux send-keys`. That
-  requires a reply-subject subscriber and is Plan 9 territory.
+- **Bus-native turn-end detection.** All four adapters
+  (`claudecode`, `codex`, `pi`, `gemini`) currently watch
+  `~/.cache/orch-stop/<pane>.event` files. Live writers were retired in
+  #94; the watch loops are now driven only by the test suites. A
+  follow-up issue should refactor each adapter to detect turn-end from
+  its native signal (transcript-tail idle, TUI prompt pattern, etc.)
+  rather than from a marker file.
+- **Per-query reply routing.** The adapters emit §7 query chunks but
+  don't wire the caller's reply back through `tmux send-keys`. Reply
+  routing requires a reply-subject subscriber — follow-up.
 - **pi native Notification.** If pi adds a native mid-turn event
   analogous to claude-code's Notification hook in a future release, the
   pi adapter's synthetic-query heuristic can be replaced with a direct

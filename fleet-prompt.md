@@ -4,16 +4,16 @@ You are running inside a tmux pane as one of several AI coding agents being orch
 
 ## Discovering your peers
 
-The current fleet roster is on disk at `~/.cache/orch-registry/`. Each file `<pane_id>.json` describes one peer:
-
-```json
-{ "pane_id": "%40", "agent": "claude", "cwd": "/home/example/projects/web-app", "session_id": "...", "spawn_ts_ns": ..., "last_seen_ts_ns": ... }
-```
+The current fleet roster lives on the Synadia bus via the NATS micro-service
+discovery endpoint `$SRV.INFO.agents`. Each spawned pane runs an
+`orch-agent-shim` sibling process that advertises its metadata (pane_id,
+agent, role, cwd, session_id).
 
 To list peers (excluding yourself):
 
 ```sh
-ls ~/.cache/orch-registry/*.json | xargs -n1 cat | jq 'select(.pane_id != "'"$ORCH_PANE_ID"'")'
+nats req '$SRV.INFO.agents' '' --replies=0 --timeout=2s \
+  | jq -s '.[].metadata | select(.pane_id != "'"$ORCH_PANE_ID"'") | {pane_id, agent, role, cwd}'
 ```
 
 ## Talking to a peer
@@ -34,13 +34,14 @@ After sending, the peer takes some seconds to think and respond. To capture thei
 tmux capture-pane -t <peer_pane_id> -p | tail -30
 ```
 
-Or wait for a Stop event from any peer (event-driven, no polling):
+Or subscribe to the Synadia bus for peer events (event-driven, no polling):
 
 ```sh
-orch-listen 60      # blocks until the next Stop event from any hook-wired peer
+nats sub --raw 'agents.events.>' --count=1   # blocks for one chunk
 ```
 
-Output is JSON-ish key=value lines including `pane_id` and `session_id`.
+Each chunk is a JSON object with `type`, `data`, and metadata identifying the
+source pane.
 
 ## Identifying yourself
 
@@ -52,10 +53,12 @@ orch-tell %47 "[from $ORCH_PANE_ID claude/web-app] question: what's the best way
 
 ## Receiving peer events (push subscriptions)
 
-If your operator subscribes you to a peer's events via `orch-subscribe <peer_pane>`, you'll start receiving messages in your input box that look like:
+If your operator wires you to a peer's bus events (e.g. by piping
+`nats sub` output into `orch-tell` to yourself), you'll start receiving
+messages in your input box that look like:
 
 ```
-[peer event] %47 fired Stop at 2026-05-08T15:30:17Z (cwd=/home/example/projects/web-app) — read-only context, do not auto-reply unless instructed.
+[peer event] %47 emitted a status:ack chunk at 2026-05-08T15:30:17Z (cwd=/home/example/projects/web-app) — read-only context, do not auto-reply unless instructed.
 ```
 
 These are **automated notifications**, not user messages. Treat them as read-only context — note them mentally, do not respond conversationally. Specifically:
@@ -66,12 +69,10 @@ These are **automated notifications**, not user messages. Treat them as read-onl
 
 If you want to inspect the peer's actual work, use `tmux capture-pane -t %47 -pS -200` or read their transcript JSONL — don't poke them.
 
-To stop receiving events: `orch-subscribe --cancel` (clears all your subscriptions) or `orch-subscribe --unsub <peer>` (one peer).
-
 ## Rules
 
-- Only address peers that exist in the registry. Don't invent pane ids.
+- Only address peers that exist on the bus (`$SRV.INFO.agents`). Don't invent pane ids.
 - Don't talk to peers unprompted unless the user asks for coordination — they're working on their own tasks.
-- The orchestrator (the parent CC session that drove your prompts via `orch-tell`) is *not* in the registry — it's the entity that started the fleet. You can't directly address the orchestrator, only respond in your own pane.
-- If asked to wait for a peer's reply, prefer `orch-listen 60` over polling `tmux capture-pane`. Event-driven beats busy-waiting.
-- **Do not invoke the `orch-driver` skill, and do not run orchestrator-only tools.** That skill describes the parent's role; you are a worker (because `$ORCH_PANE_ID` is set in your env). Specifically: do **not** call `orch-spawn` (only the orchestrator creates workers), `orch-listen` for control flow (only the orchestrator drives the event loop), `orch-relayout` (orchestrator owns the tmux layout), `orch-show`/`orch-hide`. You may still use `orch-tell` to a peer and `tmux capture-pane` for one-shot reads — those are worker-legal. If your user asks you to do something orchestrator-shaped (e.g., "spawn a new claude in /tmp", "broadcast to all agents"), refuse and tell them to do it from the orchestrator session instead.
+- The orchestrator (the parent CC session that drove your prompts via `orch-tell`) is *not* shim-attached — it's the entity that started the fleet. You can't directly address the orchestrator, only respond in your own pane.
+- If asked to wait for a peer's reply, prefer `nats sub --raw 'agents.events.>'` over polling `tmux capture-pane`. Event-driven beats busy-waiting.
+- **Do not invoke the `orch-driver` skill, and do not run orchestrator-only tools.** That skill describes the parent's role; you are a worker (because `$ORCH_PANE_ID` is set in your env). Specifically: do **not** call `orch-spawn` (only the orchestrator creates workers), `orch-relayout` (orchestrator owns the tmux layout), `orch-show`/`orch-hide`. You may still use `orch-tell` to a peer and `tmux capture-pane` for one-shot reads — those are worker-legal. If your user asks you to do something orchestrator-shaped (e.g., "spawn a new claude in /tmp", "broadcast to all agents"), refuse and tell them to do it from the orchestrator session instead.

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Usage: orch-bcast.sh <pane> <method:stop-hook|polling> <agent_label> <prompt>
+# Usage: orch-bcast.sh <pane> <method:shim|polling> <agent_label> <prompt>
 # Captures end-to-end timing for one harness in a broadcast experiment.
+#
+# As of orch#94, the only event channel is the Synadia bus. `shim` mode waits
+# for a turn-end status chunk on `agents.>` for the target pane; `polling`
+# mode uses screen-stability via orch-wait for adapter-less harnesses.
 set -uo pipefail
 
 PANE=$1; METHOD=$2; AGENT=$3; PROMPT=$4
@@ -19,20 +23,15 @@ T_SEND_NS=$(now_ns)
 orch-tell "$PANE" "$PROMPT"
 
 case "$METHOD" in
-    stop-hook)
-        # Inline single-pane Stop wait via fswatch; deleted orch-watch-stop in favor
-        # of orch-listen (multi-pane), and broadcast doesn't want the multi-pane
-        # semantics (each bg bash is paired with one pane).
+    shim)
+        # Subscribe to this pane's event stream and wait for an ack/terminator.
+        OWNER="${ORCH_OWNER:-$USER}"
+        PANE_ENC="pct${PANE#%}"
         STOPINFO=/tmp/hbcast-stopinfo-${PANE//%/p}.txt
-        DIR="${ORCH_STOP_DIR:-$HOME/.cache/orch-stop}"
-        TARGET="$DIR/$PANE.event"
-        rm -f "$STOPINFO" "$TARGET"
-        deadline=$(( $(date +%s) + 600 ))
-        while [ ! -e "$TARGET" ]; do
-            [ "$(date +%s)" -ge "$deadline" ] && { echo "TIMEOUT" > "$STOPINFO"; break; }
-            fswatch -1 "$DIR" > /dev/null 2>&1 || sleep 1
-        done
-        [ -e "$TARGET" ] && cat "$TARGET" > "$STOPINFO"
+        rm -f "$STOPINFO"
+        timeout 600 nats sub --raw --count=1 \
+            "agents.status.cc.${OWNER}.${PANE_ENC}" >"$STOPINFO" 2>&1 || \
+            echo "TIMEOUT" > "$STOPINFO"
         T_SETTLED_NS=$(now_ns)
         ;;
     polling)
@@ -43,7 +42,7 @@ case "$METHOD" in
         STOPINFO=""
         ;;
     *)
-        echo "ERR: unknown method $METHOD" >&2; exit 1 ;;
+        echo "ERR: unknown method $METHOD (expected shim|polling)" >&2; exit 1 ;;
 esac
 
 # Capture response
@@ -64,13 +63,8 @@ T_BASH_END_NS=$(now_ns)
     echo "DELTA_SEND_TO_SETTLED_MS=$(( (T_SETTLED_NS - T_SEND_NS) / 1000000 ))"
     echo "DELTA_SETTLED_TO_BASH_END_MS=$(( (T_BASH_END_NS - T_SETTLED_NS) / 1000000 ))"
     if [ -n "$STOPINFO" ] && [ -s "$STOPINFO" ]; then
-        echo "=== stop-hook payload ==="
+        echo "=== shim turn-end payload ==="
         cat "$STOPINFO"
-        # Compute hook-fire to bash-end latency precisely
-        HOOK_NS=$(grep '^ts_ns=' "$STOPINFO" | cut -d= -f2)
-        if [ -n "$HOOK_NS" ]; then
-            echo "DELTA_HOOK_TO_BASH_END_MS=$(( (T_BASH_END_NS - HOOK_NS) / 1000000 ))"
-        fi
     fi
     echo "=== response (new content since send) ==="
     if [ -n "$LAST_LINE" ]; then

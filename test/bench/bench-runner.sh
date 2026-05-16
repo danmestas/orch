@@ -3,11 +3,15 @@
 #
 # Runs inside the Docker image built by test/bench/measure.sh.
 # Measures:
-#   1. Round-trip latency: orch-tell (legacy) vs agents.prompt (shim)
-#   2. Chunk overhead (bytes per round-trip) for both paths
+#   1. Round-trip latency: agents.prompt (shim, Synadia Agent Protocol)
+#   2. Chunk overhead (bytes per round-trip) for the shim path
 #   3. Heartbeat bandwidth at fleet sizes 1, 10, 50
 #
 # Writes /tmp/bench-out/results.json on exit.
+#
+# The legacy orch-tell / orch-nats-bridge-in path was retired in orch#94.
+# Past baselines under test/bench/baselines/ that include a `legacy_ns`
+# array are historical only.
 #
 # Environment (set by measure.sh via docker run -e):
 #   BENCH_SAMPLES     number of prompts per path (default 50)
@@ -54,6 +58,8 @@ sed "s|\$HOME|$HOME|g" "$ORCH_PKG_DIR/settings-snippet.json" \
 tmux start-server
 log "tmux server started"
 
+export PATH="/usr/lib/node_modules/@agent-ops/orch/bin:$PATH"
+
 # ---------------------------------------------------------------------------
 # Helper: compute percentile from a newline-delimited list of ns integers.
 # ---------------------------------------------------------------------------
@@ -71,98 +77,7 @@ percentile() {
 }
 
 # ---------------------------------------------------------------------------
-# 1. PATH A — legacy orch-tell
-#    Operator publishes to orch.tell; mock claude receives via bridge;
-#    mock fires Stop hook → orch.stop.<num> published.
-#    Round-trip: t0 = before nats pub; t1 = ts_ns from orch.stop message.
-# ---------------------------------------------------------------------------
-log "--- PATH A: orch-tell (legacy) ---"
-
-export PATH="/usr/lib/node_modules/@agent-ops/orch/bin:$PATH"
-
-# Spawn a mock worker pane.
-PANE_A=$(orch-spawn claude --cwd /tmp --headless --verify 2>/dev/null | tail -1)
-[ -n "$PANE_A" ] && [ "${PANE_A:0:1}" = "%" ] || die "orch-spawn failed for PATH A (got: $PANE_A)"
-PANE_NUM_A="${PANE_A#%}"
-log "worker pane A: $PANE_A"
-sleep 0.5
-
-# Start bridge.
-BRIDGE_LOG="$HOME/.cache/orch-nats-bridge-a.log"
-BRIDGE_PID=$(ORCH_NATS_BRIDGE_LOG="$BRIDGE_LOG" orch-nats-bridge-in --background)
-sleep 0.5
-kill -0 "$BRIDGE_PID" 2>/dev/null || die "bridge failed"
-
-# Warm up.
-log "warming up ($WARMUP rounds)…"
-for _ in $(seq 1 "$WARMUP"); do
-    nats sub --raw "orch.stop.${PANE_NUM_A}" --count=1 >/dev/null 2>&1 &
-    SUB=$!
-    nats pub orch.tell "$(jq -nc --arg p "$PANE_A" --arg t "warmup" '{pane:$p,prompt:$t}')" >/dev/null 2>&1
-    wait $SUB 2>/dev/null || true
-    sleep 0.2
-done
-
-log "measuring $SAMPLES samples…"
-LATENCY_A_NS=""
-BYTES_IN_A=0
-BYTES_OUT_A=0
-MSGS_IN_A=0
-MSGS_OUT_A=0
-
-for i in $(seq 1 "$SAMPLES"); do
-    PROMPT="bench-a-prompt-${i}"
-    MSG_BODY=$(jq -nc --arg p "$PANE_A" --arg t "$PROMPT" '{pane:$p,prompt:$t}')
-    BYTES_IN_A=$((BYTES_IN_A + ${#MSG_BODY}))
-    MSGS_IN_A=$((MSGS_IN_A + 1))
-
-    # Subscribe for the stop event before publishing.
-    STOP_CAP=$(mktemp)
-    nats sub --raw "orch.stop.${PANE_NUM_A}" --count=1 >"$STOP_CAP" 2>&1 &
-    SUB=$!
-
-    T0=$(date +%s%N)
-    nats pub orch.tell "$MSG_BODY" >/dev/null 2>&1
-
-    # Wait for stop event (max 5s).
-    deadline=$(( $(date +%s) + 5 ))
-    while kill -0 $SUB 2>/dev/null; do
-        [ "$(date +%s)" -ge "$deadline" ] && break
-        sleep 0.05
-    done
-    T1=$(date +%s%N)
-    wait $SUB 2>/dev/null || true
-
-    # Extract ts_ns from stop payload if available; fall back to T1.
-    if command -v jq >/dev/null 2>&1 && grep -q '"ts_ns"' "$STOP_CAP" 2>/dev/null; then
-        TS_NS=$(jq -r '.ts_ns // empty' "$STOP_CAP" 2>/dev/null | head -1)
-        [ -n "$TS_NS" ] && T1=$TS_NS
-    fi
-
-    LATENCY_NS=$(( T1 - T0 ))
-    [ "$LATENCY_NS" -gt 0 ] || LATENCY_NS=1  # guard against clock skew
-    LATENCY_A_NS="${LATENCY_A_NS}${LATENCY_NS}\n"
-
-    STOP_BYTES=$(wc -c < "$STOP_CAP" 2>/dev/null || echo 0)
-    BYTES_OUT_A=$((BYTES_OUT_A + STOP_BYTES))
-    MSGS_OUT_A=$((MSGS_OUT_A + 1))
-    rm -f "$STOP_CAP"
-done
-
-# Per-round-trip averages.
-AVG_BYTES_IN_A=$(( BYTES_IN_A / SAMPLES ))
-AVG_BYTES_OUT_A=$(( BYTES_OUT_A / SAMPLES ))
-
-P50_A=$(printf "%b" "$LATENCY_A_NS" | grep -v '^$' | percentile 50)
-P95_A=$(printf "%b" "$LATENCY_A_NS" | grep -v '^$' | percentile 95)
-P99_A=$(printf "%b" "$LATENCY_A_NS" | grep -v '^$' | percentile 99)
-log "PATH A: p50=${P50_A}ns p95=${P95_A}ns p99=${P99_A}ns"
-
-# Stop bridge.
-kill "$BRIDGE_PID" 2>/dev/null || true
-
-# ---------------------------------------------------------------------------
-# 2. PATH B — agents.prompt (shim)
+# 1. PATH B — agents.prompt (shim)
 #    Operator calls `nats request agents.prompt.<token>.<owner>.<pane-enc>`;
 #    shim receives, runs mock adapter, returns chunks + terminator.
 #    Round-trip: t0 = before request; t1 = when empty terminator received.
@@ -182,12 +97,12 @@ MSGS_IN_B=0
 MSGS_OUT_B=0
 AVG_BYTES_IN_B=0
 AVG_BYTES_OUT_B=0
+P50_B="null"
+P95_B="null"
+P99_B="null"
 
 if [ -z "$SHIM_BIN" ]; then
     log "SKIP: orch-agent-shim not available; PATH B skipped"
-    P50_B="null"
-    P95_B="null"
-    P99_B="null"
 else
     # Spawn a mock worker pane for the shim path.
     PANE_B=$(orch-spawn claude --cwd /tmp --headless --verify 2>/dev/null | tail -1)
@@ -264,7 +179,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Heartbeat bandwidth at fleet sizes 1, 10, 50.
+# 2. Heartbeat bandwidth at fleet sizes 1, 10, 50.
 #    For each fleet size: spawn N shims with HB_INTERVAL cadence; sub
 #    agents.hb.> for HB_DURATION seconds; measure total bytes received.
 # ---------------------------------------------------------------------------
@@ -323,7 +238,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Write results.json.
+# 3. Write results.json.
 # ---------------------------------------------------------------------------
 log "writing $OUT_DIR/results.json"
 
@@ -333,7 +248,6 @@ to_json_array() {
     printf "%b" "$1" | grep -v '^$' | jq -s 'map(tonumber)' 2>/dev/null || echo "[]"
 }
 
-LA=$(to_json_array "$LATENCY_A_NS")
 if [ "$P50_B" != "null" ]; then
     LB=$(to_json_array "$LATENCY_B_NS")
 else
@@ -343,12 +257,7 @@ fi
 jq -n \
     --argjson samples "$SAMPLES" \
     --argjson warmup "$WARMUP" \
-    --argjson la "$LA" \
     --argjson lb "$LB" \
-    --argjson legacy_msgs_in  "$MSGS_IN_A" \
-    --argjson legacy_msgs_out "$MSGS_OUT_A" \
-    --argjson legacy_bytes_in  "$AVG_BYTES_IN_A" \
-    --argjson legacy_bytes_out "$AVG_BYTES_OUT_A" \
     --argjson shim_msgs_in  "$MSGS_IN_B" \
     --argjson shim_msgs_out "$MSGS_OUT_B" \
     --argjson shim_bytes_in  "$AVG_BYTES_IN_B" \
@@ -358,16 +267,9 @@ jq -n \
         latency: {
             samples: $samples,
             warmup: $warmup,
-            legacy_ns: $la,
             shim_ns: $lb
         },
         chunk: {
-            legacy: {
-                msgs_in:   $legacy_msgs_in,
-                msgs_out:  $legacy_msgs_out,
-                bytes_in:  $legacy_bytes_in,
-                bytes_out: $legacy_bytes_out
-            },
             shim: {
                 msgs_in:   $shim_msgs_in,
                 msgs_out:  $shim_msgs_out,

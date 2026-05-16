@@ -16,7 +16,7 @@ responsibilities.
 │   • outfit bundles (config-as-code via suit)                 │
 │   • role taxonomy: worker / observer / operator              │
 │   • per-harness hook adapters                                │
-│   • operator UX: orch-listen, orch-peek, orch-spy, skills    │
+│   • operator UX: orch-peek, orch-spy, orch-ask, skills       │
 ├─────────────────────────────────────────────────────────────┤
 │ SYNADIA PROTOCOL: addressable agents on NATS           ADOPT │  wire contract
 │   • $SRV.INFO.agents discovery + metadata                    │
@@ -46,28 +46,19 @@ the control-plane work only orch can do.
 | Spawn | `orch-spawn <agent>` — tmux split + outfit + role; multi-executor sketched in `docs/multi-executor-workers.md` |
 | Address | tmux pane id (`%37`) + alias file `~/.config/orch-aliases` |
 | Send | `orch-tell` (publishes to `agents.prompt.…` via `$SRV.INFO.agents` discovery), `orch-ask` (= `orch-tell --collect`: streams response chunks until terminator) |
-| Listen | `orch-listen` (one-shot or `--stream` over fswatch markers), `orch-subscribe` (peer push) |
-| Track | `orch-register` (per-pane JSON cache), `orch-claim-operator`, `orch-peek`, `orch-spy` |
+| Listen | Synadia bus: `nats sub 'agents.hb.>'` (heartbeats), `nats sub 'agents.>'` (all agent events). The legacy fswatch-based `orch-listen` was retired in #94. |
+| Track | `orch-claim-operator`, `orch-peek`, `orch-spy`; pane discovery via `$SRV.INFO.agents` |
 | Lifecycle | `orch-up`, `orch-down`, `orch-bundle-gc` |
-| Goal harness | `orch-goal-pursue`/`orch-goal-status` + Stop & SessionStart hooks + `goal-complete` skill |
+| Goal harness | `orch-goal-pursue`/`orch-goal-status` + SessionStart hook + `goal-complete` skill |
 
-### Two IPC mechanisms, both ad-hoc
-1. **Filesystem markers + fswatch** (default). `~/.cache/orch-stop/*.event` and `*.notify`. Synchronous, no daemon. Reliable on a single machine.
-2. **NATS bridge** (additive, landed in #49). Four subjects, schema-by-convention:
-   - **Outbound** (per-harness hook scripts): `orch.stop.<num>`, `orch.notify.<num>`, `orch.events.<num>` (raw Claude Code JSONL transcript)
-   - **Inbound** (one subscriber): `orch.tell` with JSON body `{pane:"%37", prompt:"…"}`
-   - The doc explicitly notes two ergonomic scars: NATS subject tokens can't contain `%`, and `nats sub --translate` doesn't expose `$NATS_SUBJECT` to the translator.
+### IPC mechanism
 
-### Per-harness coverage (today)
-| Harness | Stop | Notification | Transcript tail |
-|---|---|---|---|
-| claude-code | ✓ | ✓ | ✓ |
-| codex | ✓ | ✗ no event | ✓ |
-| pi | ✓ | ✗ no event | ✓ |
-| gemini | ✓ (as `AfterAgent`) | ✓ | ✗ deferred (path encoding) |
-
-Four parallel hook implementations (`.sh`/`.ts`) per event, gated on
-`$ORCH_PANE_ID`, with `--timeout=1s` best-effort publishes.
+As of #94, orch has a single IPC mechanism: the Synadia Agent Protocol over
+NATS via `orch-agent-shim` and the per-harness adapters under
+`internal/adapter/`. Each spawned pane registers as a `$SRV.INFO.agents`
+endpoint, publishes heartbeats, and accepts prompts on
+`agents.prompt.<token>.<owner>.<pane-enc>`. The legacy filesystem-marker
++ fswatch path and the standalone NATS comms bridge were both retired.
 
 ## The diagnostic moment
 
@@ -270,9 +261,7 @@ These are orch's unique value-add. Nothing else in the stack provides them:
   bypass, gemini path encoding, etc. This is **where orch's complexity
   belongs** — at the edge between idiosyncratic CLIs and the uniform
   wire above it.
-- **Operator UX.** `orch-listen --stream` (Monitor-wrapped push), the
-  installed skill suite (`assume-orch`, `orch-driver`, `goal-complete`,
-  `tmux-agent-panes`), the operator/worker visibility tooling.
+- **Operator UX.** Bus subscriptions via `nats sub 'agents.>'` (Monitor-wrapped push for live event streams), the installed skill suite (`assume-orch`, `orch-driver`, `goal-complete`, `tmux-agent-panes`), the operator/worker visibility tooling.
 - **Goal-harness hooks.** Token accounting, SessionStart context
   injection, completion-audit skill. sesh's goal-management spec
   explicitly says these are harness-side; orch is that harness side.
