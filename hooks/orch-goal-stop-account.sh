@@ -1,17 +1,30 @@
 #!/usr/bin/env bash
-# orch-goal-stop-account.sh — Stop hook for orch's goal-harness.
+# orch-goal-stop-account.sh — DEPRECATED Stop hook for orch's goal-harness.
 #
-# Fires on every Stop event (assistant turn end). When a goal pursuit
-# is active (SESH_GOAL_ID set), reports an estimated token cost for
-# the turn to sesh-ops, which CAS-increments the goal's used_tokens
+# DEPRECATED as of orch#64 (2026-05). Superseded by
+# orch-goal-stop-account-daemon, a long-running Go binary that subscribes
+# to Synadia §6.5 terminator events on agents.prompt.*.*.*.> and fires
+# sesh-ops goal account on every turn-end across ALL harnesses
+# (claude-code, codex, pi, gemini) — not just Claude Code.
+#
+# Migration:
+#   1. Remove the orch-goal-stop-account.sh entry from your settings.json
+#      Stop hooks (see settings-snippet.json for the current reference).
+#   2. Re-run `orch-goal-pursue` — it now launches the daemon automatically.
+#   3. Verify with `orch-goal-status` that the daemon is running.
+#
+# This file is kept for one deprecation cycle to avoid breaking existing
+# installs that reference it from settings.json. It will be removed in the
+# next minor release.
+#
+# Original purpose:
+# Fired on every Claude Code Stop event (assistant turn end). When a goal
+# pursuit is active (SESH_GOAL_ID set), reports an estimated token cost
+# for the turn to sesh-ops, which CAS-increments the goal's used_tokens
 # counter and auto-transitions to budget_limited if over budget.
 #
-# Estimation is rough — Claude Code doesn't expose per-turn token
-# counts to hooks directly. The reference impl uses a fixed per-turn
-# estimate; real harnesses should read from the model SDK after each
-# completion. The substrate is correct regardless of the estimate;
-# this is purely the runtime-side measurement that the spec calls
-# out as harness responsibility.
+# Limitation: fires only on Claude Code's Stop event; does not work with
+# codex, pi, or gemini harnesses. Use the daemon instead.
 #
 # Env required:
 #   SESH_GOAL_ID         — active goal record id (set by orch-goal-pursue)

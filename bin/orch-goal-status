@@ -41,3 +41,19 @@ if [[ -n "$TASKS_JSON" ]]; then
       | jq -r '"  \(.id)  [\(.status)]  \(.title)"'
   done <<<"$TASKS_JSON"
 fi
+
+# Show the cross-harness token-accounting daemon status.
+DAEMON_PID_FILE="$HOME/.cache/orch-goal-daemon/${GOAL_ID}.pid"
+echo
+echo "token-accounting daemon:"
+if [[ -f "$DAEMON_PID_FILE" ]]; then
+  DPID="$(cat "$DAEMON_PID_FILE")"
+  if kill -0 "$DPID" 2>/dev/null; then
+    echo "  running (pid=$DPID, pidfile=$DAEMON_PID_FILE)"
+  else
+    echo "  stopped (stale pidfile at $DAEMON_PID_FILE — pid=$DPID no longer alive)"
+  fi
+else
+  echo "  not running (no pidfile at $DAEMON_PID_FILE)"
+  echo "  launch with: orch-goal-stop-account-daemon (or re-run orch-goal-pursue)"
+fi
