@@ -512,6 +512,108 @@ func TestPromptStream_PreAckError_FollowedByTerminator(t *testing.T) {
 	}
 }
 
+// §6.5: an adapter that never emits a terminator (mock harness) MUST
+// still produce a zero-body terminator. The shim's watchdog (#102) is
+// the safety net — it force-emits the terminator after
+// terminatorWatchdog so callers using `nats req --replies=0` don't hang.
+//
+// Test approach: nopAdapter never emits any chunk on Events(); we
+// override terminatorWatchdog to 100ms and assert the terminator lands
+// within 2× the watchdog window.
+func TestPromptStream_WatchdogEmitsTerminator_WhenAdapterSilent(t *testing.T) {
+	// Override the package-level watchdog for the duration of this test.
+	// Restore on cleanup so subsequent tests see the production value.
+	orig := terminatorWatchdog
+	terminatorWatchdog = 100 * time.Millisecond
+	t.Cleanup(func() { terminatorWatchdog = orig })
+
+	url := startEmbeddedNATS(t)
+	cfg := Config{Agent: "claude-code", Pane: "%102", Owner: "u", Adapter: &nopAdapter{}}
+	nc, cleanup := runShimInBackground(t, url, cfg)
+	defer cleanup()
+
+	inbox := nats.NewInbox()
+	sub, err := nc.SubscribeSync(inbox)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	if err := nc.PublishRequest("agents.prompt.cc.u.pct102", inbox, []byte("hi")); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// Message 1: the §6.4 ack (the shim always emits this synchronously).
+	msg, err := sub.NextMsg(500 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	if string(msg.Data) != `{"type":"status","data":"ack"}` {
+		t.Fatalf("ack mismatch: got %s", msg.Data)
+	}
+
+	// Message 2: the §6.5 terminator, force-emitted by the watchdog.
+	// Wall-clock bound is 2× watchdog to absorb scheduler jitter.
+	msg, err = sub.NextMsg(2 * terminatorWatchdog)
+	if err != nil {
+		t.Fatalf("watchdog terminator never arrived (>2x watchdog): %v", err)
+	}
+	if len(msg.Data) != 0 {
+		t.Errorf("terminator should be empty body, got %d bytes", len(msg.Data))
+	}
+	if len(msg.Header) != 0 {
+		t.Errorf("terminator should have no headers, got %v", msg.Header)
+	}
+
+	// And no extra messages: the watchdog must NOT double-emit if the
+	// adapter later closes its channel.
+	if msg, err := sub.NextMsg(200 * time.Millisecond); err == nil {
+		t.Errorf("unexpected extra message after terminator: %q (headers=%v)", msg.Data, msg.Header)
+	}
+}
+
+// Companion to TestPromptStream_WatchdogEmitsTerminator_WhenAdapterSilent:
+// when the adapter DOES emit a terminator within the watchdog window,
+// the watchdog MUST NOT double-emit. Asserts idempotency by counting
+// terminator-shaped messages over the stream.
+func TestPromptStream_WatchdogIdempotent_WhenAdapterTerminates(t *testing.T) {
+	orig := terminatorWatchdog
+	terminatorWatchdog = 100 * time.Millisecond
+	t.Cleanup(func() { terminatorWatchdog = orig })
+
+	url := startEmbeddedNATS(t)
+	adapter := newScriptedAdapter(
+		NewResponseChunk("hello"),
+		NewTerminatorChunk(),
+	)
+	cfg := Config{Agent: "claude-code", Pane: "%103", Owner: "u", Adapter: adapter}
+	nc, cleanup := runShimInBackground(t, url, cfg)
+	defer cleanup()
+
+	inbox := nats.NewInbox()
+	sub, err := nc.SubscribeSync(inbox)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	if err := nc.PublishRequest("agents.prompt.cc.u.pct103", inbox, []byte("hi")); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// Expected sequence: ack, response "hello", terminator. No second
+	// terminator from the watchdog.
+	msgs := readStream(t, sub, 3, 1*time.Second)
+	if len(msgs[2].Data) != 0 {
+		t.Errorf("third msg should be terminator, got %s", msgs[2].Data)
+	}
+
+	// Wait past the watchdog deadline; assert no extra terminator lands.
+	if msg, err := sub.NextMsg(3 * terminatorWatchdog); err == nil {
+		t.Errorf("watchdog double-emitted: %q (headers=%v)", msg.Data, msg.Header)
+	}
+}
+
 func TestStatusEndpoint_RepliesWithHeartbeatShape(t *testing.T) {
 	// §8.7: status endpoint replies with a fresh §8.3 heartbeat payload.
 	url := startEmbeddedNATS(t)

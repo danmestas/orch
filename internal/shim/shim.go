@@ -6,16 +6,16 @@
 // Spec compliance map (matches the §12 agent checklist; see also
 // docs/orch-agent-shim.md):
 //
-//	- Service registered as `agents` (§3.1)              → newService
-//	- Metadata: agent/owner/protocol_version/session...  → newService
-//	- `prompt` endpoint with queue group "agents"        → registerEndpoints
-//	- `status` endpoint with queue group "agents"        → registerEndpoints / statusHandler
-//	- Plain-text and JSON envelopes accepted             → parseEnvelope
-//	- Mandatory `ack` as first reply chunk (§6.4)        → handlePrompt
-//	- Typed chunks + zero-byte terminator (§6)           → publishChunk / publishTerminator
-//	- Error path uses Nats-Service-Error headers (§9)    → publishError
-//	- Heartbeats on `agents.hb.<token>.<owner>.<name>`   → startHeartbeats
-//	- Status endpoint replies with §8.3 payload          → statusHandler
+//   - Service registered as `agents` (§3.1)              → newService
+//   - Metadata: agent/owner/protocol_version/session...  → newService
+//   - `prompt` endpoint with queue group "agents"        → registerEndpoints
+//   - `status` endpoint with queue group "agents"        → registerEndpoints / statusHandler
+//   - Plain-text and JSON envelopes accepted             → parseEnvelope
+//   - Mandatory `ack` as first reply chunk (§6.4)        → handlePrompt
+//   - Typed chunks + zero-byte terminator (§6)           → publishChunk / publishTerminator
+//   - Error path uses Nats-Service-Error headers (§9)    → publishError
+//   - Heartbeats on `agents.hb.<token>.<owner>.<name>`   → startHeartbeats
+//   - Status endpoint replies with §8.3 payload          → statusHandler
 package shim
 
 import (
@@ -57,6 +57,18 @@ const statusQueueGroup = "agents"
 // Default heartbeat cadence (§8.2). Recommended 30s. We expose the
 // override via Config.Interval and clamp the lower bound to 1s.
 const defaultInterval = 30 * time.Second
+
+// terminatorWatchdog bounds how long the shim waits for the adapter's
+// §6.5 zero-body terminator after emitting the §6.4 ack. If the adapter
+// never closes its Events() channel and never sends a Terminator chunk
+// (the failure mode #102 documents in mock harnesses), the watchdog
+// force-emits the terminator so callers using `nats req --replies=0`
+// don't hang for the full reply timeout on every prompt.
+//
+// Declared `var` instead of `const` so behavior tests can swap it for a
+// short value (e.g. 100ms) without timing out the suite. Production code
+// MUST treat this as a constant — there is no CLI flag.
+var terminatorWatchdog = 30 * time.Second
 
 // Default advertised `prompt` endpoint metadata (§2.1). 1MB is the
 // NATS default max payload; advertising more would tell callers we
@@ -564,7 +576,49 @@ func (s *shim) handlePrompt(req micro.Request) {
 		})
 		s.publishTerminator(req.Reply())
 		s.clearActive(req.Reply())
+		return
 	}
+
+	// §6.5 watchdog. The protocol REQUIRES every prompt stream end with
+	// a zero-body terminator (§6.5); the event pump emits it when the
+	// adapter sends a Terminator chunk or closes its Events() channel.
+	// Mock harnesses that never close Events() would otherwise leave
+	// callers blocked on the §6.6 inactivity timeout (#102). Centralize
+	// the safety net here so no adapter can violate the invariant.
+	go s.watchdogTerminator(req.Reply())
+}
+
+// watchdogTerminator force-emits a §6.5 terminator on `reply` if no
+// terminator has arrived by `terminatorWatchdog`. Idempotent with the
+// event pump's terminator path via finishStream's atomic check —
+// whichever fires first wins, the other observes a mismatched
+// activeReply and no-ops.
+func (s *shim) watchdogTerminator(reply string) {
+	t := time.NewTimer(terminatorWatchdog)
+	defer t.Stop()
+	select {
+	case <-s.runCtx.Done():
+		return
+	case <-t.C:
+		s.finishStream(reply)
+	}
+}
+
+// finishStream atomically checks whether `reply` is still the active
+// stream and, if so, publishes a §6.5 terminator and releases the slot.
+// Returns true iff this call performed the close. Used by the watchdog
+// to avoid racing the event pump's terminator path: clearActive's mutex
+// serializes the two competing closers.
+func (s *shim) finishStream(reply string) bool {
+	s.activeMu.Lock()
+	if s.loadActiveReply() != reply {
+		s.activeMu.Unlock()
+		return false
+	}
+	s.activeReply.Store("")
+	s.activeMu.Unlock()
+	s.publishTerminator(reply)
+	return true
 }
 
 // eventPump drains the adapter's event channel and publishes each chunk
