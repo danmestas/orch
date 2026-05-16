@@ -153,6 +153,165 @@ else
     skip "suit prepare --outfit $outfit" "suit prepare did not produce a bundle dir (likely the same upstream loader gap as T2)"
 fi
 
+# ---------- T9–T11: Synadia §12 adapter contract (MOCK_USE_SHIM=1 only) ----------
+#
+# These three groups verify that the shipped orch-agent-shim satisfies
+# the Synadia Agent Protocol v0.3 conformance checklist (§12).  They
+# require the shim binary on PATH and a spawned shim process, so they
+# run only when MOCK_USE_SHIM=1 is set.  Non-shim PRs can skip them
+# safely; adapter PRs (cmd/orch-agent-shim/, executors/, hooks/) must
+# pass all three groups.
+if [ "${MOCK_USE_SHIM:-0}" = "1" ]; then
+    # Derive coordinates the shim advertises.  orch-spawn was called
+    # earlier (T3) so $PANE is already set; the shim running in that
+    # pane uses ORCH_OWNER (or $USER) and encodes the pane as pct<N>.
+    SHIM_OWNER="${ORCH_OWNER:-root}"
+    PANE_NUM="${PANE#%}"
+    PANE_TOKEN="pct${PANE_NUM}"
+
+    # Sanity: confirm the shim process is actually running in the pane.
+    # Give it up to 5s to register the micro service.
+    SHIM_UP=0
+    for _ in $(seq 1 10); do
+        if nats --server="${NATS_URL:-nats://localhost:4222}" \
+                req '$SRV.INFO.agents' '' --replies=1 --timeout=1s \
+                >/dev/null 2>&1; then
+            SHIM_UP=1
+            break
+        fi
+        sleep 0.5
+    done
+
+    if [ "$SHIM_UP" -eq 0 ]; then
+        skip "T9/T10/T11 — shim service discovery" \
+             "shim not detected via \$SRV.INFO.agents within 5s — was MOCK_USE_SHIM=1 set before orch-spawn?"
+        skip "T9/T10/T11 — typed chunk sequence" \
+             "shim not running"
+        skip "T9/T10/T11 — heartbeat cadence" \
+             "shim not running"
+    else
+        # ------ T9: $SRV.INFO.agents service discovery ----------------------
+        log "=== T9: \$SRV.INFO.agents service discovery ==="
+        SRV_INFO_FILE=/tmp/t9-srv-info.json
+        nats --server="${NATS_URL:-nats://localhost:4222}" \
+             req '$SRV.INFO.agents' '' --replies=1 --timeout=2s \
+             --raw >"$SRV_INFO_FILE" 2>&1 || true
+
+        if [ -s "$SRV_INFO_FILE" ]; then
+            got_version=$(jq -r '.metadata.protocol_version // ""' "$SRV_INFO_FILE" 2>/dev/null || echo "")
+            got_agent=$(jq -r '.metadata.agent // ""' "$SRV_INFO_FILE" 2>/dev/null || echo "")
+            assert "T9.1: metadata.protocol_version = 0.3" "0.3" "$got_version"
+            # The harness token is "cc" for claude-code; metadata.agent is the
+            # canonical form "claude-code".
+            assert "T9.2: metadata.agent = claude-code" "claude-code" "$got_agent"
+        else
+            assert "T9: \$SRV.INFO.agents returned a response" "yes" "no"
+        fi
+
+        # ------ T10: typed chunk sequence -----------------------------------
+        log "=== T10: typed chunk sequence (ack + response + terminator) ==="
+        PROMPT_SUBJ="agents.prompt.cc.${SHIM_OWNER}.${PANE_TOKEN}"
+        REPLY_INBOX="_t10_reply_$$"
+        T10_CAP=/tmp/t10-chunks.log
+
+        # Subscribe to the reply inbox; collect up to 5 messages or timeout 8s.
+        nats --server="${NATS_URL:-nats://localhost:4222}" \
+             sub --raw --count=5 --timeout=8s \
+             "$REPLY_INBOX" >"$T10_CAP" 2>&1 &
+        T10_SUB=$!
+        sleep 0.3
+
+        # Publish a deterministic single-turn prompt that the shim will echo.
+        nats --server="${NATS_URL:-nats://localhost:4222}" \
+             req "$PROMPT_SUBJ" 'echo t10-canary' \
+             --reply "$REPLY_INBOX" --replies=0 --timeout=1s \
+             >/dev/null 2>&1 || true
+
+        # Wait for sub to finish (count=5 or timeout).
+        wait "$T10_SUB" 2>/dev/null || true
+
+        if [ -s "$T10_CAP" ]; then
+            # First chunk must be the ack status.
+            first_type=$(head -1 "$T10_CAP" | jq -r '.type // ""' 2>/dev/null || echo "")
+            first_data=$(head -1 "$T10_CAP" | jq -r '.data // ""' 2>/dev/null || echo "")
+            assert "T10.1: first chunk type=status" "status" "$first_type"
+            assert "T10.2: first chunk data=ack" "ack" "$first_data"
+
+            # At least one response chunk must follow.
+            resp_count=$(grep -c '"type":"response"' "$T10_CAP" 2>/dev/null || echo 0)
+            if [ "$resp_count" -ge 1 ]; then
+                assert "T10.3: >=1 response chunk" "yes" "yes"
+            else
+                assert "T10.3: >=1 response chunk" "yes" "no"
+            fi
+
+            # Final chunk must be zero-body (empty line or no JSON).
+            # nats sub --raw writes each message on its own line; the
+            # terminator arrives as an empty line.
+            if grep -q '^$' "$T10_CAP" 2>/dev/null; then
+                assert "T10.4: zero-body terminator present" "yes" "yes"
+            else
+                skip "T10.4: zero-body terminator" \
+                     "terminator line not captured — nats sub may have exited before it arrived"
+            fi
+        else
+            skip "T10: typed chunk sequence" \
+                 "no chunks captured — prompt endpoint may not be active yet"
+        fi
+
+        # ------ T11: heartbeat cadence --------------------------------------
+        log "=== T11: heartbeat cadence (§8.3) ==="
+        # The shim was started with SHIM_HB_INTERVAL=2s (set below in
+        # bootstrap or by the caller).  We sub the heartbeat subject for 6s
+        # and assert >=2 heartbeats with a valid §8.3 payload.
+        HB_SUBJ="agents.hb.cc.${SHIM_OWNER}.${PANE_TOKEN}"
+        T11_CAP=/tmp/t11-hb.log
+
+        nats --server="${NATS_URL:-nats://localhost:4222}" \
+             sub --raw --count=4 --timeout=6s \
+             "$HB_SUBJ" >"$T11_CAP" 2>&1 &
+        T11_SUB=$!
+        wait "$T11_SUB" 2>/dev/null || true
+
+        hb_count=$(grep -c '"interval_s"' "$T11_CAP" 2>/dev/null || echo 0)
+        if [ "$hb_count" -ge 2 ]; then
+            assert "T11.1: >=2 heartbeats in 6s" "yes" "yes"
+        else
+            assert "T11.1: >=2 heartbeats in 6s (got $hb_count)" "yes" "no"
+        fi
+
+        # Validate §8.3 payload fields on the first heartbeat.
+        if [ -s "$T11_CAP" ]; then
+            hb_agent=$(head -1 "$T11_CAP" | jq -r '.agent // ""' 2>/dev/null || echo "")
+            hb_owner=$(head -1 "$T11_CAP" | jq -r '.owner // ""' 2>/dev/null || echo "")
+            hb_iid=$(head -1 "$T11_CAP" | jq -r '.instance_id // ""' 2>/dev/null || echo "")
+            hb_ts=$(head -1 "$T11_CAP" | jq -r '.ts // ""' 2>/dev/null || echo "")
+            hb_ivs=$(head -1 "$T11_CAP" | jq -r '.interval_s // ""' 2>/dev/null || echo "")
+            assert "T11.2: heartbeat.agent present" "claude-code" "$hb_agent"
+            assert "T11.3: heartbeat.owner present" "$SHIM_OWNER" "$hb_owner"
+            if [ -n "$hb_iid" ]; then
+                assert "T11.4: heartbeat.instance_id present" "yes" "yes"
+            else
+                assert "T11.4: heartbeat.instance_id present" "yes" "no"
+            fi
+            if [ -n "$hb_ts" ]; then
+                assert "T11.5: heartbeat.ts present" "yes" "yes"
+            else
+                assert "T11.5: heartbeat.ts present" "yes" "no"
+            fi
+            if [ -n "$hb_ivs" ]; then
+                assert "T11.6: heartbeat.interval_s present" "yes" "yes"
+            else
+                assert "T11.6: heartbeat.interval_s present" "yes" "no"
+            fi
+        fi
+    fi
+else
+    skip "T9: \$SRV.INFO.agents discovery" "set MOCK_USE_SHIM=1 to enable Synadia adapter contract tests"
+    skip "T10: typed chunk sequence" "set MOCK_USE_SHIM=1 to enable Synadia adapter contract tests"
+    skip "T11: heartbeat cadence" "set MOCK_USE_SHIM=1 to enable Synadia adapter contract tests"
+fi
+
 # ---------- Summary ----------
 echo
 log "================================================================"

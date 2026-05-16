@@ -67,6 +67,29 @@ host and rebuilding the image with `docker build`):
   manually for now; adding a mock-gemini that fires `AfterAgent`-named
   hooks is straightforward follow-up.
 
+## Synadia adapter contract
+
+Three additional test groups (T9/T10/T11) verify that the shipped
+`orch-agent-shim` satisfies the Synadia Agent Protocol v0.3 §12
+conformance checklist.  They run under an opt-in flag because they
+require the shim binary and a 2 s heartbeat cadence (adds ~10 s):
+
+```sh
+./test/docker/run-tests.sh --with-shim
+# or equivalently:
+MOCK_USE_SHIM=1 ./test/docker/run-tests.sh
+```
+
+| Group | What it tests |
+|-------|---------------|
+| **T9** | `$SRV.INFO.agents` discovery — response contains `metadata.protocol_version: "0.3"` and `metadata.agent: "claude-code"` |
+| **T10** | Typed chunk sequence — leading `{type:"status",data:"ack"}`, ≥1 `{type:"response",...}`, zero-body terminator |
+| **T11** | Heartbeat cadence — `agents.hb.cc.<owner>.<pane>` receives ≥2 beats in 6 s with valid §8.3 payload fields (`agent`, `owner`, `instance_id`, `ts`, `interval_s`) |
+
+CI runs T9/T10/T11 automatically on PRs touching
+`cmd/orch-agent-shim/`, `executors/`, or `hooks/orch-nats-publish-*.sh`
+(see `.github/workflows/ci.yml` job `adapter-contract`).
+
 ## Adding tests
 
 `inside-container/tests.sh` uses a simple `assert desc expected got`

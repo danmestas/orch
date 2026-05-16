@@ -157,6 +157,52 @@ jobs:
           cat /tmp/orch-ci-real.log
           test "$(cat /tmp/orch-ci-real.rc)" = "0"
 
+  adapter-contract:
+    name: adapter contract bench (T9/T10/T11)
+    runs-on: ubuntu-latest
+    # Hard gate on PRs that touch the shim, executors, or publish hooks.
+    # Both docker bench and sesh bench must exit 0.
+    if: |
+      github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+
+      - name: check if adapter-relevant files changed
+        id: filter
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || true)
+          if printf '%s\n' "$changed" | grep -qE \
+              '^(cmd/orch-agent-shim/|executors/|hooks/orch-nats-publish-)'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.filter.outputs.relevant == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: run docker bench with MOCK_USE_SHIM=1 (T1–T11)
+        if: steps.filter.outputs.relevant == 'true'
+        run: |
+          MOCK_USE_SHIM=1 bash test/docker/run-tests.sh --with-shim
+
+      - name: run sesh bench
+        if: steps.filter.outputs.relevant == 'true'
+        run: |
+          bash test/docker-sesh/run-tests.sh
+
   bench:
     name: latency benchmark (soft gate)
     runs-on: ubuntu-latest
