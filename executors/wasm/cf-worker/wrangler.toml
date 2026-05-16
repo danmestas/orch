@@ -1,0 +1,37 @@
+name = "orch-cf-agent"
+main = "src/index.ts"
+# Bump compatibility_date before any real deployment; current value matches
+# the testing environment at POC time. Cloudflare publishes a new date with
+# each runtime release — see https://developers.cloudflare.com/workers/configuration/compatibility-dates/
+compatibility_date = "2024-09-23"
+# CF Workers support WebSocket outbound — this is how we speak NATS.
+# Node.js compat gives us Buffer, needed by @nats-io packages.
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+# Owner token: arbitrary namespace for this deployment (e.g. your GitHub username).
+# Used as the 4th subject token: agents.prompt.open-agent.<OPEN_AGENT_OWNER>.<session>
+OPEN_AGENT_OWNER = "changeme"
+
+# Model provider and model ID forwarded to open-agent's modelFactory.
+# Default: openrouter with a cheap model for POC.
+OPEN_AGENT_PROVIDER = "openrouter"
+OPEN_AGENT_MODEL_ID = "anthropic/claude-3-5-haiku"
+
+# [secrets] — set with `wrangler secret put`:
+#
+#   wrangler secret put NATS_WS_URL
+#     → ws://your-nats-host:8080 (WebSocket NATS endpoint; NOT nats://)
+#       Enable WebSocket on nats-server via a config file with
+#       `websocket { port: 8080, no_tls: true }` and run
+#       `nats-server -c nats.conf`. See examples/cf-worker-agent/README.md.
+#
+#   wrangler secret put OPENROUTER_API_KEY
+#     → sk-or-... (from openrouter.ai/settings/keys)
+#
+#   wrangler secret put AI_GATEWAY_API_KEY   (only if OPEN_AGENT_PROVIDER=gateway)
+#     → from vercel.com/dashboard/ai-gateway
+
+[[rules]]
+type = "ESModule"
+globs = ["**/*.ts"]

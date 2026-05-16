@@ -566,10 +566,13 @@ checklist:
 | 1. `tmux` + sesh substrate | `orch-spawn-sesh --outfit=X` spawns a worker in a Fossil checkout; worker publishes Stop/Notify on `orch.<session>.workers.<id>.events.*`; operator reads them via `nats sub`. |
 | 2. `docker` local | Worker runs in a container with the project Fossil checkout volume-mounted; substrate contract identical to phase 1. |
 | 3. `ssh` remote | Worker runs on a remote host via iroh-bridged EdgeSync; participates in the same KV + Fossil substrate as local workers. |
-| 4. `cf-worker` WASM | A Cloudflare Worker bootstrap loads `leaf-browser.wasm`, connects to the home hub via iroh, runs the agent-loop module; events publish on the same subjects. |
-| 5. `cf-durable-object` WASM | Phase 4's worker, but stateful — DO persists conversation/agent state across invocations. |
-| 6. `wasmtime` local sandbox | Same agent-loop module runs in wasmtime with strict resource limits. |
-| 7. `browser` | A static HTML page loads `leaf-browser.wasm` + the agent-loop and joins a session. |
+| 4. `cf-worker` WASM | A Cloudflare Worker imports `@synadia-ai/open-agent` and connects to a NATS hub over WebSocket (`@nats-io/transport-websockets`); registers as an `agents` microservice on `agents.prompt.open-agent.<owner>.<session>`. See `executors/wasm/cf-worker/` for the proof-of-concept and `examples/cf-worker-agent/README.md` for deploy + verify. Iroh-bridged NATS transport is future work. |
+| 5. `cf-durable-object` WASM | Phase 4's worker hosted in a Durable Object — DO persists conversation/agent state across invocations. |
+| 6. `wasmtime` local sandbox | Same open-agent bridge runs in wasmtime with strict resource limits. |
+| 7. `browser` | A static HTML page imports the open-agent bridge and joins a session via NATS WebSocket. |
+
+See `docs/multi-executor-workers.md` §Phased rollout for the canonical
+phase definitions and current status.
 
 Each phase is independently testable — don't gate phase N on phase N+1
 working. For each phase, write a smoke test:
