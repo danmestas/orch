@@ -150,6 +150,59 @@ after service registration" guidance):
    the adapter. `Close()` MUST close the channel returned by `Events()`
    so the event pump exits; `Close` is idempotent.
 
+## Integration with orch-spawn
+
+`orch-spawn` launches `orch-agent-shim` as a default sidecar for every
+spawned pane (Plan 8 / orch#58). No operator flag is required.
+
+```
+orch-spawn claude --project myapp
+# → splits pane, starts claude, then forks orch-agent-shim for that pane
+# → pane is discoverable via $SRV.INFO.agents within a few seconds
+```
+
+### Env propagation
+
+Five env vars are resolved in the parent shell and forwarded explicitly
+into the shim process (not inherited via shell env, so they survive
+`disown` correctly in both bash and zsh):
+
+| Var           | Source                              |
+|---------------|-------------------------------------|
+| `ORCH_OWNER`  | `$SESH_OWNER` or `$USER`            |
+| `ORCH_OUTFIT` | resolved outfit name (may be empty) |
+| `ORCH_ROLE`   | `worker` or `observer`              |
+| `SESH_SESSION`| resolved session label              |
+| `NATS_URL`    | from sesh hub URL or env            |
+
+### Adapter-less harnesses
+
+Harnesses without a shipped adapter (codex, pi, gemini — Plans 11-13)
+cause `orch-agent-shim --help` to exit 2 (adapter-not-found). orch-spawn
+detects this and falls back to the existing marker-hook-only path with a
+warning to stderr. No operator intervention required.
+
+### Disable knob
+
+Pass `--no-shim` to suppress the shim launch for a specific spawn —
+useful when diagnosing shim issues or when running agent-less test panes:
+
+```
+orch-spawn claude --project myapp --no-shim
+```
+
+### Shim logs
+
+Stderr from each shim is redirected to `~/.cache/orch-shim/<pctN>.log`
+(`%` in pane ids replaced with `pct` for safe filenames).
+
+### Teardown / orphan cleanup
+
+`orch-down` kills all running `orch-agent-shim` processes and removes
+`~/.cache/orch-shim/`. Shims are normally bound to their pane's shell
+lifetime; the orch-down sweep handles abrupt teardowns (e.g. `tmux
+kill-session`).
+
 ## Wire-compat
 
 Tests in `test/wire-compat/` drive the shim from a Synadia-protocol
@@ -157,12 +210,14 @@ caller built against `@synadia-ai/agents` (the upstream TS SDK), so
 any wire drift from the spec surfaces immediately. The smoke runner is
 `test/test-orch-agent-shim.sh`.
 
+The spawn integration test is `test/test-orch-spawn-shim.sh` — it
+starts a test NATS server, forks the shim, and asserts `$SRV.INFO.agents`
+returns the pane within 5 s.
+
 ## Open work (out of scope for this PR)
 
 - **codex / pi / gemini adapters.** Plans 11-13. Each is an
   `adapter/<name>/<name>.go` with the same three-method interface.
-- **`orch-spawn --with-shim` default flip.** v1 defaults the flag off;
-  Plan 8 turns it on once the shim has burned in.
 - **Marker-file retirement.** The Stop hook keeps writing markers for
   Plan-10 listeners. Plan 9 (orch-tell over Synadia) is what motivates
   removing the dependency.

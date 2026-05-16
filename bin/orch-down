@@ -69,6 +69,7 @@ if [ $KEEP_STATE -eq 0 ]; then
     say "  - Delete runtime state: ~/.cache/orch-registry/,"
     say "    ~/.cache/orch-stop/, ~/.cache/orch-subs/,"
     say "    ~/.cache/orch-send.log, ~/.cache/orch-operator.json"
+    say "  - Kill orphaned orch-agent-shim processes and delete ~/.cache/orch-shim/"
 else
     say "  - Preserve runtime state (--keep-state)"
 fi
@@ -174,6 +175,33 @@ else
     do_rm "$HOME/.cache/orch-subs"
     do_rm "$HOME/.cache/orch-send.log"
     do_rm "$HOME/.cache/orch-operator.json"
+
+    # Kill any orphaned orch-agent-shim processes and remove their logs.
+    # Shims are normally bound to their pane's shell lifetime; after an
+    # abrupt teardown (e.g. tmux kill-session) they can linger. We send
+    # SIGTERM and give them 2 s to drain the NATS connection, then SIGKILL.
+    #
+    # `pkill -x` is portable between Linux (procps-ng) and macOS (BSD).
+    # The process name `orch-agent-shim` is 15 chars — under Linux's 15-char
+    # /proc/<pid>/comm limit, so `-x` (exact match) is safe everywhere.
+    SHIM_LOG_DIR="$HOME/.cache/orch-shim"
+    if command -v pkill >/dev/null 2>&1; then
+        if [ $DRY_RUN -eq 1 ]; then
+            say "  would kill orphaned orch-agent-shim processes (pkill)"
+        else
+            # pkill returns 0 when at least one process matched, 1 when none.
+            # Skip the 2 s drain on the clean-teardown (no-match) path.
+            if pkill -TERM -x orch-agent-shim 2>/dev/null; then
+                sleep 2
+                pkill -KILL -x orch-agent-shim 2>/dev/null || true
+                say "  killed orphaned orch-agent-shim processes"
+            fi
+        fi
+    fi
+    # Unconditional log-dir cleanup regardless of pkill availability: stale
+    # log files are removed even on systems without pkill or when no shims
+    # were running.
+    do_rm "$SHIM_LOG_DIR"
 fi
 say
 

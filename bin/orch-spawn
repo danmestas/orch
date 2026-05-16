@@ -6,15 +6,17 @@
 #                         [--quiet] [--role <worker|observer>]
 #                         [--position <right|left|above|below>] [--verify]
 #                         [--outfit <name>] [--cut <name>] [--accessory <name>]...
-#                         [--with-shim]
+#                         [--no-shim]
 #
-# --with-shim launches an orch-agent-shim sibling process bound to the
-# new pane, registering it as a Synadia Agent Protocol v0.3 agent on
-# the sesh hub (or $NATS_URL). The shim publishes heartbeats and
-# accepts prompts on agents.prompt.cc.<owner>.pct<pane>. Off by default
-# in v1 — flips to default-on in Plan 8 after the shim burns in. The
-# shim is a no-op if `orch-agent-shim` isn't on PATH (warning to
-# stderr, spawn proceeds — keeps install graceful for shell-only orchs).
+# orch-agent-shim is launched by default alongside every spawned pane,
+# registering it as a Synadia Agent Protocol v0.3 agent on the sesh hub
+# (or $NATS_URL). The shim publishes heartbeats and accepts prompts on
+# agents.prompt.cc.<owner>.pct<pane>. Pass --no-shim to disable (useful
+# for diagnostics or when orch-agent-shim has no adapter for the target
+# harness). The shim is silently skipped if `orch-agent-shim` isn't on
+# PATH (warning to stderr, spawn proceeds — keeps install graceful for
+# shell-only orchs). Harnesses without a loaded adapter (codex/pi/gemini
+# until Plans 11-13) fall back to marker-hook-only path with a warning.
 #
 # --position controls where the new pane is split off the current pane in headed
 # mode. Default `right` preserves prior behavior (tmux split-window -h). Mapping:
@@ -74,7 +76,7 @@ set -euo pipefail
 
 AGENT=${1:-}
 shift 2>/dev/null || true
-[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--project n] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A]..." >&2; exit 1; }
+[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--project n] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim]..." >&2; exit 1; }
 
 CWD=""
 PROJECT=""
@@ -88,7 +90,7 @@ OUTFIT=""
 CUT=""
 ACCESSORIES=()
 NO_GOAL_ACCESSORY=0
-WITH_SHIM=0
+NO_SHIM=0
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -116,7 +118,7 @@ while [ $# -gt 0 ]; do
         --cut) CUT=$2; shift 2 ;;
         --accessory) ACCESSORIES+=("$2"); shift 2 ;;
         --no-goal-accessory) NO_GOAL_ACCESSORY=1; shift ;;
-        --with-shim) WITH_SHIM=1; shift ;;
+        --no-shim) NO_SHIM=1; shift ;;
         *) echo "orch-spawn: unknown flag: $1" >&2; exit 1 ;;
     esac
 done
@@ -381,12 +383,25 @@ else
 fi
 orch-register "$PANE" "$AGENT" "$CWD" --role "$ROLE" >/dev/null || true
 
-# --with-shim: launch an orch-agent-shim sibling that fronts the pane on
-# the Synadia Agent Protocol bus. Background — its lifetime is bound to
-# the parent shell (which dies with the pane), so no explicit teardown is
-# needed. Stderr goes to the same place as the spawn's stderr; stdout
-# discarded (the shim's log lines aren't part of the spawn output contract).
-if [ $WITH_SHIM -eq 1 ]; then
+# Shim launch: start orch-agent-shim alongside the pane unless --no-shim.
+# The shim registers the pane on the Synadia Agent Protocol bus so callers
+# can discover it via $SRV.INFO.agents and prompt it over NATS.
+#
+# Env vars are exported explicitly into the background process rather than
+# inherited implicitly — disown/nohup detach the process from the shell's
+# job table but the env block is already resolved in the parent before the
+# fork, so all five vars (ORCH_OWNER, ORCH_OUTFIT, ORCH_ROLE, SESH_SESSION,
+# NATS_URL) are correct in both bash and zsh.
+#
+# Adapter-less harnesses (codex/pi/gemini until Plans 11-13): orch-agent-shim
+# exits 2 when invoked with an unknown adapter. We detect this by probing
+# --agent before the real launch; if the exit is 2, we fall back to the
+# marker-hook-only path with a warning. Exit ≠ 2 → try anyway; the shim
+# surfaces real errors in its log (no point pre-empting an unclear failure).
+#
+# Stderr goes to ~/.cache/orch-shim/<pane_id>.log (pane id has %, use
+# pct-form in path). Stdout is discarded (not part of spawn output contract).
+if [ $NO_SHIM -eq 0 ]; then
     if command -v orch-agent-shim >/dev/null 2>&1; then
         # Translate agent name into the canonical Synadia identifier so
         # metadata.agent matches Appendix C. orch-spawn accepts "claude"
@@ -395,16 +410,53 @@ if [ $WITH_SHIM -eq 1 ]; then
             claude) SHIM_AGENT="claude-code" ;;
             *)      SHIM_AGENT="$AGENT" ;;
         esac
-        orch-agent-shim \
-            --agent "$SHIM_AGENT" \
-            --pane "$PANE" \
-            --cwd "$CWD" \
-            ${ROLE:+--role "$ROLE"} \
-            ${OUTFIT:+--outfit "$OUTFIT"} \
-            >/dev/null 2>&1 &
-        disown
+
+        # Probe: does this agent have a loaded adapter? orch-agent-shim --help
+        # exits 0 for known adapters and 2 for unknown ones (adapter-not-found).
+        # We use --help with an explicit --agent to trigger adapter selection
+        # without actually running the shim.
+        ADAPTER_EXIT=0
+        if orch-agent-shim --agent "$SHIM_AGENT" --help >/dev/null 2>&1; then
+            ADAPTER_OK=1
+        else
+            ADAPTER_EXIT=$?
+            if [ "$ADAPTER_EXIT" -eq 2 ]; then
+                ADAPTER_OK=0
+            else
+                ADAPTER_OK=1  # unexpected exit — try anyway; shim will surface error in log
+            fi
+        fi
+
+        if [ $ADAPTER_OK -eq 1 ]; then
+            # Resolve the five env vars that the shim needs. Inlined here
+            # (not \$VAR references) so they resolve in the parent's context
+            # and survive disown in both bash and zsh.
+            SHIM_OWNER="${SESH_OWNER:-${USER:-$(id -un)}}"
+            SHIM_SESSION="${SESH_SESSION:-}"
+            SHIM_NATS="${NATS_URL:-}"
+
+            # Log dir: use pct-form of pane id (% → pct) for safe filename.
+            PANE_SAFE="${PANE//%/pct}"
+            SHIM_LOG_DIR="$HOME/.cache/orch-shim"
+            mkdir -p "$SHIM_LOG_DIR"
+            SHIM_LOG="$SHIM_LOG_DIR/${PANE_SAFE}.log"
+
+            ORCH_OWNER="$SHIM_OWNER" \
+            ORCH_OUTFIT="$OUTFIT" \
+            ORCH_ROLE="$ROLE" \
+            SESH_SESSION="$SHIM_SESSION" \
+            NATS_URL="$SHIM_NATS" \
+            orch-agent-shim \
+                --agent "$SHIM_AGENT" \
+                --pane "$PANE" \
+                --cwd "$CWD" \
+                >"$SHIM_LOG" 2>&1 &
+            disown
+        else
+            echo "orch-spawn: no shim adapter for $AGENT (adapter-less harness) — using marker-hook path only" >&2
+        fi
     else
-        echo "orch-spawn: --with-shim requested but orch-agent-shim not on PATH (build it via install.sh)" >&2
+        echo "orch-spawn: orch-agent-shim not on PATH — using marker-hook path only (install.sh to add it)" >&2
     fi
 fi
 
