@@ -427,12 +427,12 @@ run_synadia_contract() {
     # something that closes the stream).
     log "T10 (${harness}): prompt round-trip produces ack + terminator"
     if [ -n "$prompt_subj" ]; then
-        # reply-timeout intentionally short: per orch#102 the shim doesn't emit
-        # a terminator yet, so the ack arrives instantly and we'd otherwise
-        # block the full window waiting for a chunk that never comes. Once
-        # #102 lands, bump this back to 30s+ to allow real streams to complete.
+        # reply-timeout must exceed the shim's terminatorWatchdog (30s,
+        # see cmd/orch-agent-shim/internal/shim/shim.go). When the mock
+        # harness produces no response chunks, the terminator is watchdog-
+        # fired ~30s after the ack. 35s gives slack for scheduler jitter.
         nats --server="$SESH_NATS_URL" req "$prompt_subj" "say bench-t10-${harness}-ok" \
-            --replies=0 --reply-timeout=3s --timeout=10s >"/tmp/t10-${harness}.cap" 2>&1 || true
+            --replies=0 --reply-timeout=35s --timeout=45s >"/tmp/t10-${harness}.cap" 2>&1 || true
         if grep -q '"type":"status","data":"ack"' "/tmp/t10-${harness}.cap"; then
             assert "T10 ${harness}: leading status:ack chunk received" "yes" "yes"
         else
@@ -441,14 +441,14 @@ run_synadia_contract() {
         fi
         # Count "Received" lines as a proxy for chunk count. nats CLI emits
         # one per reply, regardless of body shape — works for both populated
-        # and zero-body chunks.
+        # and zero-body chunks. Post-#102 the watchdog guarantees ≥2 chunks
+        # (ack + terminator), so this is a hard assertion.
         reply_count=$(grep -cE "^[0-9]+:[0-9]+:[0-9]+ Received" "/tmp/t10-${harness}.cap" 2>/dev/null || echo 0)
         if [ "$reply_count" -ge 2 ]; then
             assert "T10 ${harness}: stream closed (≥2 chunks: ack + terminator)" "yes" "yes"
         else
-            # Tracked: orch#102 — shim never emits zero-body terminator (Synadia §6.5
-            # violation). Once #102 lands, this skip can flip to a hard PASS/FAIL.
-            skip "T10 ${harness}: stream closes with terminator" "shim doesn't emit terminator yet — see orch#102; saw ${reply_count} chunk(s), expected ≥2"
+            assert "T10 ${harness}: stream closed (≥2 chunks: ack + terminator)" "yes" "no"
+            log "       cap: ${reply_count} chunk(s), expected ≥2 (ack + terminator)"
         fi
     else
         skip "T10 (${harness})" "no prompt subject discovered"
