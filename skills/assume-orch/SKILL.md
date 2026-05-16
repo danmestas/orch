@@ -15,6 +15,17 @@ The two latent skills, `orch-driver` (after-spawn drive + observe) and `orch-sui
 orch-claim-operator    # writes ~/.cache/orch-operator.json (your pane id + jsonl path)
 ```
 
+Then name yourself at all three layers — operator session is canonically `Orch`:
+
+```sh
+PANE=$(jq -r .pane_id ~/.cache/orch-operator.json)
+orch-tell --force "$PANE" "/rename Orch"        # harness session banner
+tmux select-pane -t "$PANE" -T Orch             # tmux pane title
+grep -q "^Orch=" ~/.config/orch-aliases 2>/dev/null || echo "Orch=$PANE" >> ~/.config/orch-aliases
+```
+
+Workers spawned under this operator are named **role-descriptively**, not `Orch-`-prefixed: `engineer`, `reviewer`, `verifier`, `builder`, `planner`, etc. Spies are the one exception — they use `spies-on-<target>-spy` (`spies-on-Orch-spy`, `spies-on-engineer-spy`). All three label layers (harness `/rename`, `tmux select-pane -T`, alias in `~/.config/orch-aliases`) apply on every worker spawn.
+
 Then arm the always-on listener:
 
 ```python
