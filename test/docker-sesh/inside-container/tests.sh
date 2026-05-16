@@ -520,20 +520,153 @@ log "=== Group 8: Mixed-executor broadcast (tmux + wasm/cf-worker) ==="
 skip "Group 8 — mixed-executor broadcast" "deferred — sesh#59 (WS NATS on hub) blocks; orch#110 closed by #112. SKIP slot flips to real test when sesh#59 lands."
 
 # ============================================================
-# GROUP 9+ — Task/Goal/Envelope/KV: defer if sesh-ops not installed
+# GROUP 9 — Task CAS pull protocol
 # ============================================================
-log "=== Group 9+: sesh-ops dependent tests ==="
-if command -v sesh-ops >/dev/null 2>&1; then
-    log "  (sesh-ops present — adding task/goal/envelope tests in follow-up)"
-    skip "Task CAS pull protocol" "tests not yet implemented in this bench; pattern verified manually elsewhere"
-    skip "Goal lifecycle state machine" "as above"
-    skip "Traceparent header chain" "as above"
-    skip "Five-tier KV bucket scopes" "as above"
-else
+log "=== Group 9: Task CAS pull protocol ==="
+if ! command -v sesh-ops >/dev/null 2>&1; then
     skip "Task CAS pull protocol" "sesh-ops CLI not in this image"
+else
+    sesh_full_reset
+    if sesh_up_in /tmp/g9-task s1; then
+        # Drive sesh-ops via the NATS URL the session JSON published, with
+        # a fixed workflow scope-id so the test owns its bucket end-to-end.
+        # workflow scope-id MUST be 8 or 32 hex chars per sesh-ops
+        # (internal/scope/bucket.go) — the format reflects trace-id /
+        # ULID conventions in sesh.
+        SO=(sesh-ops --server="$SESH_NATS_URL" --scope=workflow --scope-id=9beecafe)
+
+        # Create a task. sesh-ops emits JSON on stdout per docs.
+        T_OUT=$("${SO[@]}" task add --title="work-1" 2>&1)
+        T_ID=$(printf '%s' "$T_OUT" | jq -r '.id // empty' 2>/dev/null)
+
+        if [ -z "$T_ID" ]; then
+            skip "Group 9 — task add returns id" "sesh-ops task add did not emit .id (output: $T_OUT)"
+        else
+            assert "task add returns ULID" "non-empty" "non-empty"
+
+            # First pull MUST claim the task atomically; second pull MUST
+            # find no pending tasks (the CAS protocol means a pending task
+            # transitions to in_progress on claim, so it's invisible to
+            # the second puller).
+            P1=$("${SO[@]}" task pull 2>&1)
+            P1_ID=$(printf '%s' "$P1" | jq -r '.id // empty' 2>/dev/null)
+            assert "first pull claims the task" "$T_ID" "$P1_ID"
+
+            P2=$("${SO[@]}" task pull 2>&1)
+            P2_ID=$(printf '%s' "$P2" | jq -r '.id // empty' 2>/dev/null)
+            assert "second pull finds nothing pending" "" "$P2_ID"
+
+            # Status sanity check via task get: the claimed task is now
+            # in_progress, not pending.
+            G=$("${SO[@]}" task get "$T_ID" 2>&1)
+            G_STATUS=$(printf '%s' "$G" | jq -r '.status // empty' 2>/dev/null)
+            assert "task status after pull is in_progress" "in_progress" "$G_STATUS"
+
+            # Complete clears the puller and moves the task to terminal.
+            "${SO[@]}" task complete "$T_ID" --result='{"out":"ok"}' >/dev/null 2>&1
+            G=$("${SO[@]}" task get "$T_ID" 2>&1)
+            G_STATUS=$(printf '%s' "$G" | jq -r '.status // empty' 2>/dev/null)
+            assert "task status after complete is completed" "completed" "$G_STATUS"
+        fi
+        sesh_down_in /tmp/g9-task s1
+    else
+        skip "Group 9 — task CAS" "sesh up failed"
+    fi
+fi
+
+# ============================================================
+# GROUP 10 — Goal lifecycle state machine
+# ============================================================
+log "=== Group 10: Goal lifecycle state machine ==="
+if ! command -v sesh-ops >/dev/null 2>&1; then
     skip "Goal lifecycle state machine" "sesh-ops CLI not in this image"
-    skip "Traceparent header chain" "sesh-ops CLI not in this image"
-    skip "Five-tier KV bucket scopes" "sesh-ops CLI not in this image"
+else
+    sesh_full_reset
+    if sesh_up_in /tmp/g10-goal s1; then
+        SO=(sesh-ops --server="$SESH_NATS_URL" --scope=workflow --scope-id=10ecaf10)
+
+        G_OUT=$("${SO[@]}" goal create --objective="ship the feature" 2>&1)
+        G_ID=$(printf '%s' "$G_OUT" | jq -r '.id // empty' 2>/dev/null)
+
+        if [ -z "$G_ID" ]; then
+            skip "Group 10 — goal create" "sesh-ops goal create did not emit .id (output: $G_OUT)"
+        else
+            assert "goal create returns id" "non-empty" "non-empty"
+
+            # Pursuing → paused → pursuing → achieved. Field name is
+            # `.status` (matches sesh-ops/internal/goal/goal.go); the
+            # values are: pursuing, paused, achieved, unmet, budget_limited.
+            status_of() { "${SO[@]}" goal get "$1" 2>/dev/null | jq -r '.status // empty'; }
+
+            S0=$(status_of "$G_ID")
+            assert "initial status is pursuing" "pursuing" "$S0"
+
+            "${SO[@]}" goal pause "$G_ID" >/dev/null 2>&1
+            assert "pause transitions to paused" "paused" "$(status_of "$G_ID")"
+
+            "${SO[@]}" goal resume "$G_ID" >/dev/null 2>&1
+            assert "resume returns to pursuing" "pursuing" "$(status_of "$G_ID")"
+
+            "${SO[@]}" goal complete "$G_ID" --result='{"ok":true}' >/dev/null 2>&1
+            assert "complete transitions to achieved" "achieved" "$(status_of "$G_ID")"
+        fi
+        sesh_down_in /tmp/g10-goal s1
+    else
+        skip "Group 10 — goal state machine" "sesh up failed"
+    fi
+fi
+
+# ============================================================
+# GROUP 11 — Traceparent header chain (orch shim → sesh consumers)
+# ============================================================
+# Deferred until orch#116 lands the W3C traceparent + Sesh-* envelope
+# headers in the shim's outbound publishes. The bench can flip this
+# SKIP to a real assertion once that PR merges:
+#   - Spawn an orch-agent-shim worker
+#   - nats req --H 'traceparent:00-<id>-<sp>-01' agents.prompt.cc.<owner>.<pane>
+#   - Subscribe to the reply with `-H`; assert the reply chunks carry
+#     the same trace_id portion of traceparent (fresh span_id per hop)
+log "=== Group 11: Traceparent header chain ==="
+skip "Traceparent header chain" "depends on orch#116 (shim envelope headers); SKIP flips after merge"
+
+# ============================================================
+# GROUP 12 — KV bucket scope isolation
+# ============================================================
+# Tests that two distinct scope-ids within the same scope (workflow)
+# produce isolated KV buckets — i.e. tasks added under scope-id=A are
+# not visible to listings under scope-id=B. This is the lightest
+# meaningful coverage of sesh's scoped-memory convention; full
+# cross-tier coverage (hub/project/session/role/agent) is deferred
+# until those scopes have a documented sesh-ops/CLI surface.
+log "=== Group 12: KV bucket scope isolation ==="
+if ! command -v sesh-ops >/dev/null 2>&1; then
+    skip "KV scope isolation" "sesh-ops CLI not in this image"
+else
+    sesh_full_reset
+    if sesh_up_in /tmp/g12-kv s1; then
+        SO_A=(sesh-ops --server="$SESH_NATS_URL" --scope=workflow --scope-id=12aaaaaa)
+        SO_B=(sesh-ops --server="$SESH_NATS_URL" --scope=workflow --scope-id=12bbbbbb)
+
+        "${SO_A[@]}" task add --title="only-in-a" >/dev/null 2>&1
+        LIST_A=$("${SO_A[@]}" task list 2>/dev/null)
+        LIST_B=$("${SO_B[@]}" task list 2>/dev/null)
+
+        if printf '%s' "$LIST_A" | grep -qF "only-in-a"; then
+            assert "task visible in its own scope-id" "yes" "yes"
+        else
+            assert "task visible in its own scope-id" "yes" "no (list=$LIST_A)"
+        fi
+
+        if printf '%s' "$LIST_B" | grep -qF "only-in-a"; then
+            assert "task NOT visible in different scope-id" "isolated" "leaked"
+        else
+            assert "task NOT visible in different scope-id" "isolated" "isolated"
+        fi
+
+        sesh_down_in /tmp/g12-kv s1
+    else
+        skip "Group 12 — KV scope isolation" "sesh up failed"
+    fi
 fi
 
 # ============================================================

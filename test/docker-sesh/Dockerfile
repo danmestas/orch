@@ -18,6 +18,7 @@ FROM golang:1.26-bookworm AS builder
 
 ARG SESH_REF=main
 ARG EDGESYNC_REF=main
+ARG SESH_OPS_REF=main
 
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -26,11 +27,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 # so the two repos must be sibling dirs at build time.
 WORKDIR /src
 RUN git clone --depth 1 --branch "$EDGESYNC_REF" https://github.com/danmestas/EdgeSync.git \
-    && git clone --depth 1 --branch "$SESH_REF" https://github.com/danmestas/sesh.git
+    && git clone --depth 1 --branch "$SESH_REF" https://github.com/danmestas/sesh.git \
+    && git clone --depth 1 --branch "$SESH_OPS_REF" https://github.com/danmestas/sesh-ops.git
 
 WORKDIR /src/sesh
 RUN go build -o /out/sesh ./cmd/sesh \
     && /out/sesh --help >/dev/null 2>&1 || true
+
+# sesh-ops is the reference CLI for sesh's task / goal / scoped-memory
+# conventions. The bench's Group 9+ patterns drive these primitives —
+# without sesh-ops on PATH the bench can only SKIP them.
+WORKDIR /src/sesh-ops
+RUN go build -o /out/sesh-ops ./cmd/sesh-ops \
+    && /out/sesh-ops --help >/dev/null 2>&1 || true
 
 # orch-agent-shim — built from the npm-pack'd orch tarball below so the
 # bench tests the same shim source that real users would build via
@@ -66,9 +75,10 @@ RUN set -eux; arch="$TARGETARCH"; cd /tmp; \
     install -m 0755 "nats-${NATS_CLI_VERSION}-linux-${arch}/nats" /usr/local/bin/nats; \
     rm -rf nats.zip "nats-${NATS_CLI_VERSION}-linux-${arch}"
 
-# sesh + orch-agent-shim binaries from builder stage.
+# sesh + orch-agent-shim + sesh-ops binaries from builder stage.
 COPY --from=builder /out/sesh /usr/local/bin/sesh
 COPY --from=builder /out/orch-agent-shim /usr/local/bin/orch-agent-shim
+COPY --from=builder /out/sesh-ops /usr/local/bin/sesh-ops
 
 # orch + suit + wardrobe (matches test/docker/ pattern).
 RUN npm install -g @agent-ops/suit
