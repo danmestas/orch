@@ -32,6 +32,7 @@ import (
 
 	"github.com/danmestas/orch/internal/adapter/claudecode"
 	"github.com/danmestas/orch/internal/adapter/codex"
+	"github.com/danmestas/orch/internal/adapter/echo"
 	"github.com/danmestas/orch/internal/adapter/gemini"
 	"github.com/danmestas/orch/internal/adapter/pi"
 	"github.com/danmestas/orch/internal/shim"
@@ -109,8 +110,13 @@ func buildAdapter(agent, pane, cwd string) (shim.Adapter, error) {
 		return gemini.New(pane), nil
 	case "pi":
 		return pi.New(pane, cwd), nil
+	case "echo":
+		// echo is the reference adapter: no external tooling required.
+		// Use for smoke tests, protocol demonstrations, and as a template
+		// when writing a new harness adapter.
+		return echo.New(), nil
 	default:
-		return nil, fmt.Errorf("no adapter for agent %q (supported: claude-code, codex, gemini, pi)", agent)
+		return nil, fmt.Errorf("no adapter for agent %q (supported: claude-code, codex, gemini, pi, echo)", agent)
 	}
 }
 

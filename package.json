@@ -42,6 +42,10 @@
   },
   "files": [
     "bin/",
+    "cmd/",
+    "internal/",
+    "go.mod",
+    "go.sum",
     "hooks/",
     "codex-hooks/",
     "gemini-hooks/",

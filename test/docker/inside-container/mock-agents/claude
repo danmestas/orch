@@ -11,6 +11,11 @@
 #     fs-marker side and the NATS substrate side of "turn end".
 #   - Exit cleanly on SIGTERM.
 #
+# MOCK_USE_SHIM=1: instead of the hook-firing loop above, launch
+# orch-agent-shim with the claude-code adapter so T9/T10/T11 can
+# exercise the Synadia §12 contract against the real shim.  Falls back
+# to the hook-firing loop when MOCK_USE_SHIM is unset or 0.
+#
 # Intentionally NOT modeled on real claude-code semantics — this just
 # satisfies the orch plumbing contract.
 set -uo pipefail
@@ -28,6 +33,35 @@ cat <<'BANNER'
 
 BANNER
 
+# --- MOCK_USE_SHIM path: delegate to the real shim -------------------------
+if [ "${MOCK_USE_SHIM:-0}" = "1" ]; then
+    SHIM_BIN="${SHIM_BIN:-orch-agent-shim}"
+    if ! command -v "$SHIM_BIN" >/dev/null 2>&1; then
+        echo "[mock] MOCK_USE_SHIM=1 but $SHIM_BIN not found on PATH — falling back to hook-firing mode" >&2
+    else
+        # Resolve the tmux pane we're running in.  orch-spawn sets $TMUX_PANE
+        # (or $ORCH_PANE) before exec'ing us; fall back to the first visible
+        # pane id if neither is set.
+        PANE="${ORCH_PANE:-${TMUX_PANE:-}}"
+        if [ -z "$PANE" ]; then
+            PANE=$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null | head -1)
+        fi
+        if [ -z "$PANE" ]; then
+            echo "[mock] MOCK_USE_SHIM=1 but could not determine tmux pane — falling back to hook-firing mode" >&2
+        else
+            # Pass --heartbeat-interval so T11 can run fast (2s cadence).
+            HB_INTERVAL="${SHIM_HB_INTERVAL:-30s}"
+            exec "$SHIM_BIN" \
+                --agent claude-code \
+                --pane "$PANE" \
+                --interval "$HB_INTERVAL" \
+                ${NATS_URL:+--nats "$NATS_URL"}
+            # exec replaces the process — code below is unreachable on success.
+        fi
+    fi
+fi
+
+# --- Hook-firing mode (default / backward-compat) --------------------------
 trap 'exit 0' TERM INT
 
 # Build a minimal Stop hook payload — real CC ships richer JSON, but the

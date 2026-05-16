@@ -110,24 +110,27 @@ log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ)" "$*" >> "$LOG"
 }
 
-# Enumerate currently-live worker panes from the orch registry. Filters out
-# observers (role=observer) and stale entries whose pane no longer exists in
-# tmux. Used to fan a broadcast message out to every worker.
+# Enumerate currently-live worker panes from $SRV.INFO.agents (the Synadia
+# Agent Protocol service registry). Filters out observers and operators
+# (metadata.role != worker) and stale entries whose pane no longer exists
+# in tmux. Used to fan a broadcast message out to every worker.
 list_active_workers() {
-    local reg="${ORCH_REGISTRY_DIR:-$HOME/.cache/orch-registry}"
-    [ -d "$reg" ] || return 0
-    local live
+    command -v nats >/dev/null 2>&1 || return 0
+    command -v jq   >/dev/null 2>&1 || return 0
+    local live timeout
     live=$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null) || return 0
-    for f in "$reg"/*.json; do
-        [ -f "$f" ] || continue
-        local pane role
-        pane=$(jq -r '.pane_id // ""' "$f" 2>/dev/null)
-        role=$(jq -r '.role // "worker"' "$f" 2>/dev/null)
-        [ -n "$pane" ] || continue
-        [ "$role" = "observer" ] && continue
-        printf '%s\n' "$live" | grep -qx "$pane" || continue
-        printf '%s\n' "$pane"
-    done
+    timeout="${ORCH_BRIDGE_DISCOVERY_TIMEOUT:-2s}"
+    # shellcheck disable=SC2016  # $SRV.INFO.agents is a NATS system subject (literal $)
+    nats --server="${NATS_URL:-}" req '$SRV.INFO.agents' '' \
+        --replies=0 "--reply-timeout=$timeout" 2>/dev/null \
+        | grep -v '^Received on\|^---\|^[[:space:]]*$' \
+        | jq -r 'select((.metadata.role // "worker") == "worker") | .metadata.pane_id // empty' \
+            2>/dev/null \
+        | while IFS= read -r pane; do
+            [ -n "$pane" ] || continue
+            printf '%s\n' "$live" | grep -qx "$pane" || continue
+            printf '%s\n' "$pane"
+        done
 }
 
 log "starting subscribe subject=${SUBJECT} server=${SERVER:-default}"

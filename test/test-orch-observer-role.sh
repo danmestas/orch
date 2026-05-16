@@ -134,42 +134,59 @@ else
     unset NATS_URL
 fi
 
-# ── orch-tell worker→observer guard (registry still used) ────────────────────
+# ── orch-tell + orch-peek now use $SRV.INFO.agents discovery ─────────────────
 #
-# orch-tell's guard still reads ~/.cache/orch-registry/ (not yet migrated).
-# Use a sandboxed ORCH_REGISTRY_DIR so it reads our fixtures.
+# Install a synthetic `nats` stub on PATH so the guard / peek lookups hit
+# canned fixtures instead of a real bus.
 
 echo
-echo "=== orch-tell worker→observer guard (registry fixtures) ==="
+echo "=== orch-tell worker→observer guard (NATS discovery fixtures) ==="
 
-export ORCH_REGISTRY_DIR="$SANDBOX/registry"
-mkdir -p "$ORCH_REGISTRY_DIR"
+NATS_STUB_DIR="$SANDBOX/nats-bin"
+NATS_STUB_FIXTURES="$SANDBOX/nats-fixtures.jsonl"
+mkdir -p "$NATS_STUB_DIR"
+: > "$NATS_STUB_FIXTURES"
+cat > "$NATS_STUB_DIR/nats" <<STUB
+#!/usr/bin/env bash
+verb=""
+for arg in "\$@"; do
+    case "\$arg" in req) verb=req ;; esac
+done
+if [ "\$verb" = req ] && [ -s "$NATS_STUB_FIXTURES" ]; then
+    i=0
+    while IFS= read -r meta; do
+        [ -n "\$meta" ] || continue
+        i=\$((i + 1))
+        printf 'Received on "\$SRV.INFO.agents.fake%d"\n' "\$i"
+        printf '{"metadata":%s}\n' "\$meta"
+    done < "$NATS_STUB_FIXTURES"
+fi
+exit 0
+STUB
+chmod +x "$NATS_STUB_DIR/nats"
+export PATH="$NATS_STUB_DIR:$PATH"
+export NATS_URL="nats://stub.invalid:4222"
+export ORCH_TELL_DISCOVERY_TIMEOUT="0.5s"
+export ORCH_PEEK_DISCOVERY_TIMEOUT="0.5s"
 
-# Write a direct registry fixture (orch-register is a no-op, so write manually).
-jq -nc \
-    --arg pane_id "%888" \
-    --arg agent   "claude" \
-    --arg cwd     "/tmp" \
-    --arg role    "observer" \
-    --argjson spawn_ts_ns 0 \
-    --argjson last_seen_ts_ns 0 \
-    '{pane_id:$pane_id,agent:$agent,cwd:$cwd,role:$role,spawn_ts_ns:$spawn_ts_ns,last_seen_ts_ns:$last_seen_ts_ns}' \
-    > "$ORCH_REGISTRY_DIR/%888.json"
+set_agents() {
+    : > "$NATS_STUB_FIXTURES"
+    local entry pane role cwd
+    for entry in "$@"; do
+        # shellcheck disable=SC2086
+        set -- $entry
+        pane=$1; role=$2; cwd=$3
+        jq -nc --arg p "$pane" --arg r "$role" --arg c "$cwd" --arg a "claude" \
+            '{pane_id:$p, role:$r, cwd:$c, agent:$a}' >> "$NATS_STUB_FIXTURES"
+    done
+}
 
 TARGET_PANE=$(tmux split-window -d -h -P -F '#{pane_id}' 'while true; do sleep 60; done' 2>/dev/null) || {
     echo "  SKIP  no tmux pane available for tell-guard test"; TARGET_PANE=""; }
 
 if [ -n "$TARGET_PANE" ]; then
-    # Write a registry entry for the real pane as observer.
-    jq -nc \
-        --arg pane_id "$TARGET_PANE" \
-        --arg agent   "claude" \
-        --arg cwd     "/tmp" \
-        --arg role    "observer" \
-        --argjson spawn_ts_ns 0 \
-        --argjson last_seen_ts_ns 0 \
-        '{pane_id:$pane_id,agent:$agent,cwd:$cwd,role:$role,spawn_ts_ns:$spawn_ts_ns,last_seen_ts_ns:$last_seen_ts_ns}' \
-        > "$ORCH_REGISTRY_DIR/$TARGET_PANE.json"
+    # Register the real pane as observer on the stub bus.
+    set_agents "$TARGET_PANE observer /tmp"
 
     # 6) Worker-source (ORCH_PANE_ID set) refused without --force
     TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
@@ -194,17 +211,19 @@ if [ -n "$TARGET_PANE" ]; then
     tmux kill-pane -t "$TARGET_PANE" 2>/dev/null || true
 fi
 
-# ── orch-peek role surface (registry fixtures) ────────────────────────────────
+# ── orch-peek role surface (NATS discovery fixtures) ──────────────────────────
 
 echo
-echo "=== orch-peek role surface (registry fixtures) ==="
+echo "=== orch-peek role surface (NATS discovery fixtures) ==="
 
-PEEK_JSON=$("$PEEK" --all --json 2>/dev/null)
+# Populate the stub with one observer and one worker fixture. orch-peek's
+# --all surfaces both as rows even though the panes don't exist in tmux
+# (they'll show bucket=dead which is fine for the count check).
+set_agents "%777 observer /tmp" "%778 worker /tmp"
+PEEK_JSON=$("$PEEK" --all --json 2>/dev/null || echo "[]")
 OBSERVER_ROW_COUNT=$(printf '%s' "$PEEK_JSON" | jq '[.[] | select(.role=="observer")] | length' 2>/dev/null || echo 0)
-echo "  peek --all --json yielded observer=$OBSERVER_ROW_COUNT rows from sandbox registry"
+echo "  peek --all --json yielded observer=$OBSERVER_ROW_COUNT rows from stub bus"
 assert "peek --json: at least one observer row" 1 "$( [ "$OBSERVER_ROW_COUNT" -ge 1 ] && echo 1 || echo 0 )"
-
-unset ORCH_REGISTRY_DIR
 
 # ── orch-spawn + shim: role propagated via ORCH_ROLE env ─────────────────────
 #

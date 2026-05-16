@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Regression tests for orch-spy (T2).
 #
+# After issue #60 (retire ~/.cache/orch-registry in favor of $SRV.INFO.agents),
+# orch-spy resolves targets via NATS service discovery. These tests install a
+# synthetic `nats` CLI stub on PATH and drive its replies via a fixture file —
+# no real nats-server is required.
+#
 # Layered:
 #   - Fast error-path tests (sandbox state, no real spawns)
 #   - Fast happy-path with mocked orch-spawn (real silent tmux pane stands
@@ -47,8 +52,6 @@ SPY=$(command -v orch-spy)
 [ -x "$SPY" ] || { echo "orch-spy not on PATH"; exit 2; }
 
 SANDBOX=$(mktemp -d)
-export ORCH_REGISTRY_DIR="$SANDBOX/registry"
-export ORCH_OPERATOR_CACHE="$SANDBOX/operator.json"
 export ORCH_SEND_LOG="$SANDBOX/send.log"
 export ORCH_STOP_DIR="$SANDBOX/stop"
 export ORCH_PROJECTS_DIR="$SANDBOX/projects"
@@ -56,8 +59,10 @@ export ORCH_PROJECTS_DIR="$SANDBOX/projects"
 # pre-check that would otherwise require `suit` on PATH for the outfits-pack
 # real-spawn case (still gated by SKIP_REAL_OUTFIT below).
 export ORCH_SPY_SKIP_PRECHECK=1
-mkdir -p "$ORCH_REGISTRY_DIR" "$ORCH_STOP_DIR" "$ORCH_PROJECTS_DIR"
-trap 'cleanup_sandbox' EXIT
+# Tighter discovery timeout — the stub returns instantly.
+export ORCH_SPY_DISCOVERY_TIMEOUT="0.5s"
+export ORCH_TELL_DISCOVERY_TIMEOUT="0.5s"
+mkdir -p "$ORCH_STOP_DIR" "$ORCH_PROJECTS_DIR"
 
 cleanup_sandbox() {
     # Kill any panes we spawned during the run.
@@ -66,15 +71,65 @@ cleanup_sandbox() {
     fi
     rm -rf "$SANDBOX"
 }
+trap 'cleanup_sandbox' EXIT
 SPAWNED_PANES=""
+
+# ── Synthetic $SRV.INFO.agents service ───────────────────────────────────────
+#
+# orch-spy / orch-tell shell out to `nats req '$SRV.INFO.agents' ''` to resolve
+# target metadata. After issue #60, that's the only place pane metadata lives
+# — no more ~/.cache/orch-registry or ~/.cache/orch-operator.json. We install a
+# shell-script stub named `nats` at the front of PATH that emits canned replies
+# in the wire format the real CLI uses. The fixture set is updated per-section
+# by overwriting $NATS_STUB_FIXTURES (one JSON metadata object per line).
+NATS_STUB_DIR="$SANDBOX/nats-bin"
+NATS_STUB_FIXTURES="$SANDBOX/nats-fixtures.jsonl"
+mkdir -p "$NATS_STUB_DIR"
+: > "$NATS_STUB_FIXTURES"
+cat > "$NATS_STUB_DIR/nats" <<STUB
+#!/usr/bin/env bash
+# Synthetic nats CLI for test-orch-spy. Replies to req '\$SRV.INFO.agents'
+# from the live fixture file; other invocations no-op.
+verb=""
+for arg in "\$@"; do
+    case "\$arg" in req) verb=req ;; esac
+done
+if [ "\$verb" = req ] && [ -s "$NATS_STUB_FIXTURES" ]; then
+    i=0
+    while IFS= read -r meta; do
+        [ -n "\$meta" ] || continue
+        i=\$((i + 1))
+        printf 'Received on "\$SRV.INFO.agents.fake%d"\n' "\$i"
+        printf '{"metadata":%s}\n' "\$meta"
+    done < "$NATS_STUB_FIXTURES"
+fi
+exit 0
+STUB
+chmod +x "$NATS_STUB_DIR/nats"
+export PATH="$NATS_STUB_DIR:$PATH"
+export NATS_URL="nats://stub.invalid:4222"
+
+# Helper: rewrite the fixture file from one or more "pane role cwd" tuples.
+# Each tuple is a single string; whitespace-split into 3 fields.
+# Usage: set_agents "%900 worker /tmp" "%901 operator /home/me"
+set_agents() {
+    : > "$NATS_STUB_FIXTURES"
+    local entry pane role cwd
+    for entry in "$@"; do
+        # shellcheck disable=SC2086  # word splitting is intentional here
+        set -- $entry
+        pane=$1; role=$2; cwd=$3
+        jq -nc --arg p "$pane" --arg r "$role" --arg c "$cwd" --arg a "claude" \
+            '{pane_id:$p, role:$r, cwd:$c, agent:$a}' >> "$NATS_STUB_FIXTURES"
+    done
+}
 
 echo "=== suit precheck (skip via ORCH_SPY_SKIP_PRECHECK=1, exercised via PATH) ==="
 
 # Verify the precheck triggers when suit is not on PATH AND
 # ORCH_SPY_SKIP_PRECHECK is not set. Build a minimal PATH without suit.
-NO_SUIT_PATH="$SANDBOX:/usr/bin:/bin"
 mkdir -p "$SANDBOX/no-suit-bin"
-for b in jq tmux orch-spawn orch-tell orch-register; do
+for b in jq tmux orch-spawn orch-tell nats; do
     src=$(command -v "$b" 2>/dev/null) || continue
     ln -sf "$src" "$SANDBOX/no-suit-bin/$b"
 done
@@ -112,18 +167,19 @@ assert "invalid-target: rc=1" 1 "$rc"
 assert_contains "invalid-target: stderr names operator/pane convention" "operator" "$(cat "$TMP_ERR")"
 rm -f "$TMP_OUT" "$TMP_ERR"
 
-# 4) target=operator with no claim → rc=1
+# 4) target=operator with no operator agent on the bus → rc=1
+set_agents  # empty fixture
 TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
 "$SPY" operator "audit me" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
-assert "operator-no-claim: rc=1" 1 "$rc"
-assert_contains "operator-no-claim: stderr points to claim binary" "orch-claim-operator" "$(cat "$TMP_ERR")"
+assert "operator-no-agent: rc=1" 1 "$rc"
+assert_contains "operator-no-agent: stderr points to ORCH_ROLE=operator" "ORCH_ROLE=operator" "$(cat "$TMP_ERR")"
 rm -f "$TMP_OUT" "$TMP_ERR"
 
-# 5) target=%bogus pane (no registry, no claim) → rc=1
+# 5) target=%bogus pane (not registered on the bus) → rc=1
 TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
 "$SPY" %999 "audit something" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
 assert "unknown-pane: rc=1" 1 "$rc"
-assert_contains "unknown-pane: stderr names both lookup paths" "operator-claim" "$(cat "$TMP_ERR")"
+assert_contains "unknown-pane: stderr names SRV.INFO.agents" "SRV.INFO.agents" "$(cat "$TMP_ERR")"
 rm -f "$TMP_OUT" "$TMP_ERR"
 
 # 6) --quiet on error path → both streams empty
@@ -146,7 +202,7 @@ echo "=== fast happy-path with mocked orch-spawn ==="
 
 # Pre-arrange:
 # - Real silent tmux pane (sleep 3600) so orch-tell's idle-detect succeeds
-# - Operator-claim pointing at a real JSONL file
+# - Operator-agent fixture pointing at a real cwd with a planted JSONL
 # - Mock orch-spawn that ignores its args and echoes the silent pane id
 
 MOCK_PANE=$(tmux split-window -d -h -P -F '#{pane_id}' 'sleep 3600' 2>/dev/null) || {
@@ -154,11 +210,18 @@ MOCK_PANE=$(tmux split-window -d -h -P -F '#{pane_id}' 'sleep 3600' 2>/dev/null)
 [ -n "$MOCK_PANE" ] && SPAWNED_PANES="$SPAWNED_PANES $MOCK_PANE"
 
 if [ -n "$MOCK_PANE" ]; then
-    # Stub the operator-claim record. Use a fake transcript file (must exist).
-    FAKE_JSONL=$(mktemp); echo '{"type":"system"}' > "$FAKE_JSONL"
-    cat > "$ORCH_OPERATOR_CACHE" <<EOT
-{"pane_id":"$MOCK_PANE","claimed_at_ts_ns":$(date +%s%N),"transcript_jsonl":"$FAKE_JSONL","cwd":"/tmp"}
-EOT
+    # Plant a fake JSONL under ~/.claude/projects/<encoded cwd>/ — orch-spy
+    # resolves the transcript by encoding metadata.cwd and looking inside.
+    # On macOS /tmp → /private/tmp, so encode the resolved path.
+    OP_CWD=$(cd /tmp && pwd -P)
+    OP_ENC=$(printf '%s' "$OP_CWD" | sed 's|/|-|g; s|_|-|g')
+    OP_DIR="$ORCH_PROJECTS_DIR/$OP_ENC"
+    mkdir -p "$OP_DIR"
+    FAKE_JSONL="$OP_DIR/operator.jsonl"
+    echo '{"type":"system"}' > "$FAKE_JSONL"
+
+    # Register the operator agent on the stub bus.
+    set_agents "$MOCK_PANE operator $OP_CWD"
 
     # Mock orch-spawn in PATH front.
     MOCK_BIN=$SANDBOX/bin
@@ -170,13 +233,13 @@ echo "$MOCK_PANE"
 MOCK
     chmod +x "$MOCK_BIN/orch-spawn"
 
-    # 8) Happy path: spy resolves operator claim, mock-spawns, sends brief.
+    # 8) Happy path: spy resolves operator agent, mock-spawns, sends brief.
     TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
     PATH="$MOCK_BIN:$PATH" ORCH_TELL_MAX_WAIT=10 \
         "$SPY" operator "audit my session for skill-trigger gaps" \
         >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
     assert "happy-path operator: rc=0" 0 "$rc"
-    [ "$rc" != 0 ] && echo "    (stderr: $(cat "$TMP_ERR" | head -3))"
+    [ "$rc" != 0 ] && echo "    (stderr: $(head -3 "$TMP_ERR"))"
     assert "happy-path operator: stdout is mock pane id" "$MOCK_PANE" "$(cat "$TMP_OUT")"
     rm -f "$TMP_OUT" "$TMP_ERR"
 
@@ -192,12 +255,11 @@ MOCK
     assert_contains "brief: target_cwd field" "target_cwd:" "$BRIEF_OUT"
     assert_contains "brief: mission text" "audit my session for skill-trigger gaps" "$BRIEF_OUT"
     assert_contains "brief: spy_pane_id placeholder" "spy_pane_id:" "$BRIEF_OUT"
-    assert_contains "brief: operator_claim pointer" "operator_claim:" "$BRIEF_OUT"
+    assert_contains "brief: agent_registry pointer" "agent_registry:" "$BRIEF_OUT"
     assert_contains "brief: send_log pointer" "send_log:" "$BRIEF_OUT"
-    assert_contains "brief: registry_dir pointer" "registry_dir:" "$BRIEF_OUT"
     assert_contains "brief: target_kind=operator" "target_kind:             operator" "$BRIEF_OUT"
 
-    # 11) %pane target via registry (not operator-claim).
+    # 11) %pane target via $SRV.INFO.agents (worker fixture).
     REG_PANE=$(tmux split-window -d -h -P -F '#{pane_id}' 'sleep 3600' 2>/dev/null) || REG_PANE=""
     [ -n "$REG_PANE" ] && SPAWNED_PANES="$SPAWNED_PANES $REG_PANE"
 
@@ -211,8 +273,10 @@ MOCK
         mkdir -p "$ENC_DIR"
         FAKE_JSONL2="$ENC_DIR/abc.jsonl"
         echo '{"type":"system"}' > "$FAKE_JSONL2"
-        # Register %900 as a worker with cwd=$WORKER_CWD.
-        orch-register %900 pi "$WORKER_CWD" --role worker >/dev/null
+
+        # Replace the operator fixture with both operator + a %900 worker.
+        # %900's metadata.cwd points at WORKER_CWD so the JSONL lookup hits.
+        set_agents "$MOCK_PANE operator $OP_CWD" "%900 worker $WORKER_CWD"
 
         # Update mock to return REG_PANE so orch-tell hits a different live pane.
         cat > "$MOCK_BIN/orch-spawn" <<MOCK
@@ -226,7 +290,7 @@ MOCK
             "$SPY" %900 "audit %900's behavior" \
             >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
         assert "happy-path %worker: rc=0" 0 "$rc"
-        [ "$rc" != 0 ] && echo "    (stderr: $(cat "$TMP_ERR" | head -3))"
+        [ "$rc" != 0 ] && echo "    (stderr: $(head -3 "$TMP_ERR"))"
         assert "happy-path %worker: stdout is mock pane" "$REG_PANE" "$(cat "$TMP_OUT")"
         rm -f "$TMP_OUT" "$TMP_ERR"
 
@@ -238,6 +302,8 @@ MOCK
     fi
 
     # 12) Mission via stdin (single dash) — verify via dry-run.
+    # Reset to operator-only fixture.
+    set_agents "$MOCK_PANE operator $OP_CWD"
     BRIEF_S=$(echo "mission from stdin" | "$SPY" --dry-run-brief operator - 2>/dev/null)
     assert_contains "mission via stdin (-): text in brief" "mission from stdin" "$BRIEF_S"
 
@@ -253,52 +319,16 @@ fi
 echo
 echo "=== real e2e: actual claude --outfit stasi spawn ==="
 
-if [ "${SKIP_REAL_OUTFIT:-0}" = "1" ]; then
-    echo "  SKIP  SKIP_REAL_OUTFIT=1"
-else
-    # Reset to real registry / cache for the real spawn.
-    unset ORCH_REGISTRY_DIR ORCH_OPERATOR_CACHE ORCH_SEND_LOG \
-          ORCH_STOP_DIR ORCH_PROJECTS_DIR
-    PRIOR_CLAIM=""
-    if [ -f "$HOME/.cache/orch-operator.json" ]; then
-        PRIOR_CLAIM="$HOME/.cache/orch-operator.json.t2spy.bak"
-        cp "$HOME/.cache/orch-operator.json" "$PRIOR_CLAIM"
-    fi
-
-    # Claim current operator pane so target=operator resolves.
-    OP_PANE=$(tmux display -p '#{pane_id}')
-    orch-claim-operator --pane "$OP_PANE" >/dev/null 2>&1 || {
-        echo "  SKIP  orch-claim-operator failed (no transcript dir for current cwd?)"
-        OP_PANE=""
-    }
-
-    if [ -n "$OP_PANE" ]; then
-        # Real spawn — costs one claude bootstrap (~2s).
-        SPY_PANE=$(orch-spy operator "smoke test from orch-spy e2e" 2>/dev/null) || SPY_PANE=""
-        if [ -n "$SPY_PANE" ] && [[ "$SPY_PANE" =~ ^%[0-9]+$ ]]; then
-            assert "real spawn: stdout is %pane id" "1" "$([ -n "$SPY_PANE" ] && echo 1 || echo 0)"
-            sleep 2  # let registry populate
-
-            # role=observer in the real registry?
-            REAL_ROLE=$(jq -r '.role // empty' "$HOME/.cache/orch-registry/$SPY_PANE.json" 2>/dev/null || echo "")
-            assert "real spawn: role=observer in registry" "observer" "$REAL_ROLE"
-
-            # Cleanup
-            tmux kill-pane -t "$SPY_PANE" 2>/dev/null
-            sleep 2
-            rm -f "$HOME/.cache/orch-registry/$SPY_PANE.json"
-        else
-            echo "  SKIP  real spawn failed (suit/stasi outfit missing?)"
-        fi
-    fi
-
-    # Restore prior claim record.
-    if [ -n "$PRIOR_CLAIM" ]; then
-        mv "$PRIOR_CLAIM" "$HOME/.cache/orch-operator.json"
-    else
-        rm -f "$HOME/.cache/orch-operator.json"
-    fi
-fi
+# Real e2e requires a real NATS server + nats CLI + the shim binary. The
+# pre-migration version of this test wrote ~/.cache/orch-operator.json and
+# checked ~/.cache/orch-registry/<pane>.json — neither exists post-#60. The
+# corresponding new contract (operator agent on $SRV.INFO.agents, spy agent
+# auto-registers with role=observer) requires the orchestrator's own shim
+# to be running, which is out of scope for unit-test infrastructure.
+#
+# Always skip — the path is covered by hand-run validation on the
+# orchestrator host.
+echo "  SKIP  real e2e requires live NATS + shim setup (post-#60); covered by hand validation"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

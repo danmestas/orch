@@ -24,3 +24,11 @@ The env-var distinction (`ORCH_PANE_ID` set ⇒ worker) *is* the role assignment
 ## Migration note (2026-05-16 — issue #60)
 
 `orch-claim-operator` has been retired to a no-op stub. The operator-pane identity is now established by setting `ORCH_ROLE=operator` in the operator's shell before starting a session; `orch-agent-shim` then registers the pane with `metadata.role=="operator"` on `$SRV.INFO.agents`. Discovery consumers filter by `metadata.role == "operator"` — no separate claim file is needed. `~/.cache/orch-operator.json` is no longer written. The "separate file" option in "Considered options" above is superseded by this; the single-source-of-truth property of `$SRV.INFO.agents` removes the need for the asymmetric bridge.
+
+**Affected consumers, all migrated to discovery:**
+
+- `orch-spy` — `target=operator` finds the agent with `metadata.role=="operator"`; `target=%pane` matches `metadata.pane_id`. Transcript JSONL inferred from `metadata.cwd` via the existing `~/.claude/projects/<encoded-cwd>/*.jsonl` lookup. Error messages now point users at `ORCH_ROLE=operator` instead of `orch-claim-operator`.
+- `orch-peek` — worker list and operator-row come from the same `$SRV.INFO.agents` snapshot. Required dep: `nats` CLI on PATH (the registry-file fallback is gone).
+- `orch-tell` — worker→observer guard reads `metadata.role` via discovery; falls back to "worker" (unrestricted) when NATS/jq are absent or the target is not registered.
+- `orch-nats-bridge-in` `list_active_workers` — same migration; broadcast targets all `metadata.role=="worker"` agents whose pane is live in tmux.
+- `hooks/orch-stop-marker.sh` — lazy registry write removed; the hook now only writes the `.event` marker. Shim handles registration.

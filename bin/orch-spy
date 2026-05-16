@@ -13,11 +13,11 @@
 #   orch-spy <target> -                            # mission from stdin
 #
 # Target:
-#   operator        the operator pane from ~/.cache/orch-operator.json
-#                   (run orch-claim-operator first)
-#   %<pane_id>      the named pane — checked against operator-claim and
-#                   the worker registry; transcript JSONL resolved from
-#                   whichever matches
+#   operator        the agent on $SRV.INFO.agents with metadata.role=="operator"
+#                   (set ORCH_ROLE=operator in your shell before starting)
+#   %<pane_id>      the named pane — resolved via $SRV.INFO.agents
+#                   (metadata.pane_id match); transcript JSONL inferred from
+#                   metadata.cwd → ~/.claude/projects/<encoded-cwd>/*.jsonl
 #
 # Flags:
 #   --headed        spawn in current tmux window (default: --headless)
@@ -91,47 +91,40 @@ if [ "${ORCH_SPY_SKIP_PRECHECK:-0}" != "1" ]; then
     }
 fi
 
-OPERATOR_CACHE="${ORCH_OPERATOR_CACHE:-$HOME/.cache/orch-operator.json}"
-REG_DIR="${ORCH_REGISTRY_DIR:-$HOME/.cache/orch-registry}"
 PROJECTS_DIR="${ORCH_PROJECTS_DIR:-$HOME/.claude/projects}"
 SEND_LOG="${ORCH_SEND_LOG:-$HOME/.cache/orch-send.log}"
 STOP_DIR="${ORCH_STOP_DIR:-$HOME/.cache/orch-stop}"
+DISCOVERY_TIMEOUT="${ORCH_SPY_DISCOVERY_TIMEOUT:-2s}"
 
-# --- Resolve target → pane / transcript / cwd ---
-TARGET_PANE=""
-TARGET_JSONL=""
-TARGET_CWD=""
-TARGET_KIND=""
-
-resolve_via_claim() {
-    local pane=$1
-    [ -f "$OPERATOR_CACHE" ] || return 1
-    local claim_pane
-    claim_pane=$(jq -r '.pane_id // empty' "$OPERATOR_CACHE" 2>/dev/null || true)
-    [ -n "$claim_pane" ] || return 1
-    [ "$claim_pane" = "$pane" ] || return 1
-    TARGET_PANE=$claim_pane
-    TARGET_JSONL=$(jq -r '.transcript_jsonl // empty' "$OPERATOR_CACHE")
-    TARGET_CWD=$(jq -r '.cwd // empty' "$OPERATOR_CACHE")
-    TARGET_KIND=operator
-    [ -f "$TARGET_JSONL" ]
+# --- $SRV.INFO.agents discovery helper ---
+# Prints one JSON object per line to stdout (one per registered agent), or
+# nothing on failure / no agents. Callers filter with jq. Falls back silently
+# when nats / jq are absent — discovery is best-effort, callers handle empty.
+_discover_agents() {
+    command -v nats >/dev/null 2>&1 || return 0
+    command -v jq   >/dev/null 2>&1 || return 0
+    # shellcheck disable=SC2016  # $SRV.INFO.agents is a NATS system subject (literal $)
+    nats --server="${NATS_URL:-}" req '$SRV.INFO.agents' '' \
+        --replies=0 "--reply-timeout=${DISCOVERY_TIMEOUT}" 2>/dev/null \
+        | grep -v '^Received on\|^---\|^[[:space:]]*$' || true
 }
 
-resolve_via_registry() {
-    local pane=$1
-    local reg="$REG_DIR/$pane.json"
-    [ -f "$reg" ] || return 1
-    TARGET_PANE=$pane
-    TARGET_CWD=$(jq -r '.cwd // empty' "$reg")
-    [ -n "$TARGET_CWD" ] || return 1
+# Find the agent record matching the predicate (jq filter). Prints the first
+# matching metadata block as compact JSON, or nothing.
+_agent_metadata() {
+    local filter=$1
+    _discover_agents | jq -c "select($filter) | .metadata" 2>/dev/null | head -1
+}
 
-    local resolved encoded session_dir best mt cur f
-    resolved=$(cd "$TARGET_CWD" 2>/dev/null && pwd -P) || resolved=$TARGET_CWD
+# Locate the newest *.jsonl under ~/.claude/projects/<encoded-cwd>/ for the
+# given cwd. Encoding rule mirrors Claude Code's own: pwd -P then s|/|-|g; s|_|-|g.
+_jsonl_for_cwd() {
+    local cwd=$1 resolved encoded session_dir best="" mt=0 cur f
+    [ -n "$cwd" ] || return 1
+    resolved=$(cd "$cwd" 2>/dev/null && pwd -P) || resolved=$cwd
     encoded=$(printf '%s' "$resolved" | sed 's|/|-|g; s|_|-|g')
     session_dir="$PROJECTS_DIR/$encoded"
     [ -d "$session_dir" ] || return 1
-
-    best=""; mt=0
     for f in "$session_dir"/*.jsonl; do
         [ -e "$f" ] || continue
         # GNU stat first (Linux); BSD stat fallback (macOS). The reverse fails on Linux
@@ -140,30 +133,40 @@ resolve_via_registry() {
         if [ "$cur" -gt "$mt" ]; then mt=$cur; best=$f; fi
     done
     [ -n "$best" ] || return 1
-    TARGET_JSONL=$best
-    TARGET_KIND=$(jq -r '.role // "worker"' "$reg" 2>/dev/null || echo worker)
-    return 0
+    printf '%s\n' "$best"
 }
+
+# --- Resolve target → pane / transcript / cwd ---
+TARGET_PANE=""
+TARGET_JSONL=""
+TARGET_CWD=""
+TARGET_KIND=""
 
 case "$TARGET" in
     operator|op)
-        [ -f "$OPERATOR_CACHE" ] || { echo "orch-spy: no operator-claim record at $OPERATOR_CACHE — run orch-claim-operator first" >&2; exit 1; }
-        TARGET_PANE=$(jq -r '.pane_id // empty' "$OPERATOR_CACHE")
-        TARGET_JSONL=$(jq -r '.transcript_jsonl // empty' "$OPERATOR_CACHE")
-        TARGET_CWD=$(jq -r '.cwd // empty' "$OPERATOR_CACHE")
+        META=$(_agent_metadata '.metadata.role == "operator"')
+        [ -n "$META" ] || {
+            echo "orch-spy: no operator agent on \$SRV.INFO.agents — set ORCH_ROLE=operator in your shell so orch-agent-shim registers it" >&2
+            exit 1; }
+        TARGET_PANE=$(printf '%s' "$META" | jq -r '.pane_id // empty')
+        TARGET_CWD=$(printf '%s' "$META"  | jq -r '.cwd // empty')
         TARGET_KIND=operator
-        [ -n "$TARGET_PANE" ] && [ -f "$TARGET_JSONL" ] || {
-            echo "orch-spy: operator-claim record incomplete or transcript missing" >&2; exit 1; }
+        [ -n "$TARGET_PANE" ] || { echo "orch-spy: operator agent has no metadata.pane_id" >&2; exit 1; }
+        [ -n "$TARGET_CWD"  ] || { echo "orch-spy: operator agent has no metadata.cwd" >&2; exit 1; }
+        TARGET_JSONL=$(_jsonl_for_cwd "$TARGET_CWD") || {
+            echo "orch-spy: no Claude transcript JSONL under $PROJECTS_DIR/<encoded $TARGET_CWD>" >&2; exit 1; }
         ;;
     %[0-9]*)
-        if resolve_via_claim "$TARGET"; then
-            :
-        elif resolve_via_registry "$TARGET"; then
-            :
-        else
-            echo "orch-spy: $TARGET not in operator-claim ($OPERATOR_CACHE) or registry ($REG_DIR)" >&2
-            exit 1
-        fi
+        META=$(_agent_metadata ".metadata.pane_id == \"$TARGET\"")
+        [ -n "$META" ] || {
+            echo "orch-spy: $TARGET not registered on \$SRV.INFO.agents — confirm orch-agent-shim is running for that pane" >&2
+            exit 1; }
+        TARGET_PANE=$TARGET
+        TARGET_CWD=$(printf '%s' "$META" | jq -r '.cwd // empty')
+        TARGET_KIND=$(printf '%s' "$META" | jq -r '.role // "worker"')
+        [ -n "$TARGET_CWD" ] || { echo "orch-spy: $TARGET has no metadata.cwd" >&2; exit 1; }
+        TARGET_JSONL=$(_jsonl_for_cwd "$TARGET_CWD") || {
+            echo "orch-spy: no Claude transcript JSONL under $PROJECTS_DIR/<encoded $TARGET_CWD>" >&2; exit 1; }
         ;;
     *)
         echo "orch-spy: target must be 'operator' or %pane_id (got: $TARGET)" >&2
@@ -190,11 +193,11 @@ fi
 BRIEF=$(cat <<EOT
 You are a stasi/wait-watch observer spawned via orch-spy.
 
-You are role=observer in the harness registry. The operator's
-\`orch-listen\` default-excludes you, so your Stop events do not wake the
-operator's listener. Workers cannot tell you (worker→observer is refused
-unless --force). You report to the operator via \`orch-tell\`; you do
-not redirect the target.
+You are role=observer on \$SRV.INFO.agents (the Synadia Agent Protocol
+service registry). The operator's \`orch-listen\` default-excludes you,
+so your Stop events do not wake the operator's listener. Workers cannot
+tell you (worker→observer is refused unless --force). You report to the
+operator via \`orch-tell\`; you do not redirect the target.
 
 == Mission ==
 $MISSION
@@ -205,11 +208,10 @@ target_pane_id:          $TARGET_PANE
 target_transcript_jsonl: $TARGET_JSONL
 target_cwd:              $TARGET_CWD
 
-== Harness state files (read-only, useful for cross-checks) ==
-operator_claim:          $OPERATOR_CACHE
+== Harness state pointers (read-only, useful for cross-checks) ==
+agent_registry:          \$SRV.INFO.agents (NATS micro service)
 send_log:                $SEND_LOG
 event_log_dir:           $STOP_DIR
-registry_dir:            $REG_DIR
 
 == Your pane ==
 spy_pane_id:             $SPY_PANE
@@ -217,8 +219,9 @@ spy_pane_id:             $SPY_PANE
 == Reporting back ==
 Tail the target transcript JSONL with a Monitor for line-by-line push.
 When you observe something the operator should act on, push via
-\`orch-tell <operator-pane> "<finding>"\` (look up operator-claim if
-target_kind != operator). Do not auto-redirect anything.
+\`orch-tell <operator-pane> "<finding>"\` (use the operator agent on
+\$SRV.INFO.agents — metadata.role=="operator" — if target_kind != operator).
+Do not auto-redirect anything.
 
 Begin.
 EOT
