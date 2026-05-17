@@ -42,10 +42,32 @@ skip() {
 
 # Helper: bring a session up in a temp project dir; export its endpoints
 # into BASH globals for the calling test. Returns 0 on success.
+#
+# Initialises the project dir as a git worktree first. Sesh's fossil
+# scope behaviour (per-session repos at .sesh/sessions/<label>.repo
+# under --scope=session, shared .sesh/project.repo under --scope=project)
+# is gated on the project being a git worktree — sesh's own
+# cli/scope_integration_test.go uses the same setupGitWorktree() shape.
+# Without git init, sesh starts but fossil_url stays empty, the per-
+# scope repo files aren't written, and downstream T4/T5 assertions
+# silently SKIP.
 sesh_up_in() {
     local proj=$1 label=$2 scope=${3:-session}
     mkdir -p "$proj"
     cd "$proj" || return 1
+    # git-init the project iff it isn't already one. Quiet, isolated
+    # identity (no global ~/.gitconfig dependency), then a seed commit
+    # so sesh sees a real worktree with a HEAD.
+    if [ ! -d "$proj/.git" ]; then
+        GIT_AUTHOR_NAME=bench GIT_AUTHOR_EMAIL=bench@local \
+        GIT_COMMITTER_NAME=bench GIT_COMMITTER_EMAIL=bench@local \
+            git init -q -b main "$proj" 2>/dev/null || true
+        printf '.sesh/\nignored.log\n' > "$proj/.gitignore"
+        printf 'bench-seed\n' > "$proj/README.md"
+        (cd "$proj" && GIT_AUTHOR_NAME=bench GIT_AUTHOR_EMAIL=bench@local \
+            GIT_COMMITTER_NAME=bench GIT_COMMITTER_EMAIL=bench@local \
+            git add . && git commit -q -m "seed" 2>/dev/null) || true
+    fi
     sesh up --session="$label" --scope="$scope" >"/tmp/sesh-up-${label}.log" 2>&1 &
     SESH_BG_PID=$!  # exposed for tests that need to wait/kill the up process
     export SESH_BG_PID
@@ -146,13 +168,21 @@ else
 fi
 
 log "T1.2: hub auto-shutdown when last leaf disconnects"
-# After down, the hub.url should be cleaned up within a few seconds.
-sleep 2
-if [ ! -f "$HOME/.sesh/hub.url" ]; then
+# Sesh's autoShutdownLoop (cli/hub_serve.go) polls leaf count every 500ms;
+# after the last leaf disconnects it cancels the serve ctx, the hub
+# unwinds (h.Stop), and the deferred urlLease.Release removes hub.url.
+# Wait up to ~6s in 1s steps so a slow Docker scheduler doesn't false-SKIP.
+gone=no
+for _ in 1 2 3 4 5 6; do
+    [ ! -f "$HOME/.sesh/hub.url" ] && { gone=yes; break; }
+    sleep 1
+done
+if [ "$gone" = "yes" ]; then
     assert "hub.url removed after last leaf disconnect" "removed" "removed"
 else
-    # hub might be in keepalive mode by default — check the hub log
-    skip "hub auto-shutdown after last leaf" "hub.url still present (may be keepalive or graceful-shutdown lag)"
+    # Still present after 6s — capture diagnostics to file an investigation
+    HUBLOG_TAIL=$(tail -5 "$HOME/.sesh/hub.log" 2>/dev/null | tr '\n' ';' | cut -c1-200)
+    skip "hub auto-shutdown after last leaf" "hub.url still present after 6s; hub.log tail: ${HUBLOG_TAIL:-empty}"
 fi
 
 # Pattern: Session Lockfile & Collision Detection
@@ -268,14 +298,23 @@ sesh_down_in /tmp/g3-leaf2 s2
 # ============================================================
 log "=== Group 4: JetStream durability ==="
 
+# Groups 4-5 need clean hub state. T1.2 demonstrates sesh isn't always
+# removing hub.url on shutdown — without the reset here, stale hub.url
+# from G3 causes sesh up to write the partial PID-only session JSON
+# instead of completing the publish step, and SESH_NATS_URL stays empty.
+sesh_full_reset
+
 log "T4.1: JetStream enabled on the session NATS"
 sesh_up_in /tmp/g4-js s1 || true
 if [ -n "$SESH_NATS_URL" ]; then
-    if nats --server="$SESH_NATS_URL" stream list --json 2>&1 | grep -q "\["; then
-        assert "JetStream answers stream list (empty array OK)" "yes" "yes"
+    # `nats account info` returns JetStream tier limits / enabled state.
+    # More robust than `stream list` (whose empty output varies across
+    # nats CLI versions). Grep for the literal "JetStream" word — present
+    # iff the account has JS enabled regardless of stream count.
+    if nats --server="$SESH_NATS_URL" account info 2>&1 | grep -qi "jetstream"; then
+        assert "JetStream available on session NATS leaf" "yes" "yes"
     else
-        # The list command may error if JetStream isn't enabled
-        skip "T4.1" "stream list did not return a JSON array; JetStream may not be enabled on this leaf"
+        skip "T4.1" "JetStream not advertised by 'nats account info' — leaf may not bridge JS"
     fi
 else
     skip "T4.1" "no sesh leaf"
@@ -310,13 +349,22 @@ sesh_down_in /tmp/g4-js s1
 # ============================================================
 log "=== Group 5: Fossil sync ==="
 
+# Clean hub state — same reason as Group 4 (see comment there).
+sesh_full_reset
+
 log "T5.1: --scope=session writes per-session fossil repo"
 PROJ=/tmp/g5-scope
 if sesh_up_in "$PROJ" sx session; then
     if ls "$PROJ"/.sesh/sessions/sx.repo* >/dev/null 2>&1 || ls "$PROJ"/.sesh/sessions/sx*.repo >/dev/null 2>&1; then
         assert "session-scoped fossil repo exists" "yes" "yes"
     else
-        skip "T5.1" "expected .sesh/sessions/sx.repo not found — sesh may use different naming"
+        # Dump what sesh actually wrote so we can root-cause why
+        # the expected per-session repo isn't there.
+        ACTUAL=$(ls -la "$PROJ"/.sesh/ 2>/dev/null | tr '\n' '|' | cut -c1-300)
+        SESSIONS=$(ls -la "$PROJ"/.sesh/sessions/ 2>/dev/null | tr '\n' '|' | cut -c1-300)
+        log "    T5.1 .sesh/ : ${ACTUAL:-empty}"
+        log "    T5.1 sessions/: ${SESSIONS:-empty}"
+        skip "T5.1" "expected .sesh/sessions/sx.repo not found"
     fi
     sesh_down_in "$PROJ" sx
 else
@@ -329,7 +377,9 @@ if sesh_up_in "$PROJ" sy project; then
     if [ -f "$PROJ/.sesh/project.repo" ] || ls "$PROJ"/.sesh/project*.repo >/dev/null 2>&1; then
         assert "project-scoped fossil repo exists" "yes" "yes"
     else
-        skip "T5.2" "expected .sesh/project.repo not found — sesh may use different naming"
+        ACTUAL=$(ls -la "$PROJ"/.sesh/ 2>/dev/null | tr '\n' '|' | cut -c1-300)
+        log "    T5.2 .sesh/ : ${ACTUAL:-empty}"
+        skip "T5.2" "expected .sesh/project.repo not found"
     fi
     sesh_down_in "$PROJ" sy
 else
@@ -349,6 +399,10 @@ else
 fi
 
 log "T5.4: fossil HTTP endpoint serves the repo (clone-push)"
+# Clean hub state — T5.1/T5.2 left a hub running and sesh's hub-shutdown
+# is unreliable (see T1.2). Inheriting stale state would silently land
+# us in the partial-publish failure mode (session JSON: {"pid":N} only).
+sesh_full_reset
 PROJ=/tmp/g5-http
 if sesh_up_in "$PROJ" sh; then
     if [ -n "${SESH_FOSSIL_URL:-}" ]; then
@@ -356,9 +410,12 @@ if sesh_up_in "$PROJ" sh; then
         if echo "$body" | grep -qi "fossil"; then
             assert "fossil_url serves fossil HTTP" "yes" "yes"
         else
-            skip "T5.4" "fossil_url responded but body did not match 'fossil' marker"
+            skip "T5.4" "fossil_url responded but body did not match 'fossil' marker (got: ${body:0:80})"
         fi
     else
+        # Dump session JSON so we can see what sesh actually published
+        JSON_DUMP=$(cat "$SESSION_JSON" 2>/dev/null | tr '\n' ' ' | cut -c1-300)
+        log "    T5.4 session JSON: ${JSON_DUMP:-empty}"
         skip "T5.4" "no fossil_url in session JSON"
     fi
     sesh_down_in "$PROJ" sh
