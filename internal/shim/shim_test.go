@@ -353,9 +353,12 @@ func TestServiceDiscovery_INFO_HasExpectedShape(t *testing.T) {
 
 	// Endpoint checks: §12 requires "prompt" + "status" endpoints with
 	// queue_group "agents" and the spec subject layout.
+	// With Session set, subjects use the session token (operator-readable)
+	// instead of the pct-encoded pane id. Pane fall-back still tested in
+	// TestServiceDiscovery_INFO_NoSession_FallsBackToPaneToken below.
 	want := map[string]string{
-		"prompt": "agents.prompt.cc.tester.pct37",
-		"status": "agents.status.cc.tester.pct37",
+		"prompt": "agents.prompt.cc.tester.sesh-x",
+		"status": "agents.status.cc.tester.sesh-x",
 	}
 	got := map[string]string{}
 	for _, ep := range info.Endpoints {
@@ -624,7 +627,8 @@ func TestStatusEndpoint_RepliesWithHeartbeatShape(t *testing.T) {
 	nc, cleanup := runShimInBackground(t, url, cfg)
 	defer cleanup()
 
-	msg, err := nc.Request("agents.status.cc.u.pct5", nil, 1*time.Second)
+	// Session "s" → status subject uses "s" not "pct5" (sessionToken).
+	msg, err := nc.Request("agents.status.cc.u.s", nil, 1*time.Second)
 	if err != nil {
 		t.Fatalf("status request: %v", err)
 	}

@@ -347,22 +347,37 @@ func (s *shim) loadActiveTrace() string {
 	return v.(string)
 }
 
+// sessionToken returns the 5th-token portion of the agent subject.
+// Prefers cfg.Session (operator-readable name) when set; falls back to
+// encodePane(Pane) for compatibility with callers that don't supply a
+// session label (bench / orch-spawn-without-SESH_SESSION).
+//
+// The operator is expected to choose a subject-safe Session value (no
+// '.', '>', '*', whitespace). No sanitization here — bad values surface
+// as NATS protocol errors at subscription time.
+func (s *shim) sessionToken() string {
+	if s.cfg.Session != "" {
+		return s.cfg.Session
+	}
+	return encodePane(s.cfg.Pane)
+}
+
 // promptSubject returns the §2.3 prompt endpoint subject:
 //
-//	agents.prompt.<token>.<owner>.<pane-enc>
+//	agents.prompt.<token>.<owner>.<session-or-pane-enc>
 func (s *shim) promptSubject() string {
 	return fmt.Sprintf("agents.prompt.%s.%s.%s",
-		s.cfg.AgentToken, s.cfg.Owner, encodePane(s.cfg.Pane))
+		s.cfg.AgentToken, s.cfg.Owner, s.sessionToken())
 }
 
 func (s *shim) statusSubject() string {
 	return fmt.Sprintf("agents.status.%s.%s.%s",
-		s.cfg.AgentToken, s.cfg.Owner, encodePane(s.cfg.Pane))
+		s.cfg.AgentToken, s.cfg.Owner, s.sessionToken())
 }
 
 func (s *shim) heartbeatSubject() string {
 	return fmt.Sprintf("agents.hb.%s.%s.%s",
-		s.cfg.AgentToken, s.cfg.Owner, encodePane(s.cfg.Pane))
+		s.cfg.AgentToken, s.cfg.Owner, s.sessionToken())
 }
 
 // signalSubject is the wildcard the shim subscribes to for orch.signal.>
