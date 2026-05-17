@@ -514,17 +514,19 @@ run_synadia_contract() {
     fi
 
     # --- T10 ---
-    # Spec §6.4/§6.5: prompt produces a chunk stream starting with a
-    # status:ack and ending with a zero-body terminator. The intermediate
-    # response chunks may or may not be there (v1 shim is incremental on
-    # response bridging) — what we MUST see is ≥2 reply chunks (ack +
-    # something that closes the stream).
-    log "T10 (${harness}): prompt round-trip produces ack + terminator"
+    # Spec §6.4/§6.5/§6.3: prompt produces a chunk stream starting with
+    # a status:ack, carrying ≥1 type:"response" chunk (the harness's
+    # reply text), and ending with a zero-body terminator.
+    #
+    # Post-orch#134 the mocks each write a transcript JSONL line per
+    # received prompt at the path their adapter tails, so the bridge
+    # is exercised end-to-end here.
+    log "T10 (${harness}): prompt round-trip produces ack + response + terminator"
     if [ -n "$prompt_subj" ]; then
         # reply-timeout must exceed the shim's terminatorWatchdog (30s,
-        # see cmd/orch-agent-shim/internal/shim/shim.go). When the mock
-        # harness produces no response chunks, the terminator is watchdog-
-        # fired ~30s after the ack. 35s gives slack for scheduler jitter.
+        # see cmd/orch-agent-shim/internal/shim/shim.go). 35s gives slack
+        # for scheduler jitter even when the adapter emits a real
+        # response chunk and the stream closes well before the watchdog.
         nats --server="$SESH_NATS_URL" req "$prompt_subj" "say bench-t10-${harness}-ok" \
             --replies=0 --reply-timeout=35s --timeout=45s >"/tmp/t10-${harness}.cap" 2>&1 || true
         if grep -q '"type":"status","data":"ack"' "/tmp/t10-${harness}.cap"; then
@@ -532,6 +534,16 @@ run_synadia_contract() {
         else
             assert "T10 ${harness}: leading status:ack chunk received" "yes" "no"
             log "       cap head: $(head -c 200 "/tmp/t10-${harness}.cap")"
+        fi
+        # Response-chunk assertion (orch#134): the adapter must bridge
+        # the mock harness's transcript line into ≥1 chunk with
+        # type:"response". This catches content-mute regressions that
+        # the ack+terminator assertions miss.
+        if grep -q '"type":"response"' "/tmp/t10-${harness}.cap"; then
+            assert "T10 ${harness}: ≥1 type:response chunk received" "yes" "yes"
+        else
+            assert "T10 ${harness}: ≥1 type:response chunk received" "yes" "no"
+            log "       cap head: $(head -c 400 "/tmp/t10-${harness}.cap")"
         fi
         # Count "Received" lines as a proxy for chunk count. nats CLI emits
         # one per reply, regardless of body shape — works for both populated
@@ -807,7 +819,8 @@ else
             # Send the prompt with -H to inject the inbound traceparent,
             # and --raw -H on the request capture stream so reply
             # headers come back. Reply timeout 35s covers the shim's
-            # 30s terminator watchdog (mock claude has no real reply).
+            # 30s terminator watchdog (the response chunks land fast but
+            # the watchdog still closes the stream).
             nats --server="$SESH_NATS_URL" req "$PROMPT_SUBJ" "hi-g11" \
                 -H "traceparent:$PARENT_TP" \
                 --replies=0 --reply-timeout=35s --timeout=45s \
@@ -825,11 +838,12 @@ else
                 sed -n '1,40p' /tmp/g11.cap | sed 's/^/    /'
                 assert "reply chunks carry traceparent header" "present" "absent"
             else
-                # The mock harness emits no response chunks, so the
-                # captured stream is ack + watchdog-terminator. Only the
-                # ack carries headers (the §6.5 terminator is intentionally
-                # headerless per spec + shim conformance). 1 traceparent
-                # is the correct happy-path count for this bench.
+                # Post-orch#134 the claude mock writes a transcript JSONL
+                # line per prompt, so the captured stream is ack +
+                # response(s) + watchdog-terminator. ack and response
+                # chunks carry traceparent headers; the §6.5 terminator
+                # is intentionally headerless per spec + shim conformance.
+                # Any non-zero traceparent count proves header propagation.
                 assert "reply chunks carry traceparent header" "present" "present"
 
                 # All chunks' trace_id portions MUST equal the inbound.
