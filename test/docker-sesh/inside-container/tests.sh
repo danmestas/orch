@@ -180,9 +180,10 @@ done
 if [ "$gone" = "yes" ]; then
     assert "hub.url removed after last leaf disconnect" "removed" "removed"
 else
-    # Still present after 6s — capture diagnostics to file an investigation
+    # sesh#62 fixed the original autoShutdownLoop hadLeaf race — if this
+    # ever fires again it's a regression, not an environmental SKIP.
     HUBLOG_TAIL=$(tail -5 "$HOME/.sesh/hub.log" 2>/dev/null | tr '\n' ';' | cut -c1-200)
-    skip "hub auto-shutdown after last leaf" "hub.url still present after 6s; hub.log tail: ${HUBLOG_TAIL:-empty}"
+    assert "hub.url removed after last leaf disconnect" "removed" "still present after 6s (hub.log: ${HUBLOG_TAIL:-empty})"
 fi
 
 # Pattern: Session Lockfile & Collision Detection
@@ -217,7 +218,7 @@ if sesh_up_in /tmp/g2-json s1; then
         assert "session JSON contains nats_url + leaf_url + pid" "all" "partial (nats=$SESH_NATS_URL leaf=$SESH_LEAF_URL pid=$SESH_PID_VAL)"
     fi
 else
-    skip "T2.1" "sesh up did not materialize session JSON"
+    assert "session JSON contains nats_url + leaf_url + pid" "all" "no (sesh up failed to materialize session JSON)"
 fi
 
 # Pattern: NATS URL is reachable
@@ -231,7 +232,7 @@ if [ -n "${SESH_NATS_URL:-}" ]; then
         assert "nats --server=<nats_url> responsive" "yes" "no"
     fi
 else
-    skip "T2.2" "no nats_url from session JSON"
+    assert "nats --server=<nats_url> responsive" "yes" "no (no nats_url from session JSON)"
 fi
 
 # Pattern: Project Name Derivation
@@ -243,11 +244,11 @@ if sesh_up_in "$PROJ_DIR" s1; then
     if [ -f "$PROJ_DIR/.sesh/project-code" ] || grep -q "g2-cwdname-proj" "$HOME/.sesh/hub.log" 2>/dev/null; then
         assert "project name reflects cwd basename" "yes" "yes"
     else
-        skip "T2.3" "no project-code file or hub.log reference found (sesh may not write project-code on this version)"
+        assert "project name reflects cwd basename" "yes" "no (no project-code file or hub.log reference)"
     fi
     sesh_down_in "$PROJ_DIR" s1
 else
-    skip "T2.3" "sesh up failed"
+    assert "project name reflects cwd basename" "yes" "no (sesh up failed)"
 fi
 
 # Cleanup any sticky session
@@ -283,7 +284,7 @@ if [ -n "$NATS1" ] && [ -n "$NATS2" ] && [ "$NATS1" != "$NATS2" ]; then
         assert "leaf1 pub reached leaf2 sub via hub" "yes" "no"
     fi
 else
-    skip "T3.1" "could not bring up two leaves with distinct NATS URLs (nats1='$NATS1' nats2='$NATS2')"
+    assert "leaf1 pub reached leaf2 sub via hub" "yes" "no (could not bring up two distinct leaves; nats1='$NATS1' nats2='$NATS2')"
 fi
 
 sesh_down_in /tmp/g3-leaf1 s1
@@ -307,17 +308,13 @@ sesh_full_reset
 log "T4.1: JetStream enabled on the session NATS"
 sesh_up_in /tmp/g4-js s1 || true
 if [ -n "$SESH_NATS_URL" ]; then
-    # `nats account info` returns JetStream tier limits / enabled state.
-    # More robust than `stream list` (whose empty output varies across
-    # nats CLI versions). Grep for the literal "JetStream" word — present
-    # iff the account has JS enabled regardless of stream count.
     if nats --server="$SESH_NATS_URL" account info 2>&1 | grep -qi "jetstream"; then
         assert "JetStream available on session NATS leaf" "yes" "yes"
     else
-        skip "T4.1" "JetStream not advertised by 'nats account info' — leaf may not bridge JS"
+        assert "JetStream available on session NATS leaf" "yes" "no (account info didn't advertise jetstream)"
     fi
 else
-    skip "T4.1" "no sesh leaf"
+    assert "JetStream available on session NATS leaf" "yes" "no (no SESH_NATS_URL — sesh up failed)"
 fi
 
 log "T4.2: late subscriber replays via durable consumer"
@@ -337,10 +334,10 @@ if [ -n "${SESH_NATS_URL:-}" ]; then
         fi
         nats --server="$SESH_NATS_URL" stream rm T4REPLAY -f >/dev/null 2>&1 || true
     else
-        skip "T4.2" "could not create JetStream stream T4REPLAY"
+        assert "late durable consumer replayed both messages" "stream-created" "stream-create-failed"
     fi
 else
-    skip "T4.2" "no sesh leaf"
+    assert "late durable consumer replayed both messages" "stream-created" "no SESH_NATS_URL — sesh up failed"
 fi
 sesh_down_in /tmp/g4-js s1
 
@@ -358,32 +355,41 @@ if sesh_up_in "$PROJ" sx session; then
     if ls "$PROJ"/.sesh/sessions/sx.repo* >/dev/null 2>&1 || ls "$PROJ"/.sesh/sessions/sx*.repo >/dev/null 2>&1; then
         assert "session-scoped fossil repo exists" "yes" "yes"
     else
-        # Dump what sesh actually wrote so we can root-cause why
-        # the expected per-session repo isn't there.
+        # Diagnostic dump on failure — root-cause why per-session repo missing.
         ACTUAL=$(ls -la "$PROJ"/.sesh/ 2>/dev/null | tr '\n' '|' | cut -c1-300)
         SESSIONS=$(ls -la "$PROJ"/.sesh/sessions/ 2>/dev/null | tr '\n' '|' | cut -c1-300)
         log "    T5.1 .sesh/ : ${ACTUAL:-empty}"
         log "    T5.1 sessions/: ${SESSIONS:-empty}"
-        skip "T5.1" "expected .sesh/sessions/sx.repo not found"
+        assert "session-scoped fossil repo exists" "yes" "no (sx.repo missing)"
     fi
     sesh_down_in "$PROJ" sx
 else
-    skip "T5.1" "sesh up failed"
+    assert "session-scoped fossil repo exists" "yes" "no (sesh up failed)"
 fi
 
 log "T5.2: --scope=project writes single shared repo"
+# Reset hub state — T5.1 ran with --scope=session against /tmp/g5-scope.
+sesh_full_reset
 PROJ=/tmp/g5-projscope
 if sesh_up_in "$PROJ" sy project; then
     if [ -f "$PROJ/.sesh/project.repo" ] || ls "$PROJ"/.sesh/project*.repo >/dev/null 2>&1; then
         assert "project-scoped fossil repo exists" "yes" "yes"
     else
         ACTUAL=$(ls -la "$PROJ"/.sesh/ 2>/dev/null | tr '\n' '|' | cut -c1-300)
-        log "    T5.2 .sesh/ : ${ACTUAL:-empty}"
-        skip "T5.2" "expected .sesh/project.repo not found"
+        SESSIONS=$(ls -la "$PROJ"/.sesh/sessions/ 2>/dev/null | tr '\n' '|' | cut -c1-300)
+        JSON=$(cat "$PROJ"/.sesh/sessions/sy.json 2>/dev/null | tr '\n' ' ' | cut -c1-300)
+        UPLOG=$(tail -10 /tmp/sesh-up-sy.log 2>/dev/null | tr '\n' '|' | cut -c1-500)
+        log "    T5.2 .sesh/    : ${ACTUAL:-empty}"
+        log "    T5.2 sessions/ : ${SESSIONS:-empty}"
+        log "    T5.2 sy.json   : ${JSON:-empty}"
+        log "    T5.2 up.log    : ${UPLOG:-empty}"
+        assert "project-scoped fossil repo exists" "yes" "no (project.repo missing — see logs above)"
     fi
     sesh_down_in "$PROJ" sy
 else
-    skip "T5.2" "sesh up with --scope=project failed"
+    UPLOG=$(tail -10 /tmp/sesh-up-sy.log 2>/dev/null | tr '\n' '|' | cut -c1-500)
+    log "    T5.2 up.log: ${UPLOG:-empty}"
+    assert "project-scoped fossil repo exists" "yes" "no (sesh up --scope=project failed)"
 fi
 
 log "T5.3: project-code file written"
@@ -395,13 +401,12 @@ if [ -f /tmp/g5-projscope/.sesh/project-code ]; then
         assert "project-code looks like a hash" "yes" "value='$code' len=${#code}"
     fi
 else
-    skip "T5.3" "no .sesh/project-code (sesh version may differ)"
+    assert "project-code looks like a hash" "yes" "no (.sesh/project-code missing)"
 fi
 
 log "T5.4: fossil HTTP endpoint serves the repo (clone-push)"
-# Clean hub state — T5.1/T5.2 left a hub running and sesh's hub-shutdown
-# is unreliable (see T1.2). Inheriting stale state would silently land
-# us in the partial-publish failure mode (session JSON: {"pid":N} only).
+# Clean hub state — pre-sesh#62 the hub-shutdown leak caused partial-
+# publish (session JSON: {"pid":N} only). Reset is defensive even now.
 sesh_full_reset
 PROJ=/tmp/g5-http
 if sesh_up_in "$PROJ" sh; then
@@ -410,17 +415,16 @@ if sesh_up_in "$PROJ" sh; then
         if echo "$body" | grep -qi "fossil"; then
             assert "fossil_url serves fossil HTTP" "yes" "yes"
         else
-            skip "T5.4" "fossil_url responded but body did not match 'fossil' marker (got: ${body:0:80})"
+            assert "fossil_url serves fossil HTTP" "yes" "no (body: ${body:0:80})"
         fi
     else
-        # Dump session JSON so we can see what sesh actually published
         JSON_DUMP=$(cat "$SESSION_JSON" 2>/dev/null | tr '\n' ' ' | cut -c1-300)
         log "    T5.4 session JSON: ${JSON_DUMP:-empty}"
-        skip "T5.4" "no fossil_url in session JSON"
+        assert "fossil_url serves fossil HTTP" "yes" "no (fossil_url missing from session JSON)"
     fi
     sesh_down_in "$PROJ" sh
 else
-    skip "T5.4" "sesh up failed"
+    assert "fossil_url serves fossil HTTP" "yes" "no (sesh up failed)"
 fi
 
 # GROUP 6 — Legacy bridge subject namespacing (retired in #94)
@@ -461,7 +465,7 @@ run_synadia_contract() {
     log "--- harness: ${harness} (agent=${expected_agent}, subject token=${subject_token}) ---"
     sesh_full_reset
     if ! sesh_up_in "$proj" "$label"; then
-        skip "T9/T10/T11 (${harness})" "sesh up failed"
+        assert "T9/T10/T11 (${harness})" "passed" "skip-fallback: sesh up failed"
         return 0
     fi
 
@@ -541,7 +545,7 @@ run_synadia_contract() {
             log "       cap: ${reply_count} chunk(s), expected ≥2 (ack + terminator)"
         fi
     else
-        skip "T10 (${harness})" "no prompt subject discovered"
+        assert "T10 (${harness})" "passed" "skip-fallback: no prompt subject discovered"
     fi
 
     # --- T11 ---
@@ -610,7 +614,7 @@ if sesh_up_in /tmp/g8-bridge s1; then
         sleep 5
 
         if [ -z "$PANE" ]; then
-            skip "Group 8 — TCP↔WS bridge" "tmux worker spawn failed"
+            assert "Group 8 — TCP↔WS bridge" "passed" "skip-fallback: tmux worker spawn failed"
         else
             # WS subscriber waits for ONE message on broadcast.g8, then
             # exits. Timeout = 10s to bound the wait if the bridge breaks.
@@ -671,7 +675,7 @@ if sesh_up_in /tmp/g8-bridge s1; then
     fi
     sesh_down_in /tmp/g8-bridge s1
 else
-    skip "Group 8 — TCP↔WS bridge" "sesh up failed"
+    assert "Group 8 — TCP↔WS bridge" "passed" "skip-fallback: sesh up failed"
 fi
 
 # ============================================================
@@ -695,7 +699,7 @@ else
         T_ID=$(printf '%s' "$T_OUT" | jq -r '.id // empty' 2>/dev/null)
 
         if [ -z "$T_ID" ]; then
-            skip "Group 9 — task add returns id" "sesh-ops task add did not emit .id (output: $T_OUT)"
+            assert "Group 9 — task add returns id" "passed" "skip-fallback: sesh-ops task add did not emit .id (output: $T_OUT)"
         else
             assert "task add returns ULID" "non-empty" "non-empty"
 
@@ -725,7 +729,7 @@ else
         fi
         sesh_down_in /tmp/g9-task s1
     else
-        skip "Group 9 — task CAS" "sesh up failed"
+        assert "Group 9 — task CAS" "passed" "skip-fallback: sesh up failed"
     fi
 fi
 
@@ -744,7 +748,7 @@ else
         G_ID=$(printf '%s' "$G_OUT" | jq -r '.id // empty' 2>/dev/null)
 
         if [ -z "$G_ID" ]; then
-            skip "Group 10 — goal create" "sesh-ops goal create did not emit .id (output: $G_OUT)"
+            assert "Group 10 — goal create" "passed" "skip-fallback: sesh-ops goal create did not emit .id (output: $G_OUT)"
         else
             assert "goal create returns id" "non-empty" "non-empty"
 
@@ -767,7 +771,7 @@ else
         fi
         sesh_down_in /tmp/g10-goal s1
     else
-        skip "Group 10 — goal state machine" "sesh up failed"
+        assert "Group 10 — goal state machine" "passed" "skip-fallback: sesh up failed"
     fi
 fi
 
@@ -790,7 +794,7 @@ else
         sleep 5  # shim registration
 
         if [ -z "$PANE" ]; then
-            skip "Group 11 — traceparent chain" "worker spawn failed"
+            assert "Group 11 — traceparent chain" "passed" "skip-fallback: worker spawn failed"
         else
             # Inbound traceparent: a known, valid W3C value. The bench
             # uses 0af7651916cd43dd8448eb211c80319c — the canonical
@@ -859,7 +863,7 @@ else
         fi
         sesh_down_in /tmp/g11-trace s1
     else
-        skip "Group 11 — traceparent chain" "sesh up failed"
+        assert "Group 11 — traceparent chain" "passed" "skip-fallback: sesh up failed"
     fi
 fi
 
@@ -899,7 +903,7 @@ else
 
         sesh_down_in /tmp/g12-kv s1
     else
-        skip "Group 12 — KV scope isolation" "sesh up failed"
+        assert "Group 12 — KV scope isolation" "passed" "skip-fallback: sesh up failed"
     fi
 fi
 
@@ -925,7 +929,7 @@ else
                   # hub seem to need more headroom than one — saw races at 8s.
 
         if [ -z "$PANE1" ] || [ -z "$PANE2" ]; then
-            skip "Group 13 — concurrent CAS" "worker spawn failed (PANE1=$PANE1 PANE2=$PANE2)"
+            assert "Group 13 — concurrent CAS" "passed" "skip-fallback: worker spawn failed (PANE1=$PANE1 PANE2=$PANE2)"
         else
             # Count distinct INFO replies on stdout (JSON lines containing
             # the service name). PING replies are smaller but the count is
@@ -966,7 +970,7 @@ else
         [ -n "$PANE2" ] && tmux kill-pane -t "$PANE2" 2>/dev/null || true
         sesh_down_in /tmp/g13-pool s1
     else
-        skip "Group 13 — concurrent CAS" "sesh up failed"
+        assert "Group 13 — concurrent CAS" "passed" "skip-fallback: sesh up failed"
     fi
 fi
 
@@ -994,7 +998,7 @@ else
         D_ID=$("${SO[@]}" task add --title="deploy" --depends-on="$T_ID" 2>&1 | jq -r '.id // empty')
 
         if [ -z "$B_ID" ] || [ -z "$T_ID" ] || [ -z "$D_ID" ]; then
-            skip "Group 14 — dep cascade" "task add failed (B=$B_ID T=$T_ID D=$D_ID)"
+            assert "Group 14 — dep cascade" "passed" "skip-fallback: task add failed (B=$B_ID T=$T_ID D=$D_ID)"
         else
             # Initially only build has no unmet deps → it MUST be the
             # first puller's catch.
@@ -1015,7 +1019,7 @@ else
         [ -n "$PANE" ] && tmux kill-pane -t "$PANE" 2>/dev/null || true
         sesh_down_in /tmp/g14-dep s1
     else
-        skip "Group 14 — dep cascade" "sesh up failed"
+        assert "Group 14 — dep cascade" "passed" "skip-fallback: sesh up failed"
     fi
 fi
 
@@ -1038,7 +1042,7 @@ else
         G_ID=$("${SO[@]}" goal create --objective="ship feature X" 2>&1 | jq -r '.id // empty')
 
         if [ -z "$G_ID" ]; then
-            skip "Group 15 — goal/task linkage" "goal create failed"
+            assert "Group 15 — goal/task linkage" "passed" "skip-fallback: goal create failed"
         else
             T1=$("${SO[@]}" task add --title="impl" --goal-id="$G_ID" 2>&1 | jq -r '.id // empty')
             T2=$("${SO[@]}" task add --title="docs" --goal-id="$G_ID" 2>&1 | jq -r '.id // empty')
@@ -1065,7 +1069,7 @@ else
 
         sesh_down_in /tmp/g15-goal s1
     else
-        skip "Group 15 — goal/task linkage" "sesh up failed"
+        assert "Group 15 — goal/task linkage" "passed" "skip-fallback: sesh up failed"
     fi
 fi
 
@@ -1112,7 +1116,7 @@ else
         done
         sesh_down_in /tmp/g16-cross s1
     else
-        skip "Group 16 — cross-harness coexistence" "sesh up failed"
+        assert "Group 16 — cross-harness coexistence" "passed" "skip-fallback: sesh up failed"
     fi
 fi
 
