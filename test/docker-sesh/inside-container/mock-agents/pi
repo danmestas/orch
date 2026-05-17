@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 # mock pi binary for orch Docker tests.
 #
-# Goals: same shape as the codex mock — print banner, read stdin,
-# echo prompts back. The shim's pi adapter (#74) attaches via the
-# spawned pane and handles Synadia protocol publishing.
+# Goals: same shape as the codex mock — print banner, read stdin, echo
+# prompts back, and append a transcript JSONL line per prompt at the
+# path the pi adapter tails (orch#134). The shim's pi adapter (#74)
+# attaches via the spawned pane and bridges those lines into Synadia
+# response chunks.
+#
+# Transcript path matches pi's convention:
+#   ~/.pi/agent/sessions/<encoded-cwd>/<ts>_mock.jsonl
+# where <encoded-cwd> replaces `/` and `.` with `-`.
 set -uo pipefail
 
 cat <<'BANNER'
 ╭─── Pi Agent v0 (mock test harness) ────────────────────────────╮
 │                                                                  │
 │  Mock used by orch's Docker test bench. Reads prompts from      │
-│  stdin and echoes them so the shim's pi adapter can be probed.  │
+│  stdin, echoes them, and writes a transcript JSONL line per    │
+│  prompt for the shim's pi adapter to pick up.                   │
 │                                                                  │
 ╰──────────────────────────────────────────────────────────────────╯
 
@@ -18,9 +25,24 @@ BANNER
 
 trap 'exit 0' TERM INT
 
+encoded_cwd=$(printf '%s' "$PWD" | sed 's:[./]:-:g')
+transcript_dir="${HOME}/.pi/agent/sessions/${encoded_cwd}"
+mkdir -p "$transcript_dir"
+transcript="${transcript_dir}/$(date +%s)_mock.jsonl"
+
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '%s' "$s"
+}
+
 echo "$ ready"
 
 while IFS= read -r line; do
     echo "[mock-pi] received: $line"
     echo "$ ready"
+    reply=$(json_escape "[mock-pi] response: $line")
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n' \
+        "$reply" >>"$transcript"
 done

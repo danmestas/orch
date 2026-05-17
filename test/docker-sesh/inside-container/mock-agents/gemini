@@ -2,16 +2,22 @@
 # mock gemini binary for orch Docker tests.
 #
 # Goals: print a banner containing "Gemini CLI" (which orch-spawn's
-# BANNER table looks for during --verify), read stdin, echo prompts.
-# The shim's gemini adapter (#73) attaches via the pane.
+# BANNER table looks for during --verify), read stdin, echo prompts,
+# and append a chat JSONL line per prompt at the path the gemini
+# adapter tails (orch#134). The shim's gemini adapter (#73) attaches
+# via the pane and bridges those lines into Synadia response chunks.
+#
+# Chat path approximates gemini-cli's convention:
+#   ~/.gemini/tmp/<scope>/chats/session-<ts>.jsonl
+# We use a stable mock scope; the adapter walks chatsDir recursively.
 set -uo pipefail
 
 cat <<'BANNER'
 ╭─── Gemini CLI v0 (mock test harness) ──────────────────────────╮
 │                                                                  │
 │  Mock used by orch's Docker test bench. Reads prompts from      │
-│  stdin and echoes them so the shim's gemini adapter (using      │
-│  AfterAgent event semantics) can be probed.                     │
+│  stdin, echoes them, and writes a chat JSONL line per prompt   │
+│  for the shim's gemini adapter to pick up.                      │
 │                                                                  │
 ╰──────────────────────────────────────────────────────────────────╯
 
@@ -19,9 +25,22 @@ BANNER
 
 trap 'exit 0' TERM INT
 
+chats_dir="${HOME}/.gemini/tmp/orch-mock/chats"
+mkdir -p "$chats_dir"
+chat="${chats_dir}/session-$(date +%s)-$$.jsonl"
+
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '%s' "$s"
+}
+
 echo "> ready"
 
 while IFS= read -r line; do
     echo "[mock-gemini] received: $line"
     echo "> ready"
+    reply=$(json_escape "[mock-gemini] response: $line")
+    printf '{"role":"model","parts":[{"text":"%s"}]}\n' "$reply" >>"$chat"
 done

@@ -6,24 +6,22 @@
 #     banner-match path succeeds.
 #   - Read stdin line by line (so `tmux send-keys` from orch-tell lands
 #     visibly in the pane).
+#   - Append a transcript JSONL line per prompt at the path the
+#     claudecode adapter tails — bridges mock prompts into Synadia
+#     response chunks (orch#134).
 #   - Exit cleanly on SIGTERM.
 #
-# The legacy hook-firing path (orch-stop-marker.sh + orch-nats-publish-*.sh)
-# was retired in orch#94 — bus eventing is now handled by orch-agent-shim
-# when MOCK_USE_SHIM=1 is set (see test/docker/inside-container/mock-agents/claude
-# for the shim-launch path).
-#
-# Intentionally NOT modeled on real claude-code semantics — this just
-# satisfies the orch plumbing contract.
+# Transcript path matches claude-code's convention:
+#   ~/.claude/projects/<encoded-cwd>/session-mock.jsonl
+# where <encoded-cwd> replaces `/` and `.` with `-`.
 set -uo pipefail
 
 cat <<'BANNER'
 ╭─── Claude Code v0 (mock test harness) ─────────────────────────╮
 │                                                                  │
 │  This is a mock used by orch's Docker test bench. It echoes      │
-│  each prompt it receives via stdin.                              │
-│                                                                  │
-│  Sending SIGTERM exits cleanly.                                  │
+│  each prompt it receives via stdin and writes a transcript      │
+│  JSONL line per prompt for the shim's transcript tailer.        │
 │                                                                  │
 ╰──────────────────────────────────────────────────────────────────╯
 
@@ -31,10 +29,27 @@ BANNER
 
 trap 'exit 0' TERM INT
 
+encoded_cwd=$(printf '%s' "$PWD" | sed 's:[./]:-:g')
+transcript_dir="${HOME}/.claude/projects/${encoded_cwd}"
+mkdir -p "$transcript_dir"
+transcript="${transcript_dir}/session-mock.jsonl"
+
+# json-escape backslashes and double-quotes; bench prompts have no other
+# special chars so this is sufficient (and avoids a jq dependency).
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '%s' "$s"
+}
+
 # Print a prompt-style cursor so capture-pane shows we're alive between turns
 echo "❯ ready"
 
 while IFS= read -r line; do
     echo "[mock] received: $line"
     echo "❯ ready"
+    reply=$(json_escape "[mock-claude] response: $line")
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n' \
+        "$reply" >>"$transcript"
 done

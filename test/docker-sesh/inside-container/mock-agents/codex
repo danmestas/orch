@@ -6,17 +6,21 @@
 #     empty, so verify falls through to title-rename or sleep-then-probe)
 #   - Read stdin line by line so tmux send-keys (and the shim's injection
 #     path) land visibly
+#   - Append a rollout JSONL line per prompt at the path the codex
+#     adapter tails — bridges mock prompts into Synadia response chunks
+#     (orch#134).
 #   - Exit cleanly on SIGTERM
 #
-# Substrate eventing is handled by orch-agent-shim (per #70/#72/#73-75).
-# This mock does NOT fire any hooks — legacy hook-firing was retired in #99.
+# Rollout path matches codex's convention:
+#   ~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<pid>.jsonl
 set -uo pipefail
 
 cat <<'BANNER'
 ╭─── OpenAI Codex v0 (mock test harness) ────────────────────────╮
 │                                                                  │
 │  Mock used by orch's Docker test bench. Echoes prompts read     │
-│  from stdin so the shim's codex adapter can be probed.          │
+│  from stdin and writes a rollout JSONL line per prompt for the  │
+│  shim's codex adapter to pick up.                                │
 │                                                                  │
 ╰──────────────────────────────────────────────────────────────────╯
 
@@ -24,9 +28,24 @@ BANNER
 
 trap 'exit 0' TERM INT
 
+ts=$(date +%s)
+day_dir="${HOME}/.codex/sessions/$(date +%Y)/$(date +%m)/$(date +%d)"
+mkdir -p "$day_dir"
+rollout="${day_dir}/rollout-${ts}-$$.jsonl"
+
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '%s' "$s"
+}
+
 echo "› ready"
 
 while IFS= read -r line; do
     echo "[mock-codex] received: $line"
     echo "› ready"
+    reply=$(json_escape "[mock-codex] response: $line")
+    printf '{"type":"message","role":"assistant","content":[{"type":"output_text","text":"%s"}]}\n' \
+        "$reply" >>"$rollout"
 done
