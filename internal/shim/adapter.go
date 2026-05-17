@@ -128,3 +128,28 @@ type Adapter interface {
 	Events() <-chan Chunk
 	Close() error
 }
+
+// Aborter is an OPTIONAL companion interface adapters MAY implement to
+// receive the §interrupt verb of orch.signal.> (see docs/orch-signals.md).
+//
+// Adapters whose underlying harness fully honours the OnPrompt ctx —
+// ctx.Done() actually stops the in-flight turn — can leave Abort
+// unimplemented: the shim's ctx-cancellation IS the abort. Adapters
+// whose harness needs an imperative stop signal (the v1 TUI REPLs
+// claude-code/codex/pi/gemini, all of which run as foreground tmux
+// processes that don't observe Go ctx) implement Abort to deliver
+// that signal (e.g. `tmux send-keys -t <pane> C-c`).
+//
+// Abort is distinct from Close. Close tears down the adapter for good
+// (shim shutdown). Abort stops the current turn but leaves the adapter
+// alive for the next prompt — implementations MUST NOT close channels,
+// release files, or otherwise dismantle reusable state.
+//
+// The shim invokes Abort via type assertion so adding the method to a
+// specific adapter does NOT require updating the Adapter interface
+// itself, and adapters that omit Abort remain valid implementations:
+//
+//	if a, ok := s.cfg.Adapter.(Aborter); ok { _ = a.Abort(ctx) }
+type Aborter interface {
+	Abort(ctx context.Context) error
+}

@@ -699,10 +699,261 @@ func readStream(t *testing.T, sub *nats.Subscription, n int, total time.Duration
 	return out
 }
 
+// -----------------------------------------------------------------------------
+// orch.signal.> verb tests (issue #133).
+// -----------------------------------------------------------------------------
+
+// pendingAdapter records OnPrompt invocations + Abort calls without ever
+// producing chunks. Used to exercise interrupt/redirect handlers — the
+// only messages on the reply subject are the shim's own ack/aborted/
+// terminator, so the test can assert their order without race-prone
+// chunk-draining.
+type pendingAdapter struct {
+	mu          sync.Mutex
+	ch          chan Chunk
+	closeOnce   sync.Once
+	abortCount  int
+	lastPrompt  string
+	promptCalls int
+}
+
+func newPendingAdapter() *pendingAdapter {
+	return &pendingAdapter{ch: make(chan Chunk, 8)}
+}
+func (a *pendingAdapter) Start(_ context.Context) error { return nil }
+func (a *pendingAdapter) OnPrompt(_ context.Context, text string) error {
+	a.mu.Lock()
+	a.lastPrompt = text
+	a.promptCalls++
+	a.mu.Unlock()
+	// Return immediately — the shim only requires OnPrompt to KICK off
+	// the turn. Chunks (and the eventual terminator or abort) flow
+	// asynchronously via Events().
+	return nil
+}
+func (a *pendingAdapter) Events() <-chan Chunk { return a.ch }
+func (a *pendingAdapter) Close() error {
+	a.closeOnce.Do(func() { close(a.ch) })
+	return nil
+}
+func (a *pendingAdapter) Abort(_ context.Context) error {
+	a.mu.Lock()
+	a.abortCount++
+	a.mu.Unlock()
+	return nil
+}
+func (a *pendingAdapter) AbortCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.abortCount
+}
+func (a *pendingAdapter) PromptCalls() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.promptCalls
+}
+func (a *pendingAdapter) LastPrompt() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastPrompt
+}
+
+// promptAndDrainAck publishes a prompt and reads the mandatory ack
+// chunk from the inbox, leaving the stream open for the test to assert
+// further chunks (interrupt or redirect). Returns the inbox subscription.
+func promptAndDrainAck(t *testing.T, nc *nats.Conn, subject string) *nats.Subscription {
+	t.Helper()
+	inbox := nats.NewInbox()
+	sub, err := nc.SubscribeSync(inbox)
+	if err != nil {
+		t.Fatalf("subscribe inbox: %v", err)
+	}
+	if err := nc.PublishRequest(subject, inbox, []byte("hello")); err != nil {
+		t.Fatalf("publish prompt: %v", err)
+	}
+	msg, err := sub.NextMsg(2 * time.Second)
+	if err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	if got, want := string(msg.Data), `{"type":"status","data":"ack"}`; got != want {
+		t.Fatalf("expected ack first, got %s", got)
+	}
+	return sub
+}
+
+func TestSignal_InterruptCancelsTurn_EmitsAbortedStatus_AndTerminator(t *testing.T) {
+	url := startEmbeddedNATS(t)
+	adapter := newPendingAdapter()
+	cfg := Config{Agent: "claude-code", Pane: "%9", Owner: "u", Adapter: adapter}
+	nc, cleanup := runShimInBackground(t, url, cfg)
+	defer cleanup()
+
+	sub := promptAndDrainAck(t, nc, "agents.prompt.cc.u.pct9")
+	defer sub.Unsubscribe()
+
+	if err := nc.Publish("orch.signal.interrupt.cc.u.pct9", nil); err != nil {
+		t.Fatalf("publish interrupt: %v", err)
+	}
+
+	msgs := readStream(t, sub, 2, 2*time.Second)
+	if got, want := string(msgs[0].Data), `{"type":"status","data":"aborted"}`; got != want {
+		t.Errorf("aborted chunk: got %s want %s", got, want)
+	}
+	if len(msgs[1].Data) != 0 {
+		t.Errorf("terminator should be empty body, got %d bytes", len(msgs[1].Data))
+	}
+	// Abort must have been invoked on the adapter (TUI adapters in
+	// production deliver Ctrl-C via this hook).
+	if n := adapter.AbortCount(); n != 1 {
+		t.Errorf("Abort call count: got %d want 1", n)
+	}
+	// After interrupt, the active slot is released — a follow-up
+	// prompt must succeed (proves clearActive ran).
+	follow := promptAndDrainAck(t, nc, "agents.prompt.cc.u.pct9")
+	defer follow.Unsubscribe()
+	if calls := adapter.PromptCalls(); calls < 2 {
+		t.Errorf("expected ≥2 prompt calls after interrupt; got %d", calls)
+	}
+}
+
+func TestSignal_InterruptIsIdempotent_NoActiveTurnIsNoop(t *testing.T) {
+	url := startEmbeddedNATS(t)
+	adapter := newPendingAdapter()
+	cfg := Config{Agent: "claude-code", Pane: "%10", Owner: "u", Adapter: adapter}
+	nc, cleanup := runShimInBackground(t, url, cfg)
+	defer cleanup()
+
+	// No active turn yet — interrupt must be a silent no-op (and MUST
+	// NOT call Abort, since there's nothing to abort).
+	if err := nc.Publish("orch.signal.interrupt.cc.u.pct10", nil); err != nil {
+		t.Fatalf("publish interrupt: %v", err)
+	}
+	if err := nc.Publish("orch.signal.interrupt.cc.u.pct10", nil); err != nil {
+		t.Fatalf("publish interrupt 2: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	if n := adapter.AbortCount(); n != 0 {
+		t.Errorf("idle interrupt should NOT call Abort; got %d", n)
+	}
+
+	// Active turn + two back-to-back interrupts: only the first fires
+	// Abort; the second observes an empty slot (coalescing).
+	sub := promptAndDrainAck(t, nc, "agents.prompt.cc.u.pct10")
+	defer sub.Unsubscribe()
+	for i := 0; i < 2; i++ {
+		if err := nc.Publish("orch.signal.interrupt.cc.u.pct10", nil); err != nil {
+			t.Fatalf("publish interrupt loop %d: %v", i, err)
+		}
+	}
+	_ = readStream(t, sub, 2, 2*time.Second)
+	if n := adapter.AbortCount(); n != 1 {
+		t.Errorf("multi-interrupt coalescing: Abort calls=%d want 1", n)
+	}
+}
+
+func TestSignal_Redirect_StopsOldStream_StartsNewOnReply(t *testing.T) {
+	url := startEmbeddedNATS(t)
+	adapter := newPendingAdapter()
+	cfg := Config{Agent: "claude-code", Pane: "%11", Owner: "u", Adapter: adapter}
+	nc, cleanup := runShimInBackground(t, url, cfg)
+	defer cleanup()
+
+	oldSub := promptAndDrainAck(t, nc, "agents.prompt.cc.u.pct11")
+	defer oldSub.Unsubscribe()
+
+	// Operator-supplied reply subject for the redirected turn. Real
+	// orch-interrupt mints an _INBOX; the test pins it so the
+	// subscription is deterministic.
+	newReply := nats.NewInbox()
+	newSub, err := nc.SubscribeSync(newReply)
+	if err != nil {
+		t.Fatalf("subscribe new reply: %v", err)
+	}
+	defer newSub.Unsubscribe()
+
+	body := []byte(`{"prompt":"new direction","reply":"` + newReply + `"}`)
+	if err := nc.Publish("orch.signal.redirect.cc.u.pct11", body); err != nil {
+		t.Fatalf("publish redirect: %v", err)
+	}
+
+	// Old stream gets aborted + terminator.
+	oldMsgs := readStream(t, oldSub, 2, 2*time.Second)
+	if got, want := string(oldMsgs[0].Data), `{"type":"status","data":"aborted"}`; got != want {
+		t.Errorf("old stream aborted chunk: got %s want %s", got, want)
+	}
+	if len(oldMsgs[1].Data) != 0 {
+		t.Errorf("old stream terminator: expected empty body, got %d bytes", len(oldMsgs[1].Data))
+	}
+
+	// New stream gets its own ack on the operator-supplied reply
+	// subject — and the adapter saw the redirected prompt text.
+	ack, err := newSub.NextMsg(2 * time.Second)
+	if err != nil {
+		t.Fatalf("new reply ack: %v", err)
+	}
+	if got, want := string(ack.Data), `{"type":"status","data":"ack"}`; got != want {
+		t.Errorf("new reply first chunk: got %s want %s", got, want)
+	}
+	if calls := adapter.PromptCalls(); calls != 2 {
+		t.Errorf("adapter prompt calls after redirect: got %d want 2", calls)
+	}
+	if got := adapter.LastPrompt(); got != "new direction" {
+		t.Errorf("adapter last prompt: got %q want %q", got, "new direction")
+	}
+}
+
+// nonAborterPendingAdapter is pendingAdapter without the Abort method —
+// proves that the shim's type-assertion path doesn't crash and still
+// emits status:aborted + terminator for adapters that don't implement
+// Aborter.
+type nonAborterPendingAdapter struct {
+	mu        sync.Mutex
+	ch        chan Chunk
+	closeOnce sync.Once
+}
+
+func newNonAborterPendingAdapter() *nonAborterPendingAdapter {
+	return &nonAborterPendingAdapter{ch: make(chan Chunk, 8)}
+}
+func (a *nonAborterPendingAdapter) Start(_ context.Context) error              { return nil }
+func (a *nonAborterPendingAdapter) OnPrompt(_ context.Context, _ string) error { return nil }
+func (a *nonAborterPendingAdapter) Events() <-chan Chunk                       { return a.ch }
+func (a *nonAborterPendingAdapter) Close() error {
+	a.closeOnce.Do(func() { close(a.ch) })
+	return nil
+}
+
+func TestSignal_InterruptWithoutAborter_StillTerminatesStream(t *testing.T) {
+	url := startEmbeddedNATS(t)
+	adapter := newNonAborterPendingAdapter()
+	cfg := Config{Agent: "claude-code", Pane: "%12", Owner: "u", Adapter: adapter}
+	nc, cleanup := runShimInBackground(t, url, cfg)
+	defer cleanup()
+
+	sub := promptAndDrainAck(t, nc, "agents.prompt.cc.u.pct12")
+	defer sub.Unsubscribe()
+
+	if err := nc.Publish("orch.signal.interrupt.cc.u.pct12", nil); err != nil {
+		t.Fatalf("publish interrupt: %v", err)
+	}
+
+	msgs := readStream(t, sub, 2, 2*time.Second)
+	if got, want := string(msgs[0].Data), `{"type":"status","data":"aborted"}`; got != want {
+		t.Errorf("aborted chunk: got %s want %s", got, want)
+	}
+	if len(msgs[1].Data) != 0 {
+		t.Errorf("terminator: expected empty body, got %d bytes", len(msgs[1].Data))
+	}
+}
+
 // Compile-time assertion: nopAdapter and scriptedAdapter satisfy Adapter.
 var (
 	_ Adapter = (*nopAdapter)(nil)
 	_ Adapter = (*scriptedAdapter)(nil)
+	_ Adapter = (*pendingAdapter)(nil)
+	_ Aborter = (*pendingAdapter)(nil)
+	_ Adapter = (*nonAborterPendingAdapter)(nil)
 )
 
 // Compile-time check for the embedded test server's option type so this
