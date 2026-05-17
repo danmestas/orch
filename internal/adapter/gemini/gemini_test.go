@@ -46,7 +46,44 @@ func newTestAdapter(t *testing.T) (*Adapter, *sendKeysRecorder) {
 	a.SendKeys = rec.fn
 	a.StopMarkerDir = t.TempDir()
 	a.NotifyMarkerDir = t.TempDir()
+	a.GeminiChatsDir = t.TempDir()
 	return a, rec
+}
+
+// drain reads up to `max` chunks until either max is reached or `timeout`
+// elapses. Returns whatever was collected.
+func drain(ch <-chan shim.Chunk, max int, timeout time.Duration) []shim.Chunk {
+	out := make([]shim.Chunk, 0, max)
+	deadline := time.After(timeout)
+	for len(out) < max {
+		select {
+		case c, ok := <-ch:
+			if !ok {
+				return out
+			}
+			out = append(out, c)
+		case <-deadline:
+			return out
+		}
+	}
+	return out
+}
+
+// appendLine atomically appends one JSONL line to `path`, creating the
+// parent directory if needed.
+func appendLine(t *testing.T, path, line string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // receiveChunk blocks until a chunk arrives or the timeout fires.
@@ -216,6 +253,125 @@ func TestAdapter_Close_Idempotent(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Error("Events() did not close after Close()")
+	}
+}
+
+// TestAdapter_Transcript_EmitsResponsePerModelLine asserts that lines
+// with role:"model" produce one ChunkResponse per text part, and that
+// role:"user" lines are ignored.
+func TestAdapter_Transcript_EmitsResponsePerModelLine(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	defer a.Close()
+	shimCtx, shimCancel := context.WithCancel(context.Background())
+	defer shimCancel()
+	if err := a.Start(shimCtx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Gemini buckets chats under an opaque <scope>/chats/ subdirectory;
+	// the tailer walks recursively, so any depth under chatsDir works.
+	session := filepath.Join(a.GeminiChatsDir, "scope-x", "chats", "session-1.jsonl")
+	lines := []string{
+		`{"role":"model","parts":[{"text":"first reply"}]}`,
+		`{"role":"user","parts":[{"text":"should be ignored"}]}`,
+		`{"role":"model","parts":[{"text":"second"},{"text":"third"}]}`,
+	}
+	for _, line := range lines {
+		appendLine(t, session, line)
+	}
+
+	// 3 chunks total: first reply, second, third.
+	got := drain(a.Events(), 3, 2*time.Second)
+	if len(got) != 3 {
+		t.Fatalf("expected exactly 3 chunks, got %d: %+v", len(got), got)
+	}
+	want := []string{"first reply", "second", "third"}
+	for i, w := range want {
+		if got[i].Type != shim.ChunkResponse {
+			t.Errorf("chunk %d: type got %q want response", i, got[i].Type)
+		}
+		if s, ok := got[i].Data.(string); !ok || s != w {
+			t.Errorf("chunk %d: data got %v want %q", i, got[i].Data, w)
+		}
+	}
+}
+
+// TestAdapter_Transcript_FunctionCallEmitsToolUse covers the
+// functionCall part shape — gemini-cli emits these for tool invocations.
+func TestAdapter_Transcript_FunctionCallEmitsToolUse(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	defer a.Close()
+	shimCtx, shimCancel := context.WithCancel(context.Background())
+	defer shimCancel()
+	if err := a.Start(shimCtx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	session := filepath.Join(a.GeminiChatsDir, "s", "chats", "session-2.jsonl")
+	appendLine(t, session,
+		`{"role":"model","parts":[{"functionCall":{"name":"ls","args":{"path":"/tmp"}}}]}`)
+
+	c := receiveChunk(t, a.Events(), 1*time.Second)
+	if c.Type != shim.ChunkToolUse {
+		t.Fatalf("expected ChunkToolUse, got %v", c.Type)
+	}
+	m, ok := c.Data.(map[string]any)
+	if !ok || m["name"] != "ls" {
+		t.Errorf("tool_use payload: got %+v", c.Data)
+	}
+}
+
+// TestAdapter_Transcript_ToleratesUnknownFields verifies that unknown
+// JSON fields are silently dropped (forward-compat per §6.6 / §12).
+func TestAdapter_Transcript_ToleratesUnknownFields(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	defer a.Close()
+	shimCtx, shimCancel := context.WithCancel(context.Background())
+	defer shimCancel()
+	if err := a.Start(shimCtx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	session := filepath.Join(a.GeminiChatsDir, "scope", "chats", "session-3.jsonl")
+	appendLine(t, session,
+		`{"role":"model","unknown":"x","parts":[{"text":"ok","extra":true}]}`)
+
+	c := receiveChunk(t, a.Events(), 1*time.Second)
+	if c.Type != shim.ChunkResponse || c.Data.(string) != "ok" {
+		t.Errorf("expected response 'ok', got %+v", c)
+	}
+}
+
+// TestFindLatestGeminiSession_RecursiveByMTime verifies the recursive
+// directory walk picks the newest session-*.jsonl across nested dirs.
+func TestFindLatestGeminiSession_RecursiveByMTime(t *testing.T) {
+	root := t.TempDir()
+	older := filepath.Join(root, "a", "chats", "session-100.jsonl")
+	newer := filepath.Join(root, "b", "chats", "session-200.jsonl")
+	noise := filepath.Join(root, "c", "chats", "other.jsonl") // wrong prefix
+	for _, p := range []string{older, newer, noise} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Force `newer` to have a later mtime than `older`.
+	past := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(older, past, past); err != nil {
+		t.Fatal(err)
+	}
+	if got := findLatestGeminiSession(root); got != newer {
+		t.Errorf("findLatestGeminiSession: got %q want %q", got, newer)
+	}
+}
+
+// TestFindLatestGeminiSession_EmptyDirReturnsEmpty guards the
+// no-chats-yet startup window.
+func TestFindLatestGeminiSession_EmptyDirReturnsEmpty(t *testing.T) {
+	if got := findLatestGeminiSession(t.TempDir()); got != "" {
+		t.Errorf("expected empty for empty chats dir, got %q", got)
 	}
 }
 

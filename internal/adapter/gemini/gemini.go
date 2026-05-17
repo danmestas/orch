@@ -1,39 +1,49 @@
 // Package gemini bridges the orch-agent-shim to the gemini-cli CLI. It
-// does two things:
+// does three things:
 //
-//  1. Watches ~/.cache/orch-stop/<pane>.event and
+//  1. Tails gemini-cli's chat JSONL under ~/.gemini/tmp/<scope>/chats/
+//     and emits a Synadia response chunk per model-role line.
+//  2. Watches ~/.cache/orch-stop/<pane>.event and
 //     ~/.cache/orch-notify/<pane>.notify, emitting typed Synadia chunks:
 //     stop → Terminator, notify → Query.
 //
 //     NOTE (orch#94): the production marker-writer hooks were retired.
 //     This loop remains for the test suite and as the substrate for a
 //     future bus-native turn-end detector (follow-up).
-//  2. Injects inbound prompts back into the pane via `tmux send-keys`.
+//  3. Injects inbound prompts back into the pane via `tmux send-keys`.
 //
 // AfterAgent quirk. gemini-cli's turn-end event is named "AfterAgent",
 // NOT "Stop". When per-harness hook writers are reintroduced (if ever),
 // the gemini hook must wire under AfterAgent, not Stop — gemini-cli
 // silently rejects unknown event names.
 //
-// Transcript-path deferral. gemini stores chat logs at
-// ~/.gemini/tmp/<scope>/chats/session-<ts>-<sessionId>.jsonl, but the
-// <scope> component varies by project context and the mapping from CWD
-// to scope is not yet confirmed from gemini-cli source. Full transcript
-// emission is deferred; v1 emits only the stop terminator and native
-// Notification query chunks.
+// Transcript shape. Each JSONL line is a SDK-style Content record:
 //
-// TODO(transcript): resolve gemini-cli's CWD→scope encoding, then emit
-// response chunks by tailing ~/.gemini/tmp/<scope>/chats/<session>.jsonl
-// on AfterAgent events (analogous to cc.go's transcriptLoop).
+//	{"role":"model","parts":[{"text":"..."}]}
+//	{"role":"user","parts":[{"text":"..."}]}
+//	{"role":"model","parts":[{"functionCall":{"name":"...","args":{...}}}]}
+//
+// We act only on `role:"model"` lines: text parts become response chunks,
+// functionCall parts become tool_use chunks. Unknown fields drop silently
+// (encoding/json forward-compat).
+//
+// Scope path. gemini-cli buckets chats under an opaque `<scope>` directory
+// derived from project context. We walk GeminiChatsDir (default
+// ~/.gemini/tmp/) recursively for the newest `session-*.jsonl` regardless
+// of the intermediate scope, since the scope-encoding algorithm is not
+// stable enough to reproduce here.
 package gemini
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -60,6 +70,11 @@ type Adapter struct {
 	// this to point at a tempdir.
 	StopMarkerDir   string
 	NotifyMarkerDir string
+
+	// GeminiChatsDir overrides ~/.gemini/tmp/. Tests use this. The tailer
+	// walks the directory tree recursively for the newest
+	// `session-*.jsonl` file.
+	GeminiChatsDir string
 
 	// SendKeys is the function invoked to deliver a prompt to the pane.
 	// Default is realSendKeys (which shells out to tmux). Tests
@@ -182,6 +197,7 @@ func (a *Adapter) startWatcher(ctx context.Context) error {
 	}
 
 	go a.markerLoop(ctx, w)
+	go a.transcriptLoop(ctx)
 	return nil
 }
 
@@ -216,6 +232,164 @@ func (a *Adapter) stopMarker() string {
 
 func (a *Adapter) notifyMarker() string {
 	return filepath.Join(a.notifyDir(), a.Pane+".notify")
+}
+
+func (a *Adapter) chatsDir() string {
+	if a.GeminiChatsDir != "" {
+		return a.GeminiChatsDir
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".gemini", "tmp")
+}
+
+// transcriptLoop hunts for gemini-cli's chat JSONL and tails it. The
+// scope subdirectory is opaque so we walk the tree under chatsDir() for
+// the newest `session-*.jsonl` by mtime. Same cost-discipline trick as
+// codex's transcriptLoop: rescan for a newer session only when the
+// current file has been quiet for rolloverIdleScan — an actively-writing
+// session is by definition the latest.
+func (a *Adapter) transcriptLoop(ctx context.Context) {
+	const rolloverIdleScan = 10 * time.Second
+	var (
+		watchedFile *os.File
+		watchedPath string
+		offset      int64
+		lastActive  time.Time
+	)
+	defer func() {
+		if watchedFile != nil {
+			_ = watchedFile.Close()
+		}
+	}()
+	t := time.NewTicker(250 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-a.stopCh:
+			return
+		case <-t.C:
+		}
+
+		if watchedFile == nil {
+			latest := findLatestGeminiSession(a.chatsDir())
+			if latest == "" {
+				continue
+			}
+			f, err := os.Open(latest)
+			if err != nil {
+				continue
+			}
+			watchedFile = f
+			watchedPath = latest
+			offset = 0
+			lastActive = time.Now()
+		}
+
+		if _, err := watchedFile.Seek(offset, 0); err != nil {
+			_ = watchedFile.Close()
+			watchedFile = nil
+			continue
+		}
+		sc := bufio.NewScanner(watchedFile)
+		// Gemini chat lines can carry large function-call args; bump to 8MB.
+		sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+		sawBytes := false
+		for sc.Scan() {
+			line := sc.Bytes()
+			if len(line) == 0 {
+				continue
+			}
+			sawBytes = true
+			a.emitFromChatLine(line)
+		}
+		if pos, err := watchedFile.Seek(0, 1); err == nil {
+			offset = pos
+		}
+		if sawBytes {
+			lastActive = time.Now()
+		}
+
+		if time.Since(lastActive) >= rolloverIdleScan {
+			newest := findLatestGeminiSession(a.chatsDir())
+			if newest != "" && newest != watchedPath {
+				_ = watchedFile.Close()
+				watchedFile = nil
+			} else {
+				lastActive = time.Now()
+			}
+		}
+	}
+}
+
+// geminiChatEntry is the subset of gemini-cli's Content shape we act on.
+// Unknown fields drop silently via encoding/json (forward-compat).
+type geminiChatEntry struct {
+	Role  string            `json:"role"`
+	Parts []geminiChatPart  `json:"parts"`
+}
+
+type geminiChatPart struct {
+	Text         string             `json:"text"`
+	FunctionCall *geminiFunctionCall `json:"functionCall,omitempty"`
+}
+
+type geminiFunctionCall struct {
+	Name string         `json:"name"`
+	Args map[string]any `json:"args"`
+}
+
+// emitFromChatLine parses one JSONL line and emits 0+ chunks. Only
+// `role:"model"` lines produce chunks; user-side entries are ignored.
+func (a *Adapter) emitFromChatLine(line []byte) {
+	var e geminiChatEntry
+	if err := json.Unmarshal(line, &e); err != nil {
+		return
+	}
+	if e.Role != "model" {
+		return
+	}
+	for _, p := range e.Parts {
+		switch {
+		case p.FunctionCall != nil:
+			a.emit(shim.Chunk{Type: shim.ChunkToolUse, Data: map[string]any{
+				"name":  p.FunctionCall.Name,
+				"input": p.FunctionCall.Args,
+			}})
+		case p.Text != "":
+			a.emit(shim.NewResponseChunk(p.Text))
+		}
+	}
+}
+
+// findLatestGeminiSession walks `root` recursively for the most-recently-
+// modified `session-*.jsonl` file. Returns "" when none exists.
+func findLatestGeminiSession(root string) string {
+	var bestPath string
+	var bestMTime time.Time
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasPrefix(name, "session-") || !strings.HasSuffix(name, ".jsonl") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if info.ModTime().After(bestMTime) {
+			bestMTime = info.ModTime()
+			bestPath = path
+		}
+		return nil
+	})
+	return bestPath
 }
 
 // markerLoop reacts to fsnotify CREATE / WRITE events on the marker
