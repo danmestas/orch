@@ -311,7 +311,19 @@ type shim struct {
 	// then mint fresh traces.
 	activeTrace atomic.Value // string
 
+	// activeCancel cancels the derived context handed to Adapter.OnPrompt
+	// for the in-flight turn. handleInterrupt invokes it before calling
+	// Adapter.Abort so adapters that honour ctx.Done() get the stop signal
+	// even if they ignore Abort. Read/written only under activeMu; the
+	// hot path (eventPump) does not touch it.
+	activeCancel context.CancelFunc
+
 	activeMu sync.Mutex
+
+	// signalSub is the nc.Subscribe handle for orch.signal.>; unsubscribed
+	// on stop() so a shim restart on the same connection doesn't double-
+	// dispatch signals.
+	signalSub *nats.Subscription
 }
 
 // loadActiveReply returns the current active reply subject or "" if idle.
@@ -350,6 +362,15 @@ func (s *shim) statusSubject() string {
 
 func (s *shim) heartbeatSubject() string {
 	return fmt.Sprintf("agents.hb.%s.%s.%s",
+		s.cfg.AgentToken, s.cfg.Owner, encodePane(s.cfg.Pane))
+}
+
+// signalSubject is the wildcard the shim subscribes to for orch.signal.>
+// dispatch. The verb (interrupt|redirect|...) is the wildcard token; the
+// identity tuple (token/owner/pane-enc) pins delivery to this shim so
+// peer panes don't see each other's signals. See docs/orch-signals.md.
+func (s *shim) signalSubject() string {
+	return fmt.Sprintf("orch.signal.*.%s.%s.%s",
 		s.cfg.AgentToken, s.cfg.Owner, encodePane(s.cfg.Pane))
 }
 
@@ -403,10 +424,24 @@ func (s *shim) start() error {
 		return fmt.Errorf("shim: adapter start: %w", err)
 	}
 
+	// orch.signal.> subscription. Plain (non-queue, non-service)
+	// subscribe: signals are fire-and-forget control-plane events, not
+	// request/reply traffic, and we want every shim with the matching
+	// identity tuple to receive them (no queue-group sharding).
+	sub, err := s.nc.Subscribe(s.signalSubject(), s.handleSignal)
+	if err != nil {
+		_ = svc.Stop()
+		return fmt.Errorf("shim: signal subscribe: %w", err)
+	}
+	s.signalSub = sub
+
 	return nil
 }
 
 func (s *shim) stop() {
+	if s.signalSub != nil {
+		_ = s.signalSub.Unsubscribe()
+	}
 	if s.svc != nil {
 		_ = s.svc.Stop()
 	}
@@ -560,11 +595,9 @@ func parseEnvelope(body []byte) (requestEnvelope, error) {
 // handlePrompt is the §5 / §6 dispatcher. It:
 //
 //   - validates the envelope (§5.4 / §12: reject malformed with 400),
-//   - publishes the mandatory `ack` first chunk (§6.4),
-//   - marks the reply subject active so the event pump can stream onto it,
-//   - hands the prompt text to the adapter via OnPrompt,
-//   - returns immediately — the event pump and adapter cooperate to
-//     drive the terminator.
+//   - delegates the busy/ack/OnPrompt/watchdog work to dispatchPrompt,
+//   - maps dispatchPrompt's structured error (today: busy=503) to
+//     the §9.x reply.
 //
 // The handler does NOT block until the adapter is done. micro service
 // handlers are synchronous on the dispatch goroutine; blocking here
@@ -601,6 +634,30 @@ func (s *shim) handlePrompt(req micro.Request) {
 		return
 	}
 
+	if e := s.dispatchPrompt(req.Reply(), env.Prompt, parentTrace); e != nil {
+		s.respondError(req, e.Code, e.Message, e.Body, parentTrace)
+		s.publishTerminator(req.Reply())
+	}
+}
+
+// dispatchPrompt is the per-turn core shared between handlePrompt
+// (operator-driven via agents.prompt.* request/reply) and handleRedirect
+// (operator-driven via orch.signal.redirect.* publish). It:
+//
+//   - atomically claims the active-reply slot (returns 503 if busy),
+//   - publishes the mandatory §6.4 `ack` chunk,
+//   - derives a cancellable per-turn ctx (stored as activeCancel so the
+//     §interrupt verb can cancel mid-flight),
+//   - hands the prompt to Adapter.OnPrompt and arms the §6.5 watchdog.
+//
+// On structured failure (busy), returns a *Error and leaves the active-
+// reply slot untouched (caller emits the header-bearing error message +
+// terminator). On success, returns nil and the event pump owns the
+// stream until the adapter terminates it. OnPrompt errors and ack
+// publish failures are surfaced via the reply stream directly (mid-
+// stream error chunk + terminator) rather than back to the caller,
+// matching the prior handlePrompt behaviour.
+func (s *shim) dispatchPrompt(reply string, prompt string, parentTrace string) *Error {
 	// Atomic "transition from idle to busy". activeMu serializes the
 	// check-then-store; the value itself is read lock-free in eventPump.
 	s.activeMu.Lock()
@@ -608,38 +665,41 @@ func (s *shim) handlePrompt(req micro.Request) {
 		s.activeMu.Unlock()
 		// §9.2 503 (service unavailable) is the cleanest mapping for
 		// "agent busy with another turn". Caller can retry.
-		s.respondError(req, 503, "agent busy", nil, parentTrace)
-		s.publishTerminator(req.Reply())
-		return
+		return &Error{Code: 503, Message: "agent busy"}
 	}
-	s.activeReply.Store(req.Reply())
+	// Derive a per-turn ctx that the interrupt handler can cancel
+	// without dismantling the shim. OnPrompt receives this ctx so
+	// adapters honouring ctx.Done() pick up the abort even if they
+	// don't implement the Aborter interface.
+	promptCtx, cancel := context.WithCancel(s.runCtx)
+	s.activeReply.Store(reply)
 	// Stash the inbound trace so mid-stream publishes (eventPump,
 	// watchdog) propagate it onto every chunk + terminator + error.
 	s.activeTrace.Store(parentTrace)
+	s.activeCancel = cancel
 	s.activeMu.Unlock()
 
 	// §6.4: mandatory `ack` is the FIRST message on the reply subject,
 	// before any latency-inducing work. Send before invoking the adapter.
-	if err := s.publishChunk(req.Reply(), Chunk{Type: ChunkStatus, Data: "ack"}, parentTrace); err != nil {
-		s.clearActive(req.Reply())
-		return
+	if err := s.publishChunk(reply, Chunk{Type: ChunkStatus, Data: "ack"}, parentTrace); err != nil {
+		s.clearActive(reply)
+		return nil
 	}
 
 	// Kick off the agent turn. OnPrompt should return promptly — chunks
-	// arrive via Events(). The ctx we pass is the shim's lifetime
-	// context (per the Adapter contract: cancellation means "stop the
-	// current turn"); for v1, the claude-code adapter doesn't actually
-	// honor cancellation (it waits for the marker file), but cancelling
-	// the shim still tears down the watchers cleanly. If OnPrompt
-	// itself fails, we end the stream with a 500 + terminator.
-	if err := s.cfg.Adapter.OnPrompt(s.runCtx, env.Prompt); err != nil {
-		_ = s.publishErrorOnReply(req.Reply(), &Error{
+	// arrive via Events(). The ctx we pass is per-turn-cancellable so
+	// the §interrupt verb can stop the adapter mid-flight (adapters
+	// honouring ctx.Done() pick it up; the TUI adapters also receive
+	// an Abort call from handleInterrupt). If OnPrompt itself fails,
+	// we end the stream with a 500 + terminator.
+	if err := s.cfg.Adapter.OnPrompt(promptCtx, prompt); err != nil {
+		_ = s.publishErrorOnReply(reply, &Error{
 			Code:    500,
 			Message: err.Error(),
 		}, parentTrace)
-		s.publishTerminator(req.Reply())
-		s.clearActive(req.Reply())
-		return
+		s.publishTerminator(reply)
+		s.clearActive(reply)
+		return nil
 	}
 
 	// §6.5 watchdog. The protocol REQUIRES every prompt stream end with
@@ -648,7 +708,122 @@ func (s *shim) handlePrompt(req micro.Request) {
 	// Mock harnesses that never close Events() would otherwise leave
 	// callers blocked on the §6.6 inactivity timeout (#102). Centralize
 	// the safety net here so no adapter can violate the invariant.
-	go s.watchdogTerminator(req.Reply())
+	go s.watchdogTerminator(reply)
+	return nil
+}
+
+// redirectEnvelope is the body shape for orch.signal.redirect.* (§v1).
+// Minimal: just the replacement prompt text plus the reply subject the
+// new turn's chunks should stream to. ReplyTo is optional — if absent
+// the shim mints a fresh _INBOX so the new turn still has somewhere to
+// publish (and operators who don't subscribe simply discard chunks).
+// See docs/orch-signals.md for forward-compat fields.
+type redirectEnvelope struct {
+	Prompt  string `json:"prompt"`
+	ReplyTo string `json:"reply,omitempty"`
+}
+
+// handleSignal is the orch.signal.> dispatcher. The verb is the third
+// token of the subject (orch.signal.<verb>.<token>.<owner>.<pane>) —
+// unknown verbs are logged and dropped (forward-compat with future
+// pause/resume/snapshot verbs).
+func (s *shim) handleSignal(msg *nats.Msg) {
+	parts := strings.Split(msg.Subject, ".")
+	if len(parts) < 3 {
+		log.Printf("shim: signal: malformed subject %q", msg.Subject)
+		return
+	}
+	verb := parts[2]
+	switch verb {
+	case "interrupt":
+		s.handleInterrupt()
+	case "redirect":
+		s.handleRedirect(msg.Data)
+	default:
+		// Unknown verb — log once and ignore. Keeps the room-to-grow
+		// space (pause/resume/snapshot) ABI-stable for callers built
+		// against a newer shim that adds verbs we don't recognize.
+		log.Printf("shim: signal: unknown verb %q on %q", verb, msg.Subject)
+	}
+}
+
+// handleInterrupt stops the in-flight turn:
+//
+//  1. Cancels the derived OnPrompt ctx (adapters honouring ctx.Done()
+//     observe the stop immediately).
+//  2. Calls Adapter.Abort if the adapter implements Aborter (TUI
+//     adapters send `tmux send-keys C-c` to the bound pane).
+//  3. Publishes {"type":"status","data":"aborted"} on the active reply
+//     subject — reuses the §6.4 status-chunk shape so subscribers don't
+//     need a new wire form to recognize the abort.
+//  4. Publishes the §6.5 zero-byte terminator and releases the slot.
+//
+// Idempotent: if no turn is active, the function is a no-op (multi-
+// signal coalescing — N concurrent interrupts close once, the rest
+// observe an empty activeReply and return).
+func (s *shim) handleInterrupt() {
+	s.activeMu.Lock()
+	reply := s.loadActiveReply()
+	if reply == "" {
+		s.activeMu.Unlock()
+		return
+	}
+	trace := s.loadActiveTrace()
+	cancel := s.activeCancel
+	// Release the slot under the mutex so a concurrent prompt arriving
+	// between our publishChunk and publishTerminator below sees idle
+	// and can claim the slot for its own ack — the just-aborted stream
+	// is logically done the moment we decided to interrupt it.
+	s.activeReply.Store("")
+	s.activeTrace.Store("")
+	s.activeCancel = nil
+	s.activeMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if a, ok := s.cfg.Adapter.(Aborter); ok {
+		// Use a fresh ctx — the shim's lifetime ctx, not the cancelled
+		// per-turn one — so the adapter has time to deliver the stop
+		// signal (e.g. tmux send-keys) without being immediately
+		// cancelled by its own ctx.
+		_ = a.Abort(s.runCtx)
+	}
+	_ = s.publishChunk(reply, Chunk{Type: ChunkStatus, Data: "aborted"}, trace)
+	s.publishTerminator(reply)
+}
+
+// handleRedirect = interrupt + dispatch the new prompt. The body is a
+// redirectEnvelope ({"prompt":"...","reply":"..."}). If reply is empty
+// the shim mints a fresh _INBOX so the new turn has somewhere to stream.
+// Malformed bodies are logged and dropped (no caller to reply to).
+func (s *shim) handleRedirect(body []byte) {
+	var env redirectEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		log.Printf("shim: signal: redirect body parse: %v", err)
+		return
+	}
+	if env.Prompt == "" {
+		log.Printf("shim: signal: redirect body missing prompt")
+		return
+	}
+	s.handleInterrupt()
+	reply := env.ReplyTo
+	if reply == "" {
+		reply = nats.NewInbox()
+	}
+	// Redirects do not carry an inbound traceparent (the publish is
+	// fire-and-forget), so the new turn mints its own trace. Operators
+	// who care about correlation should set the traceparent header on
+	// the redirect publish before we add traceparent extraction here.
+	if e := s.dispatchPrompt(reply, env.Prompt, newTraceID()); e != nil {
+		// 503 (still busy somehow — race with another prompt that
+		// claimed the slot between our interrupt and dispatch) is the
+		// only structured error today; publish it on the synthesized
+		// reply subject so any subscriber still sees a terminator.
+		_ = s.publishErrorOnReply(reply, e, "")
+		s.publishTerminator(reply)
+	}
 }
 
 // watchdogTerminator force-emits a §6.5 terminator on `reply` if no
@@ -680,6 +855,10 @@ func (s *shim) finishStream(reply string) bool {
 	}
 	s.activeReply.Store("")
 	s.activeTrace.Store("")
+	if s.activeCancel != nil {
+		s.activeCancel()
+		s.activeCancel = nil
+	}
 	s.activeMu.Unlock()
 	s.publishTerminator(reply)
 	return true
@@ -735,6 +914,10 @@ func (s *shim) clearActive(reply string) {
 	if s.loadActiveReply() == reply {
 		s.activeReply.Store("")
 		s.activeTrace.Store("")
+		if s.activeCancel != nil {
+			s.activeCancel()
+			s.activeCancel = nil
+		}
 	}
 	s.activeMu.Unlock()
 }

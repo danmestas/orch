@@ -10,6 +10,7 @@
 //     NOTE (orch#94): the production marker-writer hooks were retired.
 //     This loop remains for the test suite and as the substrate for a
 //     future bus-native turn-end detector (follow-up).
+//
 //  3. Injects inbound prompts back into the pane via `tmux send-keys`.
 //
 // AfterAgent quirk. gemini-cli's turn-end event is named "AfterAgent",
@@ -494,5 +495,22 @@ func realSendKeys(pane, text string) error {
 	return nil
 }
 
-// Compile-time check that the Adapter satisfies shim.Adapter.
-var _ shim.Adapter = (*Adapter)(nil)
+// Abort delivers the orch.signal.interrupt verb (see docs/orch-signals.md)
+// to the bound tmux pane by sending Ctrl-C. The in-pane gemini-cli REPL
+// interprets that as "stop the current generation"; the next prompt is
+// unaffected (Close is the teardown path).
+//
+// No-op when Pane is empty (test harnesses occasionally construct the
+// adapter without a pane to exercise the marker loops).
+func (a *Adapter) Abort(_ context.Context) error {
+	if a.Pane == "" {
+		return nil
+	}
+	return exec.Command("tmux", "send-keys", "-t", a.Pane, "C-c").Run()
+}
+
+// Compile-time check that the Adapter satisfies shim.Adapter and shim.Aborter.
+var (
+	_ shim.Adapter = (*Adapter)(nil)
+	_ shim.Aborter = (*Adapter)(nil)
+)

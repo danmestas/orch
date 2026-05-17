@@ -674,5 +674,22 @@ func realCapturePane(pane string) (string, error) {
 	return string(out), nil
 }
 
-// Compile-time check that Adapter satisfies shim.Adapter.
-var _ shim.Adapter = (*Adapter)(nil)
+// Abort delivers the orch.signal.interrupt verb (see docs/orch-signals.md)
+// to the bound tmux pane by sending Ctrl-C. The in-pane codex REPL
+// interprets that as "stop the current generation"; the next prompt is
+// unaffected (Close is the teardown path).
+//
+// No-op when Pane is empty (test harnesses occasionally construct the
+// adapter without a pane to exercise the marker loops).
+func (a *Adapter) Abort(_ context.Context) error {
+	if a.Pane == "" {
+		return nil
+	}
+	return exec.Command("tmux", "send-keys", "-t", a.Pane, "C-c").Run()
+}
+
+// Compile-time check that Adapter satisfies shim.Adapter and shim.Aborter.
+var (
+	_ shim.Adapter = (*Adapter)(nil)
+	_ shim.Aborter = (*Adapter)(nil)
+)
