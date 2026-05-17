@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# orch-interrupt — send orch.signal.interrupt or orch.signal.redirect to a
+# pane's shim, the bus-native equivalent of Ctrl-C in an interactive REPL.
+#
+# Usage:
+#   orch-interrupt <pane_id|alias>                     # interrupt verb
+#   orch-interrupt <pane_id|alias> --redirect "<text>" # interrupt + redirect
+#
+# Resolution:
+#   1. Resolve alias → pane id (same ~/.config/orch-aliases file as orch-tell).
+#   2. Query $SRV.INFO.agents filtered by metadata.pane_id == <pane>.
+#   3. Derive orch.signal.<verb>.<token>.<owner>.<pane-enc> from the matched
+#      shim's prompt subject (agents.prompt.<token>.<owner>.<pane-enc>) —
+#      the verb-family subjects share the trailing 3-tuple with the prompt
+#      endpoint, per docs/orch-signals.md.
+#   4. nats pub on that subject. Empty body for interrupt; {"prompt":"...",
+#      "reply":"<inbox>"} for redirect. Fire-and-forget (no reply expected).
+#
+# Env overrides:
+#   ORCH_INTERRUPT_DISCOVERY_TIMEOUT (default 2s)  $SRV.INFO.agents reply-timeout
+#   NATS_URL                                       NATS server URL
+#
+# Exit codes:
+#   0  signal published
+#   1  bad usage / pane not registered on the bus / bus unreachable
+#   2  pane not found in alias file
+#   10 nats CLI missing
+#   11 jq CLI missing
+
+set -euo pipefail
+
+die() { printf 'orch-interrupt: %s\n' "$*" >&2; exit 1; }
+
+ALIAS_FILE="${HOME}/.config/orch-aliases"
+DISCOVERY_TIMEOUT="${ORCH_INTERRUPT_DISCOVERY_TIMEOUT:-2s}"
+REDIRECT=""
+PANE=""
+
+# --- arg parse ---
+while [ "$#" -gt 0 ]; do
+    case $1 in
+        --redirect)
+            [ -n "${2:-}" ] || die "--redirect requires a prompt text argument"
+            REDIRECT=$2
+            shift 2
+            ;;
+        --redirect=*)
+            REDIRECT=${1#--redirect=}
+            shift
+            ;;
+        -h|--help)
+            sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        --)
+            shift
+            PANE=${1:-}
+            shift || true
+            break
+            ;;
+        -*)
+            die "unknown flag: $1"
+            ;;
+        *)
+            [ -z "$PANE" ] && PANE=$1 || die "unexpected positional arg: $1"
+            shift
+            ;;
+    esac
+done
+
+[ -n "$PANE" ] || die "usage: orch-interrupt <pane_id|alias> [--redirect \"...\"]"
+
+# --- alias resolution ---
+case $PANE in
+    %*) : ;; # already a pane id
+    *)
+        [ -f "$ALIAS_FILE" ] || die "no alias file at $ALIAS_FILE; pass a pane id like %35"
+        resolved=$(awk -F= -v k="$PANE" '$1==k {print $2; exit}' "$ALIAS_FILE")
+        [ -n "$resolved" ] || { printf 'orch-interrupt: alias %q not found in %s\n' "$PANE" "$ALIAS_FILE" >&2; exit 2; }
+        PANE=$resolved
+        ;;
+esac
+
+# --- tooling presence ---
+command -v nats >/dev/null 2>&1 || exit 10
+command -v jq   >/dev/null 2>&1 || exit 11
+
+# --- discover the matched shim's prompt subject ---
+# shellcheck disable=SC2016  # $SRV.INFO.agents is a NATS system subject (literal $)
+raw=$(nats --server="${NATS_URL:-}" req '$SRV.INFO.agents' '' \
+          --replies=0 "--reply-timeout=${DISCOVERY_TIMEOUT}" 2>/dev/null \
+      | grep -v '^Received on\|^---\|^[[:space:]]*$' || true)
+
+[ -n "$raw" ] || die "no agents replied on the bus (NATS_URL=${NATS_URL:-default}); is sesh up + a shim running for $PANE?"
+
+prompt_subj=$(printf '%s\n' "$raw" \
+              | jq -r --arg p "$PANE" \
+                  'select(.metadata.pane_id == $p)
+                   | .endpoints[]
+                   | select(.name == "prompt")
+                   | .subject' 2>/dev/null \
+              | head -1)
+
+[ -n "$prompt_subj" ] || die "pane $PANE not registered on the bus (run orch-spawn first)"
+
+# Derive the signal subject. agents.prompt.<token>.<owner>.<pane-enc>
+# → orch.signal.<verb>.<token>.<owner>.<pane-enc>. The trailing 3-tuple
+# is identical so we slice the prefix and prepend.
+tail=${prompt_subj#agents.prompt.}
+[ "$tail" != "$prompt_subj" ] || die "matched subject %s doesn't follow agents.prompt.* convention" "$prompt_subj"
+
+if [ -n "$REDIRECT" ]; then
+    verb=redirect
+    # Mint an _INBOX so the new turn's chunks have somewhere to stream.
+    # The user can pipe this to `nats sub` separately if they care.
+    inbox=$(printf '_INBOX.orch-redirect.%s' "$(date +%s%N)$$")
+    body=$(jq -nc --arg p "$REDIRECT" --arg r "$inbox" '{prompt:$p, reply:$r}')
+else
+    verb=interrupt
+    body=""
+fi
+
+subject="orch.signal.${verb}.${tail}"
+
+nats --server="${NATS_URL:-}" pub "$subject" "$body" >/dev/null 2>&1 \
+    || die "publish failed on $subject"
+
+printf 'orch-interrupt: %s sent to %s on %s\n' "$verb" "$PANE" "$subject"
+if [ "$verb" = redirect ]; then
+    printf 'orch-interrupt: new turn streams to %s (subscribe to observe chunks)\n' "$inbox"
+fi

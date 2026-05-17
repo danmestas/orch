@@ -1121,6 +1121,150 @@ else
 fi
 
 # ============================================================
+# GROUP 17 — orch.signal.interrupt verb (issue #133)
+# ============================================================
+# Proves the shim subscribes to orch.signal.interrupt.<3-tuple> and,
+# on receipt, emits {"type":"status","data":"aborted"} + the §6.5
+# terminator on the active reply stream — much faster than the 30s
+# terminator-watchdog fallback. The bench's mock claude harness does
+# not emit response chunks of its own, so the captured stream is
+# exactly: ack → status:aborted → terminator (3 messages).
+
+log "=== Group 17: orch.signal.interrupt verb ==="
+if ! command -v orch-agent-shim >/dev/null 2>&1; then
+    skip "Group 17 — interrupt verb" "orch-agent-shim missing"
+else
+    sesh_full_reset
+    if sesh_up_in /tmp/g17-sig s1; then
+        PANE=$(spawn_worker_on_hub claude /tmp/g17-sig || true)
+        sleep 5  # shim registration
+
+        if [ -z "$PANE" ]; then
+            assert "Group 17 — interrupt verb" "passed" "skip-fallback: worker spawn failed"
+        else
+            PROMPT_SUBJ="agents.prompt.cc.${USER:-root}.pct${PANE#%}"
+            SIG_SUBJ="orch.signal.interrupt.cc.${USER:-root}.pct${PANE#%}"
+
+            # Time the round-trip: a successful interrupt should
+            # terminate the stream well under the shim's 30s watchdog.
+            T_START=$(date +%s)
+
+            # Background the prompt capture; fire the interrupt 1s in.
+            (
+                nats --server="$SESH_NATS_URL" req "$PROMPT_SUBJ" "hi-g17" \
+                    --replies=0 --reply-timeout=10s --timeout=15s \
+                    > "/tmp/g17.cap" 2>&1 || true
+            ) &
+            CAP_PID=$!
+            sleep 1
+            nats --server="$SESH_NATS_URL" pub "$SIG_SUBJ" "" >/dev/null 2>&1 || true
+
+            # Wait for the capture to finish (interrupt should close it
+            # well before the 15s outer timeout).
+            wait $CAP_PID 2>/dev/null || true
+            T_END=$(date +%s)
+            ELAPSED=$((T_END - T_START))
+
+            # G17.1 — status:aborted chunk landed on the reply stream
+            ABORTED_COUNT=$(grep -c '"type":"status","data":"aborted"' /tmp/g17.cap || echo 0)
+            assert "G17.1: status:aborted chunk emitted on interrupt" "1" "$ABORTED_COUNT"
+
+            # G17.2 — interrupt cut termination time well below the 30s
+            # watchdog floor. 12s leaves headroom for slow CI runners.
+            if [ "$ELAPSED" -lt 12 ]; then
+                assert "G17.2: stream terminated within 12s of interrupt (≤ watchdog)" "yes" "yes"
+            else
+                assert "G17.2: stream terminated within 12s of interrupt" "<12s" "${ELAPSED}s"
+            fi
+
+            # G17.3 — ack still came first (§6.4 invariant unchanged by
+            # the interrupt path); the capture contains both ack + aborted.
+            ACK_COUNT=$(grep -c '"type":"status","data":"ack"' /tmp/g17.cap || echo 0)
+            assert "G17.3: ack chunk preserved on interrupted stream" "1" "$ACK_COUNT"
+
+            tmux kill-pane -t "$PANE" 2>/dev/null || true
+        fi
+        sesh_down_in /tmp/g17-sig s1
+    else
+        assert "Group 17 — interrupt verb" "passed" "skip-fallback: sesh up failed"
+    fi
+fi
+
+# ============================================================
+# GROUP 18 — orch.signal.redirect verb (issue #133)
+# ============================================================
+# Proves the shim accepts orch.signal.redirect.<3-tuple> with body
+# {"prompt":"...","reply":"<inbox>"} and:
+#   - aborts the in-flight turn on the original reply (status:aborted
+#     + §6.5 terminator)
+#   - dispatches the new prompt onto the supplied inbox, where the
+#     mock harness's ack chunk lands as the first message.
+
+log "=== Group 18: orch.signal.redirect verb ==="
+if ! command -v orch-agent-shim >/dev/null 2>&1; then
+    skip "Group 18 — redirect verb" "orch-agent-shim missing"
+else
+    sesh_full_reset
+    if sesh_up_in /tmp/g18-sig s1; then
+        PANE=$(spawn_worker_on_hub claude /tmp/g18-sig || true)
+        sleep 5  # shim registration
+
+        if [ -z "$PANE" ]; then
+            assert "Group 18 — redirect verb" "passed" "skip-fallback: worker spawn failed"
+        else
+            PROMPT_SUBJ="agents.prompt.cc.${USER:-root}.pct${PANE#%}"
+            SIG_SUBJ="orch.signal.redirect.cc.${USER:-root}.pct${PANE#%}"
+            NEW_REPLY="_INBOX.g18.$$.$(date +%s%N)"
+
+            # Subscribe to the redirected-turn reply subject BEFORE
+            # publishing the redirect, so the ack chunk for the new
+            # turn isn't missed.
+            ( timeout 12 nats --server="$SESH_NATS_URL" sub "$NEW_REPLY" \
+                --count=2 > "/tmp/g18-new.cap" 2>&1 || true ) &
+            NEW_SUB_PID=$!
+            sleep 1  # let the subscription register
+
+            # Original turn capture
+            (
+                nats --server="$SESH_NATS_URL" req "$PROMPT_SUBJ" "hi-g18-orig" \
+                    --replies=0 --reply-timeout=10s --timeout=15s \
+                    > "/tmp/g18-orig.cap" 2>&1 || true
+            ) &
+            ORIG_CAP_PID=$!
+            sleep 1
+
+            # Fire the redirect. jq builds the body so quoting is safe.
+            BODY=$(jq -nc --arg p "redirected-prompt-g18" --arg r "$NEW_REPLY" \
+                '{prompt:$p, reply:$r}')
+            nats --server="$SESH_NATS_URL" pub "$SIG_SUBJ" "$BODY" >/dev/null 2>&1 || true
+
+            wait $ORIG_CAP_PID 2>/dev/null || true
+            wait $NEW_SUB_PID 2>/dev/null || true
+
+            # G18.1 — original stream got status:aborted
+            ORIG_ABORTED=$(grep -c '"type":"status","data":"aborted"' /tmp/g18-orig.cap || echo 0)
+            assert "G18.1: original stream emitted status:aborted on redirect" "1" "$ORIG_ABORTED"
+
+            # G18.2 — new inbox received an ack chunk (start of the
+            # redirected turn — proves the shim dispatched the new
+            # prompt onto the operator-supplied reply subject)
+            NEW_ACK=$(grep -c '"type":"status","data":"ack"' /tmp/g18-new.cap || echo 0)
+            assert "G18.2: redirected reply subject received ack chunk" "1" "$NEW_ACK"
+
+            # G18.3 — original capture does NOT contain the redirected
+            # prompt's ack (it landed on the new inbox, not the old reply)
+            ORIG_NEW_ACK=$(grep -c 'redirected-prompt' /tmp/g18-orig.cap || echo 0)
+            assert "G18.3: redirected prompt did NOT leak onto original reply" "0" "$ORIG_NEW_ACK"
+
+            tmux kill-pane -t "$PANE" 2>/dev/null || true
+        fi
+        sesh_down_in /tmp/g18-sig s1
+    else
+        assert "Group 18 — redirect verb" "passed" "skip-fallback: sesh up failed"
+    fi
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo
