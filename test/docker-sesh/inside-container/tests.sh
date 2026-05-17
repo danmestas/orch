@@ -67,6 +67,11 @@ sesh_up_in() {
     SESH_LEAF_URL=$(jq -r '.leaf_url // ""' "$SESSION_JSON" 2>/dev/null || echo "")
     SESH_FOSSIL_URL=$(jq -r '.fossil_url // ""' "$SESSION_JSON" 2>/dev/null || echo "")
     SESH_PID_VAL=$(jq -r '.pid // ""' "$SESSION_JSON" 2>/dev/null || echo "")
+    # nats_ws_url added in sesh#60 — the WebSocket NATS endpoint that
+    # CF Worker / browser clients (and the bench's Group 8) use to
+    # join the same hub as TCP NATS clients. Empty when the WS listener
+    # is disabled (--disable-ws on sesh up).
+    SESH_NATS_WS_URL=$(jq -r '.nats_ws_url // ""' "$SESSION_JSON" 2>/dev/null || echo "")
     return 0
 }
 
@@ -519,33 +524,98 @@ else
 fi
 
 # ============================================================
-# GROUP 8 — Mixed-executor broadcast (tmux + wasm/cf-worker)
+# GROUP 8 — Mixed-executor broadcast: TCP tmux + WS subscriber
 # ============================================================
-# Operators should be able to address tmux-spawned workers AND
-# wasm/cf-worker-spawned workers uniformly via the same Synadia
-# primitives — one broadcast publish, all workers receive.
+# Verifies the sesh hub bridges TCP and WS NATS clients transparently
+# (sesh#60 added the WebSocket listener and exposed nats_ws_url on
+# session JSON). A WS subscriber MUST receive a message published
+# from a TCP client against the same hub — this is the wire-level
+# proof that CF Worker / Durable Object executors can join the same
+# bus mesh as tmux-spawned workers.
 #
-# Status of upstream gaps:
-#
-#   ✓ orch#110 / merged #112 — phase 5 cf-durable-object executor
-#     (persistent open-agent bridge via Durable Object). Cf-side
-#     persistence gap is closed.
-#
-#   ✗ sesh#59 — Expose WebSocket NATS endpoint on hub leaf.
-#     CF Workers can't open TCP sockets; need ws:// transport via
-#     @nats-io/transport-websockets. Sesh's embedded NATS server
-#     doesn't expose a WS port today. Without it, the cf-DO can't
-#     join the sesh hub mesh. Workaround would be a sidecar nats-server
-#     with `websocket { port: 8080, no_tls: true }`, but that doesn't
-#     validate the actual sesh hub topology — pure workaround. Per
-#     futility-handoff stance, holding for sesh#59 to land upstream.
-#
-# When sesh#59 closes: drop the SKIP, install miniflare + the DO,
-# spawn 2 tmux workers + 1 cf-DO against the same sesh leaf, assert
-# all 3 in $SRV.INFO.agents, broadcast pub, assert all 3 received,
-# assert heartbeats from all 3 on agents.hb.>.
-log "=== Group 8: Mixed-executor broadcast (tmux + wasm/cf-worker) ==="
-skip "Group 8 — mixed-executor broadcast" "deferred — sesh#59 (WS NATS on hub) blocks; orch#110 closed by #112. SKIP slot flips to real test when sesh#59 lands."
+# This bench tests the BRIDGE only. The actual cf-worker executor
+# (executors/wasm/cf-worker/) and cf-durable-object are validated
+# in their own suites — bringing miniflare into this Docker image
+# would push build time past the bench's budget for marginal extra
+# coverage over what nats CLI -> sesh -> nats CLI already proves.
+log "=== Group 8: TCP↔WS bridge (sesh hub spans both transports) ==="
+sesh_full_reset
+if sesh_up_in /tmp/g8-bridge s1; then
+    if [ -z "${SESH_NATS_WS_URL:-}" ]; then
+        skip "Group 8 — TCP↔WS bridge" \
+            "session JSON has no nats_ws_url (sesh built without sesh#60? --disable-ws set?)"
+    else
+        log "  G8: TCP url=$SESH_NATS_URL ws url=$SESH_NATS_WS_URL"
+
+        # Spawn a tmux worker on the TCP side so the test proves that
+        # mixed transports COEXIST — not just that WS alone works.
+        PANE=$(spawn_worker_on_hub claude /tmp/g8-bridge || true)
+        sleep 5
+
+        if [ -z "$PANE" ]; then
+            skip "Group 8 — TCP↔WS bridge" "tmux worker spawn failed"
+        else
+            # WS subscriber waits for ONE message on broadcast.g8, then
+            # exits. Timeout = 10s to bound the wait if the bridge breaks.
+            timeout 10 nats --server="$SESH_NATS_WS_URL" sub broadcast.g8 \
+                --count=1 > /tmp/g8-ws.cap 2>&1 &
+            WS_PID=$!
+            sleep 2  # let the WS sub establish its subscription
+
+            # TCP publish: same hub, different transport. Sesh's embedded
+            # NATS server bridges them.
+            nats --server="$SESH_NATS_URL" pub broadcast.g8 "mixed-executor-hello" \
+                >/dev/null 2>&1
+            wait $WS_PID 2>/dev/null || true
+
+            if grep -q "mixed-executor-hello" /tmp/g8-ws.cap 2>/dev/null; then
+                assert "WS subscriber receives TCP-published broadcast" "yes" "yes"
+            else
+                log "  g8 ws capture:"
+                head -15 /tmp/g8-ws.cap | sed 's/^/    /'
+                assert "WS subscriber receives TCP-published broadcast" "yes" "no"
+            fi
+
+            # Reverse direction: WS publish reaches TCP subscriber.
+            # Proves the bridge is bidirectional.
+            timeout 10 nats --server="$SESH_NATS_URL" sub broadcast.g8.reverse \
+                --count=1 > /tmp/g8-tcp.cap 2>&1 &
+            TCP_PID=$!
+            sleep 2
+
+            nats --server="$SESH_NATS_WS_URL" pub broadcast.g8.reverse "ws-pub-hello" \
+                >/dev/null 2>&1
+            wait $TCP_PID 2>/dev/null || true
+
+            if grep -q "ws-pub-hello" /tmp/g8-tcp.cap 2>/dev/null; then
+                assert "TCP subscriber receives WS-published broadcast" "yes" "yes"
+            else
+                log "  g8 tcp capture:"
+                head -15 /tmp/g8-tcp.cap | sed 's/^/    /'
+                assert "TCP subscriber receives WS-published broadcast" "yes" "no"
+            fi
+
+            # Coexistence: with the WS path live, the tmux worker's
+            # Synadia service discovery still works on TCP. (Regression
+            # check: a hub that breaks TCP when WS turns on would be a
+            # silent disaster.)
+            n_reg=$(nats --server="$SESH_NATS_URL" req '$SRV.INFO.agents' '' \
+                --replies=0 --timeout=5s 2>/dev/null | grep -c '"name":"agents"' || echo 0)
+            assert "tmux worker still discoverable on TCP while WS is active" "1" "$n_reg"
+
+            # Same discovery via WS — proves CF Worker / browser clients
+            # can find tmux-spawned workers through the bridge.
+            n_reg_ws=$(nats --server="$SESH_NATS_WS_URL" req '$SRV.INFO.agents' '' \
+                --replies=0 --timeout=5s 2>/dev/null | grep -c '"name":"agents"' || echo 0)
+            assert "tmux worker discoverable from WS side too" "1" "$n_reg_ws"
+
+            tmux kill-pane -t "$PANE" 2>/dev/null || true
+        fi
+    fi
+    sesh_down_in /tmp/g8-bridge s1
+else
+    skip "Group 8 — TCP↔WS bridge" "sesh up failed"
+fi
 
 # ============================================================
 # GROUP 9 — Task CAS pull protocol
