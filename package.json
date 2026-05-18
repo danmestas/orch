@@ -54,6 +54,9 @@
     "LICENSE",
     "README.md"
   ],
+  "dependencies": {
+    "@agent-ops/synadia-agent-shim": "^1.0.0"
+  },
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
     "preuninstall": "node scripts/preuninstall.js"
