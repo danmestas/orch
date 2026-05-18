@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orch.io/schemas/spawn-spec.v1.json",
+  "$ref": "#/$defs/SpawnSpec",
+  "$defs": {
+    "Agent": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "codex",
+        "pi",
+        "gemini",
+        "echo"
+      ]
+    },
+    "CFDurableBlock": {
+      "properties": {
+        "do_namespace": {
+          "type": "string"
+        },
+        "do_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "do_namespace",
+        "do_id"
+      ]
+    },
+    "CFWorkerBlock": {
+      "properties": {
+        "script": {
+          "type": "string"
+        },
+        "wrangler_env": {
+          "type": "string"
+        },
+        "abort_endpoint": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "script"
+      ]
+    },
+    "OutfitBlock": {
+      "properties": {
+        "bundle": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "cut": {
+          "type": "string"
+        },
+        "accessories": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "SpawnSpec": {
+      "properties": {
+        "spec_version": {
+          "type": "string",
+          "enum": [
+            "v1"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "agent": {
+          "$ref": "#/$defs/Agent"
+        },
+        "session": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "outfit": {
+          "$ref": "#/$defs/OutfitBlock"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "tmux": {
+          "$ref": "#/$defs/TmuxBlock"
+        },
+        "cf-worker": {
+          "$ref": "#/$defs/CFWorkerBlock"
+        },
+        "cf-durable-object": {
+          "$ref": "#/$defs/CFDurableBlock"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "agent"
+      ]
+    },
+    "TmuxBlock": {
+      "properties": {
+        "headless": {
+          "type": "boolean"
+        },
+        "verify": {
+          "type": "boolean"
+        },
+        "layout": {
+          "type": "string"
+        },
+        "position": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "no_shim": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    }
+  },
+  "title": "SpawnSpec v1"
+}

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# orch-workflow — Phase A entrypoint for Proposal 0007's workflow YAML.
+#
+# This script is a thin shim that lazy-builds the Go binary in
+# cmd/orch-workflow on first run (or when the source has changed) and
+# execs it. The same pattern bin/orch-up uses to lazy-build extension
+# daemons; keeping the binary under cmd/ (rather than vendoring a
+# prebuilt) means operators always run against the source they have
+# checked out.
+#
+# Subcommands: validate, compile (Phase A); apply/status/cancel are
+# stubbed in the Go binary and return exit 3 with a "Phase B" message.
+set -euo pipefail
+
+# Locate the package root. Walk up from this script's location until we
+# find a go.mod file — same trick orch-up uses to find PKG_ROOT.
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+pkg_root="$script_dir"
+while [ ! -f "$pkg_root/go.mod" ]; do
+    parent=$(dirname "$pkg_root")
+    if [ "$parent" = "$pkg_root" ]; then
+        echo "orch-workflow: cannot find go.mod above $script_dir" >&2
+        exit 1
+    fi
+    pkg_root="$parent"
+done
+
+src_dir="$pkg_root/cmd/orch-workflow"
+build_dir="$pkg_root/.bin"
+built="$build_dir/orch-workflow"
+
+needs_build=0
+if [ ! -x "$built" ]; then
+    needs_build=1
+else
+    # Rebuild if any .go file under cmd/orch-workflow or internal/workflow
+    # is newer than the cached binary.
+    if find "$src_dir" "$pkg_root/internal/workflow" -name '*.go' -newer "$built" -print -quit 2>/dev/null | grep -q .; then
+        needs_build=1
+    fi
+fi
+
+if [ "$needs_build" -eq 1 ]; then
+    if ! command -v go >/dev/null 2>&1; then
+        echo "orch-workflow: 'go' not on PATH; cannot build $src_dir" >&2
+        exit 1
+    fi
+    mkdir -p "$build_dir"
+    (cd "$pkg_root" && go build -o "$built" ./cmd/orch-workflow) \
+        || { echo "orch-workflow: build failed" >&2; exit 1; }
+fi
+
+exec "$built" "$@"
