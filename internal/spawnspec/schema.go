@@ -25,6 +25,22 @@ func HandleSchema() ([]byte, error) {
 	return marshalSchema((*WorkerHandle)(nil), "https://orch.io/schemas/worker-handle.v1.json", "WorkerHandle v1")
 }
 
+// JSONSchema teaches invopop/jsonschema to emit the closed enum on the
+// `agent:` field so non-Go consumers catch unknown values at PARSE
+// (proposal 0002 Ousterhout adjustment: define errors out of existence).
+// Without this hook the reflector would emit {"type": "string"} only,
+// defeating the published-schema contract.
+func (Agent) JSONSchema() *jsonschema.Schema {
+	enum := make([]any, 0, len(KnownAgents()))
+	for _, a := range KnownAgents() {
+		enum = append(enum, string(a))
+	}
+	return &jsonschema.Schema{
+		Type: "string",
+		Enum: enum,
+	}
+}
+
 func marshalSchema(zeroValue any, id, title string) ([]byte, error) {
 	r := &jsonschema.Reflector{
 		// Surface every nested type as a $defs entry — friendlier for

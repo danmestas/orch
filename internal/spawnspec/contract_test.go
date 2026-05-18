@@ -59,6 +59,40 @@ func TestContract_SchemaContainsAllPublicTypes(t *testing.T) {
 	}
 }
 
+// The published schema must enum-lock the `agent:` field so non-Go
+// consumers (TS UI, Python validators) catch unknown agents at PARSE
+// (proposal 0002 Ousterhout adjustment). Regression guard.
+func TestContract_SchemaAgentFieldIsEnumLocked(t *testing.T) {
+	data, err := spawnspec.SpecSchema()
+	if err != nil {
+		t.Fatalf("SpecSchema: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("schema is not valid JSON: %v", err)
+	}
+	defs, _ := parsed["$defs"].(map[string]any)
+	agentDef, ok := defs["Agent"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema $defs missing Agent type")
+	}
+	enum, ok := agentDef["enum"].([]any)
+	if !ok || len(enum) == 0 {
+		t.Fatalf("Agent $defs entry missing enum (got %v)", agentDef)
+	}
+	got := make(map[string]bool, len(enum))
+	for _, v := range enum {
+		if s, ok := v.(string); ok {
+			got[s] = true
+		}
+	}
+	for _, want := range spawnspec.KnownAgents() {
+		if !got[string(want)] {
+			t.Errorf("schema enum missing %q (have: %v)", want, enum)
+		}
+	}
+}
+
 func keysOf(m map[string]any) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

@@ -3,6 +3,16 @@
   "$id": "https://orch.io/schemas/spawn-spec.v1.json",
   "$ref": "#/$defs/SpawnSpec",
   "$defs": {
+    "Agent": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "codex",
+        "pi",
+        "gemini",
+        "echo"
+      ]
+    },
     "CFDurableBlock": {
       "properties": {
         "do_namespace": {
@@ -73,7 +83,7 @@
           "type": "string"
         },
         "agent": {
-          "type": "string"
+          "$ref": "#/$defs/Agent"
         },
         "session": {
           "type": "string"
