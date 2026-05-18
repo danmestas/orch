@@ -38,3 +38,6 @@ test/wire-compat/bun.lockb
 
 # Extension binaries built lazily by orch-up
 extensions/*/.bin/
+
+# Lazy-built CLI binaries (bin/orch-workflow → cmd/orch-workflow)
+/.bin/
