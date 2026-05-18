@@ -139,7 +139,7 @@ done
 emit_worker() {
     local meta="\$1"
     # Project the metadata into a Worker JSON the bins consume.
-    jq -c --argjson m "\$meta" '
+    jq -nc --argjson m "\$meta" '
         {
             pane_id: \$m.pane_id,
             instance_id: "stub-inst",
@@ -157,7 +157,7 @@ emit_worker() {
                 hb:     ""
             },
             metadata: \$m
-        }' < /dev/null
+        }'
 }
 
 case "\$sub" in
