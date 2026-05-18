@@ -176,6 +176,27 @@ When `lead-engineer` pulls the `implement` task, the puller (or orch-side resolv
 
 **Idempotency**: task ids are derived from `workflow.id + node.id` (e.g., `build-feature.implement`). Re-running compile against the same scope doesn't duplicate tasks; it diff-applies (`sesh-ops task get <id>` → update only if changed).
 
+## Compile-time DAG validation (Ousterhout-review adjustment 2026-05-18)
+
+The compiler MUST reject invalid workflows at compile time, not runtime. Make invalid states unrepresentable at the point of submission.
+
+Rejected at compile:
+
+1. **Cycles**: `A.depends_on=B; B.depends_on=A` → "cyclic dependency: A → B → A"
+2. **Dangling node references**: `$nodeId.output` for an undeclared id → "unknown node reference: $foo.output"
+3. **Discriminator violations**: a node with both `prompt:` AND `bash:` → "node X has multiple kind discriminators"
+4. **Unreachable nodes**: depends_on chain broken or behind always-false `when:` → "node X is unreachable"
+5. **Required-field violations**: missing `id:`, missing kind discriminator → "node X missing id"
+6. **Assign without target**: `assign: foo` where `foo` is neither a declared `spawn:` node nor a worker in the targeted topology → "assign references unknown worker: foo"
+7. **Variable substitution type mismatches**: `$nodeId.output.json.path` on a node whose result is known-non-JSON → warning (not error)
+
+Validation runs:
+- Implicitly during `orch workflow apply` (compile rejects → exit non-zero, nothing seeded)
+- Explicitly via `orch workflow validate <yaml>` (CI-friendly; exit code conveys validity)
+- Diagnostic via `orch workflow compile --print <yaml>` (shows flattened DAG without applying)
+
+`orch workflow validate` IS the interface-contract test for this proposal.
+
 ## CLI
 
 ```sh
@@ -270,7 +291,12 @@ For operators who want literal Archon — they can still use Archon directly. or
 
 ## Decisions deferred to design phase
 
-1. **Variable substitution location** — resolve at compile time (substitute literal values into task description) vs pull time (puller resolves dynamically). Lean: pull time — supports cross-task data flow without re-compiling.
+1. ~~**Variable substitution location**~~ → **Mixed-time** (Dan: 2026-05-18, "pick the cleanest way"). Different ref types resolve at different phases — each at the phase where its data is actually available:
+
+   - **Compile-time** (substituted into task `description` as literals before seeding KV): env vars (`$ENV.NATS_URL`), workflow-static refs (`$WORKFLOW.scope_id`, `$WORKFLOW.name`), constants
+   - **Pull-time** (resolved by puller against sesh KV when task is claimed): cross-task data flow (`$nodeId.output`, `$nodeId.output.json.path`)
+
+   Static refs are knowable at compile and don't need runtime indirection; cross-task refs MUST be pull-time because the upstream task hasn't run yet at compile. Same pattern as GitHub Actions / GitLab CI (mixed-time substitution by ref type).
 2. **`approval:` node UX** — how does orch surface an interactive approval to the operator? Telegram? Slack? CLI prompt? Lean: CLI prompt v1, integrations later.
 3. **Failure semantics for `spawn:` nodes** — if spawn fails, does the workflow abort or retry? Lean: respect sesh's `max_attempts` task field — spawn failures retry until exhaustion, then the task is marked failed and the workflow stops at that branch.
 4. **Loop iteration storage** — each loop iteration's output stored as `<node>.iter[N].output`? Or just `<node>.output` for the final iteration? Lean: final only (matches Archon).

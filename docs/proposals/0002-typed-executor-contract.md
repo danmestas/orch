@@ -83,7 +83,11 @@ name: lead-engineer
 description: "Backend engineer for shim PRs"
 
 # Identity
-agent: claude-code                # which harness CLI to launch
+# `agent:` is enum-locked in JSON Schema (Ousterhout: define errors out
+# of existence). Accepted values are the set of registered adapter names
+# in the shim. Unknown agents fail at parse, not at runtime. Add a new
+# adapter → extend the enum.
+agent: claude-code                # enum: claude-code | codex | pi | gemini | echo
 session: lead-engineer            # 5th subject token; mapped to SESH_SESSION
 cwd: /Users/dmestas/projects/orch
 
@@ -293,7 +297,7 @@ Backends are discovered by name from `$ORCH_EXECUTORS_DIR` (default `~/.local/sh
 
 **Still open:**
 
-1. **Schema validation library**: Archon uses Zod (TS) — orch's spawn-spec validator would be Go. Options: JSON-Schema, OpenAPI, raw Go structs, CUE. Lean: raw Go structs with `kong` tags (matches sesh-ops's convention) + a YAML parser; reassess if cross-language consumers appear.
+1. ~~**Schema validation library**~~ → **Industry standard: Go structs (canonical) + JSON Schema (published)** (Dan: 2026-05-18). Pattern adopted by Kubernetes, Argo Workflows, Tekton. Go structs with `yaml:` tags are the source of truth; JSON Schema is generated from them and published at `dist/schema/spawn-spec.v1.json` per release for cross-language consumers (TS/UI/Python). YAML parsing via `gopkg.in/yaml.v3`. Validation: struct-tag-driven (`go-playground/validator`) for field-level + custom validators for the executor-discriminator XOR rule. JSON Schema generation via `invopop/jsonschema`.
 2. **WorkerHandle persistence**: should `~/.cache/orch-spawn/<name>.handle.yaml` be the canonical worker registry, supplanting today's scattered state? Lean: yes; ties into Proposal 0005.
 3. **Executor name discoverability**: today's discriminator (`tmux:` / `cf-worker:` / `cf-durable-object:`) is hardcoded in the dispatcher. Should new executors register via plugin metadata, or stay enum-locked? Lean: enum-locked for v1, plugin in v2 (Proposal 0003's territory).
 4. **Async / streaming for long-spawning executors** (e.g. CF Worker provisioning takes 30s): dispatcher returns WorkerHandle with `status: pending`, then operator polls `orch-spawn --status <handle>` until `ready` or `failed`. Same shape as Archon's loop+until pattern for AI nodes — recognizable convention.

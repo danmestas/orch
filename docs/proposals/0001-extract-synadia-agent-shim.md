@@ -118,6 +118,18 @@ type Config struct {
     TaskID      string
     Interval    time.Duration
     Adapter     Adapter
+
+    // SubjectPrefix: root subject for agent endpoints. Default "agents".
+    // Pull naming convention OUT of the implementation and INTO the
+    // interface (Ousterhout: information leakage). Orch keeps the default;
+    // non-orch consumers (e.g., a future dagnats-agent) override to live
+    // in their own namespace.
+    SubjectPrefix string
+
+    // SignalPrefix: root subject for orch.signal.> handlers (orch#133's
+    // interrupt/redirect verbs). Default "orch.signal". Override (or leave
+    // empty to disable signal handling) for non-orch consumers.
+    SignalPrefix string
 }
 
 func Run(ctx context.Context, cfg Config) error
@@ -208,7 +220,7 @@ The `Adapter` and `Config` shapes are frozen at v1. Adding fields requires adapt
 
 1. **Adapter discovery**: should adapters be in-tree (`adapter/{claudecode,...}/`) or pluggable (Go plugin or out-of-tree imports)? Lean: in-tree for v1 (5 known adapters); reassess if community contributions appear.
 2. **Adapter naming**: `claude-code` vs `claude` vs `cc`? Current shim uses all three at different layers. Worth standardizing during extraction.
-3. **Binary distribution**: GitHub Releases only, or also Homebrew / apt / Nix? Lean: GitHub Releases + Homebrew tap; defer others.
+3. ~~**Binary distribution**~~ → **npm** (Dan: 2026-05-18). Same channel as orch today (`@agent-ops/synadia-agent-shim`). npm postinstall fetches/builds the binary for the host platform. One install pattern across the ecosystem; no Homebrew/apt/Nix fragmentation.
 4. **Version skew tolerance**: how does the shim handle an orch CLI that requests adapter features the shim doesn't support? Define explicit handshake (e.g., shim advertises supported adapter list in `--help-json`).
 5. **Where does orch-signal.> spec live?** Currently orch-defined extension. After extraction the shim implements it; orch documents it. Consider publishing the orch.signal.> verb catalog in shim repo OR orch repo. Lean: shim implements, orch defines (subject-namespace ownership = orch's).
 
