@@ -22,6 +22,16 @@
         "target"
       ]
     },
+    "Agent": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "codex",
+        "pi",
+        "gemini",
+        "echo"
+      ]
+    },
     "BusBlock": {
       "properties": {
         "prompt": {
@@ -52,7 +62,7 @@
           "type": "string"
         },
         "agent": {
-          "type": "string"
+          "$ref": "#/$defs/Agent"
         },
         "session": {
           "type": "string"
