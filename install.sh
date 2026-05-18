@@ -54,17 +54,21 @@ mkdir -p "$HOME/.cache"
 cp "$ROOT/fleet-prompt.md" "$HOME/.cache/orch-fleet-prompt.md"
 echo "fleet doctrine cached at ~/.cache/orch-fleet-prompt.md"
 
-# orch-agent-shim + orch-registry — Go binaries; only built if `go` is on
-# PATH. The shim is invoked from orch-spawn under --with-shim; orch-registry
-# is required by orch-peek / orch-tell / orch-ask / orch-spy (proposal 0005
-# moved their target-resolution path through the registry). Both build
-# straight into ~/.local/bin so they're discoverable without symlinks.
+# orch-agent-shim is no longer built from this repo — the shim moved to
+# github.com/danmestas/synadia-agent-shim (per orch#140 / proposal 0001)
+# and is distributed as a binary via the @agent-ops/synadia-agent-shim
+# npm package. After `npm install -g @agent-ops/orch` the shim's
+# postinstall fetches the platform binary; both `synadia-agent-shim` and
+# `orch-agent-shim` (alias) land on PATH from node_modules/.bin.
+#
+# orch-registry — Go binary, only built if `go` is on PATH. Required by
+# orch-peek / orch-tell / orch-ask / orch-spy (proposal 0005). Builds
+# straight into ~/.local/bin so it's discoverable without symlinks. It
+# now imports github.com/danmestas/synadia-agent-shim/shim for the
+# shared ReadNATSURL helper.
 if command -v go >/dev/null 2>&1; then
     BINDIR="$HOME/.local/bin"
     mkdir -p "$BINDIR"
-    ( cd "$ROOT" && go build -o "$BINDIR/orch-agent-shim" ./cmd/orch-agent-shim ) \
-        && echo "built $BINDIR/orch-agent-shim" \
-        || echo "warn: orch-agent-shim build failed — --with-shim will be a no-op until fixed (the go.mod 'go' directive is the authoritative floor)"
     ( cd "$ROOT" && go build -o "$BINDIR/orch-registry" ./cmd/orch-registry ) \
         && echo "built $BINDIR/orch-registry" \
         || echo "warn: orch-registry build failed — orch-peek/tell/ask/spy will exit 1 until the binary is on PATH"
@@ -73,7 +77,7 @@ else
     # the dependency graph (currently 1.25, driven by nats-server v2.14).
     # Bumps automatically as `go mod tidy` runs after upstream upgrades —
     # check `head -3 go.mod` for the current authoritative floor.
-    echo "skip: go not on PATH — orch-agent-shim / orch-registry not built (install Go to enable bench + registry-backed bins)"
+    echo "skip: go not on PATH — orch-registry not built (install Go to enable registry-backed bins)"
 fi
 
 # Inject fleet doctrine idempotently into agents that don't have a CLI flag for

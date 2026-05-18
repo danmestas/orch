@@ -5,20 +5,11 @@
 # the working tree first and copies the tarball in, so the image tests the
 # code on your current branch (not the npm registry version).
 #
-# Multi-stage: Stage 1 compiles orch-agent-shim (Go binary) used by T9/T10/T11.
-# === Stage 1: build orch-agent-shim =======================================
-FROM golang:1.26-bookworm AS shimbuilder
-
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY orch-src.tar /tmp/orch-src.tar
-RUN mkdir -p /src/orch /out
-WORKDIR /src/orch
-RUN tar -xf /tmp/orch-src.tar
-RUN go build -o /out/orch-agent-shim ./cmd/orch-agent-shim
-
-# === Stage 2: runtime image ===============================================
+# Since orch#140 the orch-agent-shim binary ships via the
+# @agent-ops/synadia-agent-shim npm package (declared as an orch dep);
+# its postinstall fetches the platform binary into node_modules/.bin so
+# `orch-agent-shim` (alias) is on PATH after `npm install -g orch-pack`.
+# No multi-stage Go build needed.
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -63,8 +54,10 @@ RUN npm install -g @agent-ops/suit
 COPY orch-pack.tgz /tmp/orch-pack.tgz
 RUN npm install -g /tmp/orch-pack.tgz
 
-# --- orch-agent-shim binary (for T9/T10/T11 Synadia contract tests) --------
-COPY --from=shimbuilder /out/orch-agent-shim /usr/local/bin/orch-agent-shim
+# orch-agent-shim binary is installed transitively via the orch tarball's
+# @agent-ops/synadia-agent-shim dependency (postinstall fetches it from
+# the GH release). No COPY needed; `npm install -g /tmp/orch-pack.tgz`
+# below brings it onto PATH for T9/T10/T11 Synadia contract tests.
 
 # --- Mock agents on PATH ---------------------------------------------------
 COPY inside-container/mock-agents/ /usr/local/bin/mock-agents/

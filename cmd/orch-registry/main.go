@@ -38,7 +38,7 @@ import (
 
 	"github.com/danmestas/orch/internal/registry"
 	"github.com/danmestas/orch/internal/registry/sources"
-	"github.com/danmestas/orch/internal/shim"
+	"github.com/danmestas/synadia-agent-shim/shim"
 )
 
 func main() {

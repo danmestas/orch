@@ -49,9 +49,17 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 
-# Build the shim binary.
-cd "$ROOT"
-go build -o "$TMPDIR_OWN/orch-agent-shim" ./cmd/orch-agent-shim
+# Resolve the shim binary. Since orch#140 the shim lives in
+# github.com/danmestas/synadia-agent-shim and ships via the
+# @agent-ops/synadia-agent-shim npm package. We expect either
+# orch-agent-shim (the back-compat alias wrapper) or synadia-agent-shim
+# to be on PATH after `npm install -g @agent-ops/synadia-agent-shim`.
+SHIM_BIN=$(command -v orch-agent-shim || command -v synadia-agent-shim || true)
+if [ -z "$SHIM_BIN" ]; then
+    echo "SKIP: neither orch-agent-shim nor synadia-agent-shim on PATH (npm install -g @agent-ops/synadia-agent-shim)"
+    exit 77
+fi
+ln -sf "$SHIM_BIN" "$TMPDIR_OWN/orch-agent-shim"
 
 # Launch the shim against a fake pane. The claude-code adapter will
 # attempt to MkdirAll on the marker dirs and tmux-display-message; the
