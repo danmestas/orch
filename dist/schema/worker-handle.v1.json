@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orch.io/schemas/worker-handle.v1.json",
+  "$ref": "#/$defs/WorkerHandle",
+  "$defs": {
+    "AbortBlock": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "keys": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "kind",
+        "target"
+      ]
+    },
+    "Agent": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "codex",
+        "pi",
+        "gemini",
+        "echo"
+      ]
+    },
+    "BusBlock": {
+      "properties": {
+        "prompt": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "hb": {
+          "type": "string"
+        },
+        "signal": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "WorkerHandle": {
+      "properties": {
+        "spec_version": {
+          "type": "string",
+          "enum": [
+            "v1"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "agent": {
+          "$ref": "#/$defs/Agent"
+        },
+        "session": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "executor": {
+          "type": "string"
+        },
+        "pane_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "bus": {
+          "$ref": "#/$defs/BusBlock"
+        },
+        "abort": {
+          "$ref": "#/$defs/AbortBlock"
+        },
+        "log_file": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "agent",
+        "created_at",
+        "executor",
+        "status"
+      ]
+    }
+  },
+  "title": "WorkerHandle v1"
+}
