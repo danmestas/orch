@@ -83,7 +83,10 @@ name: lead-engineer
 description: "Backend engineer for shim PRs"
 
 # Identity
-agent: claude-code                # which harness CLI to launch
+# `agent:` is enum-locked in JSON Schema — accepted values are exactly
+# the set of registered adapters in the shim. Unknown agents fail at
+# parse time, not runtime. Add a new agent → extend the enum.
+agent: claude-code                # one of: claude-code | codex | pi | gemini | echo
 session: lead-engineer            # 5th subject token; mapped to SESH_SESSION
 cwd: /Users/dmestas/projects/orch
 

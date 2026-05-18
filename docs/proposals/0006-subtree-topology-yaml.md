@@ -104,21 +104,30 @@ workers:
     agent: gemini
     tmux: { headless: true }
 
-# ── Seed state (optional) ───────────────────────────────────────────────
-# What goes in the subtree's KV scope at apply time. Compiled-from-workflow
-# tasks (Proposal 0007) ALSO land here; this section is for additional
-# state the workflow doesn't generate.
+# ── Seed state (optional, pass-through to sesh-ops) ─────────────────────
+# Each entry under `state:` is a thin pass-through to a `sesh-ops` invocation.
+# We don't redefine schemas — sesh owns the goal/task/KV shape and orch
+# just orchestrates the seeding calls. If sesh-ops's accepted input
+# changes, this section's shape follows automatically.
+#
+# Compiled-from-workflow tasks (Proposal 0007) ALSO land here; this
+# section is for additional state the workflow doesn't generate.
 state:
-  kv-scopes:
-    workflow:
-      - id: e2ecafe1                         # 8-hex per sesh-ops convention
-        # Optional: pre-existing tasks the workflow expects to find
-        tasks: []
-        # Optional: KV key/value seeds for non-task state
-        kv: {}
+  # Tasks: each entry is exactly a `sesh-ops task add` payload.
+  # See ~/projects/sesh/docs/task-management.md for the schema.
+  tasks:
+    - scope: workflow
+      scope-id: e2ecafe1
+      title: "seed task example"
+      depends_on: []
+      max_attempts: 3
+      metadata: {}
 
+  # Goals: each entry is exactly a `sesh-ops goal create` payload.
+  # See ~/projects/sesh/docs/goal-management.md.
   goals:
-    - id: bench-validation
+    - scope: workflow
+      scope-id: e2ecafe1
       objective: "Run the bench and report results"
       budget_tokens: 50000
 
@@ -153,25 +162,33 @@ orch subtree list
 orch subtree diff bench-fleet.yaml
 ```
 
-## Apply semantics
+## Apply semantics — time-ordered, by design
 
-1. **Parse** the yaml, validate (Proposal 0002's validator handles the embedded SpawnSpecs)
-2. **Resolve sesh context**:
-   - `existing:` → connect, fail if unreachable
-   - `spawn:` → bring up a fresh sesh session, capture its NATS URL
-3. **Spawn missing workers** in parallel:
+`apply` is **temporally decomposed by necessity** — each phase depends on the prior. This ordering is part of the public interface, not an implementation detail; operators should be able to predict where in the sequence apply will fail.
+
+The five phases, in strict order:
+
+1. **Parse**: validate the yaml, including embedded SpawnSpecs (Proposal 0002's validator). Fails early on schema violations BEFORE touching live state.
+
+2. **Resolve sesh context**: connect to an `existing:` hub, OR bring up a `spawn:`'d hub. Subsequent phases need the NATS URL to do anything.
+
+3. **Spawn missing workers** (parallel within this phase):
    - Compare desired workers (yaml) vs live workers (`$SRV.INFO.agents`)
-   - For each missing: invoke `orch-spawn` with the SpawnSpec (passes through to Proposal 0003's executor backends)
-   - Workers that already exist with matching name+agent are NOT re-spawned
-4. **Seed state**:
-   - For each `kv-scopes.workflow[].id` → ensure the bucket exists (sesh-ops bootstrap)
-   - For each `tasks:` → sesh-ops task add (idempotent on task id)
-   - For each `goals:` → sesh-ops goal create (idempotent on goal id)
-   - If `--workflow Y.yaml`: compile workflow (Proposal 0007) and merge tasks
-5. **Persist** the applied state to `~/.cache/orch-subtrees/<name>.applied.yaml` for diff/destroy
-6. **Return** when all workers are on the bus AND seed state is in KV
+   - For each missing: invoke `orch-spawn` (Proposal 0002 dispatch) with the embedded SpawnSpec
+   - Workers that already exist with matching name+agent are NOT re-spawned (idempotent on name)
+   - Phase waits for ALL spawned workers to register on the bus before proceeding
 
-Failure modes — apply is idempotent so re-running cleans up partial state.
+4. **Seed state** (parallel within this phase): for each entry under `state.tasks` / `state.goals`, invoke the corresponding `sesh-ops` command. Idempotent on the entity id — repeat calls are no-ops, not duplicates.
+
+5. **Persist**: write `~/.cache/orch-subtrees/<name>.applied.yaml` for later `diff` / `destroy`. Includes resolved NATS URLs, actual pane IDs, all info needed to tear down later.
+
+**Why phase boundaries are explicit:**
+
+- A partial-failure at phase 3 leaves workers on the bus but no state seeded — operator can re-apply to seed.
+- A failure at phase 4 leaves state partially seeded — operator can re-apply (idempotent) to complete.
+- A failure at phase 5 means the subtree IS up but orch's local cache wasn't written — operator can `orch subtree adopt <name>` to reconstruct.
+
+**Failure mode summary**: apply is idempotent at every phase boundary; re-running cleans up partial state without operator intervention.
 
 ## Status semantics
 

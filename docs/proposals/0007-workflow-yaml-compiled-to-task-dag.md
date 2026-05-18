@@ -176,6 +176,28 @@ When `lead-engineer` pulls the `implement` task, the puller (or orch-side resolv
 
 **Idempotency**: task ids are derived from `workflow.id + node.id` (e.g., `build-feature.implement`). Re-running compile against the same scope doesn't duplicate tasks; it diff-applies (`sesh-ops task get <id>` → update only if changed).
 
+## Compile-time DAG validation
+
+Per the Ousterhout-review adjustment (2026-05-18): the compiler MUST reject invalid workflows at compile time, not runtime. Make invalid states unrepresentable at the point of submission.
+
+The compiler rejects:
+
+1. **Cycles**: `A.depends_on=B; B.depends_on=A` → "cyclic dependency: A → B → A"
+2. **Dangling node references**: `$nodeId.output` for an undeclared id → "unknown node reference: $foo.output"
+3. **Discriminator violations**: a node with both `prompt:` AND `bash:` → "node X has multiple kind discriminators"
+4. **Unreachable nodes**: depends_on a node that's never reachable (chain-broken or behind an always-false `when:`) → "node X is unreachable; depends_on chain has no source"
+5. **Required-field violations**: missing `id:`, missing kind discriminator → "node X missing id"
+6. **Assign without target**: `assign: foo` where `foo` is neither a declared `spawn:` node nor a worker in the targeted topology → "assign references unknown worker: foo"
+7. **Variable substitution type mismatches**: `$nodeId.output.json.path` on a node whose result is known-non-JSON → warning (not error) since result type may vary at runtime
+
+Validation runs:
+
+- Implicitly during `orch workflow apply` (compile rejects → exit non-zero, nothing seeded)
+- Explicitly via `orch workflow validate <yaml>` (CI-friendly; exit code conveys validity)
+- Diagnostic via `orch workflow compile --print <yaml>` (shows the flattened DAG without applying)
+
+The validator is the interface-contract test for this proposal (per the Ousterhout-review cross-cutting note about contract tests).
+
 ## CLI
 
 ```sh

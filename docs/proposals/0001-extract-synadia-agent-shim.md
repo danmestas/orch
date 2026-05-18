@@ -118,6 +118,20 @@ type Config struct {
     TaskID      string
     Interval    time.Duration
     Adapter     Adapter
+
+    // SubjectPrefix sets the root subject for agent endpoints.
+    // Default "agents". orch keeps the default; non-orch consumers may
+    // override to live in their own namespace (e.g., a hypothetical
+    // dagnats-agent might use "dagnats.agents"). Pulled into Config
+    // so the convention is explicit, not implicit.
+    SubjectPrefix string
+
+    // SignalPrefix sets the root subject for orch.signal.> handler
+    // subscriptions (Proposal 0133 interrupt/redirect). Default
+    // "orch.signal". Non-orch consumers using the shim for non-orch
+    // workflows can override (or leave empty to disable signal
+    // handling).
+    SignalPrefix string
 }
 
 func Run(ctx context.Context, cfg Config) error
