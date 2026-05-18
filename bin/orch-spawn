@@ -2,11 +2,20 @@
 # orch-spawn — dispatcher: parses args, selects executor, delegates spawn.
 #
 # Usage:
-#   orch-spawn <agent> [--cwd <path>] [--project <name>] [--headless] [--no-fleet]
+#   orch-spawn <agent> [--cwd <path>] [--sesh-session <label>] [--project <name>]
+#                         [--headless] [--no-fleet]
 #                         [--quiet] [--role <worker|observer>]
 #                         [--position <right|left|above|below>] [--verify]
 #                         [--outfit <name>] [--cut <name>] [--accessory <name>]...
 #                         [--no-shim] [--executor <tmux|wasm>]
+#
+# --sesh-session <label> sets the worker's cwd to the fossil checkout
+# provisioned by `sesh worktree <label>` — the worker-side leg of the
+# fossil-as-trunk swarm workflow (sesh issue #64). orch-spawn shells out
+# to `sesh worker-cwd <label>` and uses the printed path as the cwd, so
+# the worker lands in <project>/.sesh/checkouts/<label>/ with a live
+# fossil checkout ready for fossil commit / fossil update. Mutually
+# exclusive with --cwd; pass one or the other, not both.
 #
 # Executor selection (--executor, default: tmux):
 #   tmux  — spawns a tmux pane on the local machine (default). Delegates to
@@ -84,9 +93,11 @@ set -euo pipefail
 
 AGENT=${1:-}
 shift 2>/dev/null || true
-[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--project n] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim]..." >&2; exit 1; }
+[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim]..." >&2; exit 1; }
 
 CWD=""
+SESH_SESSION_FLAG=""
+CWD_FROM_FLAG=0
 PROJECT=""
 HEADLESS=0
 NO_FLEET=0
@@ -103,7 +114,8 @@ EXECUTOR="tmux"
 
 while [ $# -gt 0 ]; do
     case $1 in
-        --cwd) CWD=$2; shift 2 ;;
+        --cwd) CWD=$2; CWD_FROM_FLAG=1; shift 2 ;;
+        --sesh-session) SESH_SESSION_FLAG=$2; shift 2 ;;
         --project) PROJECT=$2; shift 2 ;;
         --headless) HEADLESS=1; shift ;;
         --no-fleet) NO_FLEET=1; shift ;;
@@ -156,6 +168,53 @@ if [ -z "$ROLE" ]; then
     esac
 fi
 [ -z "$ROLE" ] && ROLE=worker
+
+# --sesh-session resolution: ask sesh's worker-cwd helper for the fossil
+# checkout dir. This is the worker-side leg of the fossil-as-trunk swarm
+# workflow (sesh issue #64) — the worker lands inside a provisioned
+# checkout under <project>/.sesh/checkouts/<label>/.
+#
+# Mutually exclusive with --cwd: passing both is operator confusion (the
+# whole point of --sesh-session is "I don't know the checkout path,
+# resolve it for me"). We check CWD_FROM_FLAG rather than [ -n "$CWD" ]
+# because $CWD may have been seeded by a later --project resolution, and
+# we want the conflict caught against the explicit flag, not against an
+# implicit default.
+#
+# Resolution shells out to `sesh worker-cwd <label>`. Override the binary
+# location via ORCH_SESH_BIN (default: `sesh` on PATH). The override path
+# is mainly for tests — a CI build of sesh that hasn't been installed to
+# PATH yet. On error we surface sesh's stderr verbatim so the operator
+# sees the actual remediation hint (e.g. "run 'sesh worktree <label>'").
+if [ -n "$SESH_SESSION_FLAG" ]; then
+    if [ $CWD_FROM_FLAG -eq 1 ]; then
+        echo "orch-spawn: --cwd and --sesh-session are mutually exclusive (got --cwd=$CWD, --sesh-session=$SESH_SESSION_FLAG)" >&2
+        exit 1
+    fi
+    SESH_BIN=${ORCH_SESH_BIN:-sesh}
+    if ! command -v "$SESH_BIN" >/dev/null 2>&1 && [ ! -x "$SESH_BIN" ]; then
+        echo "orch-spawn: --sesh-session needs the 'sesh' binary on PATH (or set ORCH_SESH_BIN=<path>) — install from https://github.com/danmestas/sesh" >&2
+        exit 1
+    fi
+    SESH_STDERR=$(mktemp)
+    if SESH_CWD_RESOLVED=$("$SESH_BIN" worker-cwd "$SESH_SESSION_FLAG" 2>"$SESH_STDERR"); then
+        :
+    else
+        SESH_RC=$?
+        echo "orch-spawn: sesh worker-cwd $SESH_SESSION_FLAG failed (exit $SESH_RC): $(cat "$SESH_STDERR")" >&2
+        rm -f "$SESH_STDERR"
+        exit 1
+    fi
+    rm -f "$SESH_STDERR"
+    # sesh prints exactly one line: the absolute checkout path. Trim any
+    # trailing newline defensively.
+    SESH_CWD_RESOLVED=$(printf '%s' "$SESH_CWD_RESOLVED" | tr -d '\n')
+    if [ -z "$SESH_CWD_RESOLVED" ]; then
+        echo "orch-spawn: sesh worker-cwd $SESH_SESSION_FLAG returned empty stdout" >&2
+        exit 1
+    fi
+    CWD=$SESH_CWD_RESOLVED
+fi
 
 # Resolve --project to a directory:
 #   1. zoxide query (if zoxide is installed and the name is indexed)
