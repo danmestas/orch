@@ -54,22 +54,26 @@ mkdir -p "$HOME/.cache"
 cp "$ROOT/fleet-prompt.md" "$HOME/.cache/orch-fleet-prompt.md"
 echo "fleet doctrine cached at ~/.cache/orch-fleet-prompt.md"
 
-# orch-agent-shim — Go binary, Synadia Agent Protocol bridge. Optional;
-# only built if `go` is on PATH. The shim is invoked from orch-spawn
-# under --with-shim, which is opt-in in v1. Builds straight into
-# ~/.local/bin so it's discoverable without an extra symlink dance.
+# orch-agent-shim + orch-registry — Go binaries; only built if `go` is on
+# PATH. The shim is invoked from orch-spawn under --with-shim; orch-registry
+# is required by orch-peek / orch-tell / orch-ask / orch-spy (proposal 0005
+# moved their target-resolution path through the registry). Both build
+# straight into ~/.local/bin so they're discoverable without symlinks.
 if command -v go >/dev/null 2>&1; then
-    SHIM_DST="$HOME/.local/bin/orch-agent-shim"
-    mkdir -p "$(dirname "$SHIM_DST")"
-    ( cd "$ROOT" && go build -o "$SHIM_DST" ./cmd/orch-agent-shim ) \
-        && echo "built $SHIM_DST" \
+    BINDIR="$HOME/.local/bin"
+    mkdir -p "$BINDIR"
+    ( cd "$ROOT" && go build -o "$BINDIR/orch-agent-shim" ./cmd/orch-agent-shim ) \
+        && echo "built $BINDIR/orch-agent-shim" \
         || echo "warn: orch-agent-shim build failed — --with-shim will be a no-op until fixed (the go.mod 'go' directive is the authoritative floor)"
+    ( cd "$ROOT" && go build -o "$BINDIR/orch-registry" ./cmd/orch-registry ) \
+        && echo "built $BINDIR/orch-registry" \
+        || echo "warn: orch-registry build failed — orch-peek/tell/ask/spy will exit 1 until the binary is on PATH"
 else
     # The Go floor is whatever go.mod's `go` directive settles on against
     # the dependency graph (currently 1.25, driven by nats-server v2.14).
     # Bumps automatically as `go mod tidy` runs after upstream upgrades —
     # check `head -3 go.mod` for the current authoritative floor.
-    echo "skip: go not on PATH — orch-agent-shim not built (see go.mod's 'go' directive for the floor; install Go to enable --with-shim)"
+    echo "skip: go not on PATH — orch-agent-shim / orch-registry not built (install Go to enable bench + registry-backed bins)"
 fi
 
 # Inject fleet doctrine idempotently into agents that don't have a CLI flag for

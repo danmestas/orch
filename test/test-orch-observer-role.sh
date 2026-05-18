@@ -75,23 +75,34 @@ assert "register stub: --role flag accepted" 0 "$rc"
 [ ! -f "$SANDBOX/registry/%900.json" ] && absent=1 || absent=0
 assert "register stub: no registry file written" 1 "$absent"
 
-# ── orch-tell + orch-peek now use $SRV.INFO.agents discovery ─────────────────
+# ── orch-tell + orch-peek now use orch-registry for target resolution ───────
 #
-# Install a synthetic `nats` stub on PATH so the guard / peek lookups hit
-# canned fixtures instead of a real bus.
+# Post proposal 0005 (orch#144), the bins consult `orch-registry` instead of
+# doing inline `$SRV.INFO.agents` discovery via the nats CLI. We install
+# stubs for both:
+#
+#   - orch-registry stub  → fakes `snapshot` and `lookup <target>` from fixtures
+#   - nats stub           → keeps fire-and-forget `nats pub` no-op'd so
+#                            orch-tell's publish path doesn't try real I/O
+#
+# Both stubs read from the same fixture file (one JSON metadata object per
+# line) so `set_agents "%900 observer /tmp"` stays declarative.
 
 echo
-echo "=== orch-tell worker→observer guard (NATS discovery fixtures) ==="
+echo "=== orch-tell worker→observer guard (registry fixtures) ==="
 
 NATS_STUB_DIR="$SANDBOX/nats-bin"
 NATS_STUB_FIXTURES="$SANDBOX/nats-fixtures.jsonl"
 mkdir -p "$NATS_STUB_DIR"
 : > "$NATS_STUB_FIXTURES"
+
+# nats stub: swallow `pub` (orch-tell fire-and-forget) and answer `req` for
+# any callers that still hit the bus directly (legacy paths in other tests).
 cat > "$NATS_STUB_DIR/nats" <<STUB
 #!/usr/bin/env bash
 verb=""
 for arg in "\$@"; do
-    case "\$arg" in req) verb=req ;; esac
+    case "\$arg" in req|pub) verb="\$arg" ;; esac
 done
 if [ "\$verb" = req ] && [ -s "$NATS_STUB_FIXTURES" ]; then
     i=0
@@ -99,24 +110,100 @@ if [ "\$verb" = req ] && [ -s "$NATS_STUB_FIXTURES" ]; then
         [ -n "\$meta" ] || continue
         i=\$((i + 1))
         printf 'Received on "\$SRV.INFO.agents.fake%d"\n' "\$i"
-        # Emit each agent's full INFO response shape: metadata + endpoints[].
-        # orch-tell's discovery filters by metadata.pane_id then extracts
-        # endpoints[name=="prompt"].subject — without endpoints, discovery
-        # always returns "no match" and (post-#98, with the tmux fallback
-        # removed) every send becomes a hard error. The subject value here
-        # is canned (the stub doesn't run a broker); orch-tell's subsequent
-        # 'nats pub' invocation lands back in this same stub, which exits 0
-        # for any non-req verb.
         printf '{"metadata":%s,"endpoints":[{"name":"prompt","subject":"agents.prompt.stub.fake.0"}]}\n' "\$meta"
     done < "$NATS_STUB_FIXTURES"
 fi
+# pub: silent success (no broker; orch-tell fire-and-forget lands here).
 exit 0
 STUB
 chmod +x "$NATS_STUB_DIR/nats"
+
+# orch-registry stub: translates fixture lines into the Worker JSON shape
+# the bins consume. snapshot → array; lookup → single object or exit 4.
+cat > "$NATS_STUB_DIR/orch-registry" <<STUB
+#!/usr/bin/env bash
+sub="\${1:-}"
+shift || true
+args=()
+skip_next=0
+for a in "\$@"; do
+    case "\$a" in
+        --nats|--alias-file|--operator-file|--hb-window|--interval|--subject) skip_next=1 ;;
+        --nats=*|--alias-file=*|--operator-file=*|--hb-window=*|--interval=*|--subject=*) ;;
+        *)
+            if [ "\$skip_next" = 1 ]; then
+                skip_next=0
+            else
+                args+=("\$a")
+            fi
+            ;;
+    esac
+done
+target=""
+[ \${#args[@]} -ge 1 ] && target="\${args[0]}"
+
+emit_worker() {
+    local meta="\$1"
+    jq -nc --argjson m "\$meta" '
+        {
+            pane_id: \$m.pane_id,
+            instance_id: "stub-inst",
+            name:    (\$m.session // (\$m.pane_id | sub("^%"; "pct"))),
+            role:    (\$m.role // "worker"),
+            outfit:  (\$m.outfit // ""),
+            agent:   (\$m.agent // "claude-code"),
+            cwd:     (\$m.cwd // ""),
+            owner:   (\$m.owner // "stub"),
+            session: (\$m.session // ""),
+            alive:   true,
+            subjects: {
+                prompt: ("agents.prompt.stub.fake." + (\$m.pane_id | sub("^%"; "pct"))),
+                status: "",
+                hb:     ""
+            },
+            metadata: \$m
+        }'
+}
+
+case "\$sub" in
+    snapshot)
+        if [ ! -s "$NATS_STUB_FIXTURES" ]; then echo "[]"; exit 0; fi
+        out="["; first=1
+        while IFS= read -r meta; do
+            [ -n "\$meta" ] || continue
+            w=\$(emit_worker "\$meta")
+            if [ \$first = 1 ]; then first=0; else out+=","; fi
+            out+="\$w"
+        done < "$NATS_STUB_FIXTURES"
+        out+="]"
+        printf '%s\n' "\$out"
+        ;;
+    lookup)
+        [ -n "\$target" ] || { echo "orch-registry: usage: lookup <name|%pane>" >&2; exit 1; }
+        while IFS= read -r meta; do
+            [ -n "\$meta" ] || continue
+            pane=\$(printf '%s' "\$meta" | jq -r .pane_id)
+            role=\$(printf '%s' "\$meta" | jq -r '.role // "worker"')
+            session=\$(printf '%s' "\$meta" | jq -r '.session // ""')
+            if [ "\$target" = "operator" ] || [ "\$target" = "op" ]; then
+                [ "\$role" = "operator" ] && { emit_worker "\$meta"; exit 0; }
+            elif [ "\$target" = "\$pane" ]; then
+                emit_worker "\$meta"; exit 0
+            elif [ "\$target" = "\$session" ] && [ -n "\$session" ]; then
+                emit_worker "\$meta"; exit 0
+            fi
+        done < "$NATS_STUB_FIXTURES"
+        echo "orch-registry: not found: \$target" >&2
+        exit 4
+        ;;
+    *)
+        echo "orch-registry stub: unknown subcommand: \$sub" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$NATS_STUB_DIR/orch-registry"
+
 export PATH="$NATS_STUB_DIR:$PATH"
 export NATS_URL="nats://stub.invalid:4222"
-export ORCH_TELL_DISCOVERY_TIMEOUT="0.5s"
-export ORCH_PEEK_DISCOVERY_TIMEOUT="0.5s"
 
 set_agents() {
     : > "$NATS_STUB_FIXTURES"

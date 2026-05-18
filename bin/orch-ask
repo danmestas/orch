@@ -22,7 +22,6 @@
 #   6  agent error 429
 set -euo pipefail
 
-ALIAS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/orch-aliases"
 TIMEOUT=30
 QUIET=0
 
@@ -44,19 +43,14 @@ done
 set -- "${prompt_args[@]}"
 [ "$#" -ge 1 ] || die "no prompt provided"
 
-case $target in
-    %*) pane=$target ;;
-    *)  [ -f "$ALIAS_FILE" ] || die "no alias file at $ALIAS_FILE; pass a pane id like %35"
-        pane=$(awk -F= -v k="$target" '$1==k {print $2; exit}' "$ALIAS_FILE")
-        [ -n "$pane" ] || die "alias '$target' not found in $ALIAS_FILE"
-        ;;
-esac
-
 if [ "$1" = "-" ]; then
     prompt=$(cat)
 else
     prompt="$*"
 fi
 
-[ "$QUIET" = 1 ] || printf 'orch-ask: sending to %s via NATS\n' "$pane" >&2
-exec orch-tell --collect --timeout "$TIMEOUT" "$pane" "$prompt"
+# Target resolution (alias → pane id → prompt subject) happens inside
+# orch-tell via the operator registry — we just pass the target through.
+# See docs/proposals/0005-operator-registry-consolidation.md.
+[ "$QUIET" = 1 ] || printf 'orch-ask: sending to %s via NATS\n' "$target" >&2
+exec orch-tell --collect --timeout "$TIMEOUT" "$target" "$prompt"

@@ -93,26 +93,24 @@ fi
 PROJECTS_DIR="${ORCH_PROJECTS_DIR:-$HOME/.claude/projects}"
 SEND_LOG="${ORCH_SEND_LOG:-$HOME/.cache/orch-send.log}"
 STOP_DIR="${ORCH_STOP_DIR:-$HOME/.cache/orch-stop}"
-DISCOVERY_TIMEOUT="${ORCH_SPY_DISCOVERY_TIMEOUT:-2s}"
 
-# --- $SRV.INFO.agents discovery helper ---
-# Prints one JSON object per line to stdout (one per registered agent), or
-# nothing on failure / no agents. Callers filter with jq. Falls back silently
-# when nats / jq are absent — discovery is best-effort, callers handle empty.
-_discover_agents() {
-    command -v nats >/dev/null 2>&1 || return 0
-    command -v jq   >/dev/null 2>&1 || return 0
-    # shellcheck disable=SC2016  # $SRV.INFO.agents is a NATS system subject (literal $)
-    nats --server="${NATS_URL:-}" req '$SRV.INFO.agents' '' \
-        --replies=0 "--reply-timeout=${DISCOVERY_TIMEOUT}" 2>/dev/null \
-        | grep -v '^Received on\|^---\|^[[:space:]]*$' || true
-}
+command -v orch-registry >/dev/null 2>&1 \
+    || { echo "orch-spy: orch-registry not on PATH (build cmd/orch-registry)" >&2; exit 1; }
 
-# Find the agent record matching the predicate (jq filter). Prints the first
-# matching metadata block as compact JSON, or nothing.
-_agent_metadata() {
-    local filter=$1
-    _discover_agents | jq -c "select($filter) | .metadata" 2>/dev/null | head -1
+# Look up a target via the operator registry. Target may be "operator" /
+# "op" (the agent with metadata.role=="operator") or "%pane_id" (exact
+# pane match). Returns the worker JSON on stdout, exits 1 on miss.
+# See docs/proposals/0005-operator-registry-consolidation.md.
+_lookup_worker() {
+    local t=$1 raw rc
+    raw=$(orch-registry lookup --nats="${NATS_URL:-}" "$t" 2>/dev/null) || rc=$?
+    if [ -n "${rc:-}" ]; then
+        case $rc in
+            4) return 1 ;;
+            *) return "$rc" ;;
+        esac
+    fi
+    printf '%s\n' "$raw"
 }
 
 # Locate the newest *.jsonl under ~/.claude/projects/<encoded-cwd>/ for the
@@ -142,28 +140,20 @@ TARGET_CWD=""
 TARGET_KIND=""
 
 case "$TARGET" in
-    operator|op)
-        META=$(_agent_metadata '.metadata.role == "operator"')
-        [ -n "$META" ] || {
-            echo "orch-spy: no operator agent on \$SRV.INFO.agents — set ORCH_ROLE=operator in your shell so orch-agent-shim registers it" >&2
-            exit 1; }
-        TARGET_PANE=$(printf '%s' "$META" | jq -r '.pane_id // empty')
-        TARGET_CWD=$(printf '%s' "$META"  | jq -r '.cwd // empty')
-        TARGET_KIND=operator
-        [ -n "$TARGET_PANE" ] || { echo "orch-spy: operator agent has no metadata.pane_id" >&2; exit 1; }
-        [ -n "$TARGET_CWD"  ] || { echo "orch-spy: operator agent has no metadata.cwd" >&2; exit 1; }
-        TARGET_JSONL=$(_jsonl_for_cwd "$TARGET_CWD") || {
-            echo "orch-spy: no Claude transcript JSONL under $PROJECTS_DIR/<encoded $TARGET_CWD>" >&2; exit 1; }
-        ;;
-    %[0-9]*)
-        META=$(_agent_metadata ".metadata.pane_id == \"$TARGET\"")
-        [ -n "$META" ] || {
-            echo "orch-spy: $TARGET not registered on \$SRV.INFO.agents — confirm orch-agent-shim is running for that pane" >&2
-            exit 1; }
-        TARGET_PANE=$TARGET
-        TARGET_CWD=$(printf '%s' "$META" | jq -r '.cwd // empty')
-        TARGET_KIND=$(printf '%s' "$META" | jq -r '.role // "worker"')
-        [ -n "$TARGET_CWD" ] || { echo "orch-spy: $TARGET has no metadata.cwd" >&2; exit 1; }
+    operator|op|%[0-9]*)
+        WORKER_JSON=$(_lookup_worker "$TARGET") || {
+            if [ "$TARGET" = "operator" ] || [ "$TARGET" = "op" ]; then
+                echo "orch-spy: no operator agent in the orch registry — set ORCH_ROLE=operator in your shell so orch-agent-shim registers it" >&2
+            else
+                echo "orch-spy: $TARGET not in the orch registry — confirm orch-agent-shim is running for that pane" >&2
+            fi
+            exit 1
+        }
+        TARGET_PANE=$(printf '%s' "$WORKER_JSON" | jq -r '.pane_id // empty')
+        TARGET_CWD=$(printf '%s'  "$WORKER_JSON" | jq -r '.cwd // empty')
+        TARGET_KIND=$(printf '%s' "$WORKER_JSON" | jq -r '.role // "worker"')
+        [ -n "$TARGET_PANE" ] || { echo "orch-spy: registry returned worker without pane_id" >&2; exit 1; }
+        [ -n "$TARGET_CWD"  ] || { echo "orch-spy: $TARGET_PANE has no metadata.cwd" >&2; exit 1; }
         TARGET_JSONL=$(_jsonl_for_cwd "$TARGET_CWD") || {
             echo "orch-spy: no Claude transcript JSONL under $PROJECTS_DIR/<encoded $TARGET_CWD>" >&2; exit 1; }
         ;;

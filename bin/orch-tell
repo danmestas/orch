@@ -8,11 +8,14 @@
 #   orch-tell --list                            # list panes + commands
 #   orch-tell --collect <pane> <prompt>         # request/reply; stream chunks to stdout
 #
-# Default path (discovery):
-#   1. Resolve alias → pane id.
-#   2. Query $SRV.INFO.agents filtered by metadata.pane_id == <pane>.
-#   3. Publish prompt to endpoints[name=="prompt"].subject (fire-and-forget).
-#   On no match: actionable error + exit 1.
+# Default path (registry):
+#   1. orch-registry lookup <target> → returns {pane_id, role, subjects.prompt}.
+#      The registry handles alias-file lookup + $SRV.INFO discovery atomically
+#      (proposal 0005). Aliases live in ~/.config/orch-aliases; pane ids
+#      start with "%".
+#   2. Publish prompt to subjects.prompt (fire-and-forget by default,
+#      request/reply when --collect is set).
+#   On no match: actionable error + exit 1 (4 from registry surfaced as 1).
 #
 # --collect: request/reply mode — streams §6.2 response chunk .data to stdout
 #   until the §6.5 zero-byte terminator. §9 Nats-Service-Error headers map:
@@ -20,12 +23,8 @@
 #   Use --timeout N (seconds) to override the 30s inactivity window between chunks.
 #
 # Env overrides:
-#   ORCH_TELL_DISCOVERY_TIMEOUT (default 2s)   — $SRV.INFO.agents reply-timeout
 #   ORCH_TELL_INACTIVITY_TIMEOUT (default 30)  — --collect inactivity window (seconds)
 #   NATS_URL                                   — NATS server URL (default per nats CLI)
-#
-# Aliases: one per line "name=%pane_id" in ~/.config/orch-aliases.
-# Pane ids start with "%" — anything else is looked up as an alias.
 #
 # Observer-target policy (A1): a worker pane (ORCH_PANE_ID set in env) is
 # refused when telling an observer-class target unless --force is passed.
@@ -33,9 +32,6 @@
 # (no ORCH_PANE_ID) are unrestricted.
 set -euo pipefail
 
-ALIAS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/orch-aliases"
-# Discovery: how long to wait for $SRV.INFO.agents replies (reply-timeout between replies).
-DISCOVERY_TIMEOUT="${ORCH_TELL_DISCOVERY_TIMEOUT:-2s}"
 # Collect: inactivity window — how long to wait between chunks before giving up.
 INACTIVITY_TIMEOUT="${ORCH_TELL_INACTIVITY_TIMEOUT:-30}"
 
@@ -70,35 +66,31 @@ set -- "${ARGS[@]+"${ARGS[@]}"}"
 [ -n "$TIMEOUT_OVERRIDE" ] && INACTIVITY_TIMEOUT="$TIMEOUT_OVERRIDE"
 
 target=$1; shift
-case $target in
-    %*) pane=$target ;;
-    *)  [ -f "$ALIAS_FILE" ] || die "no alias file at $ALIAS_FILE; pass a pane id like %35"
-        pane=$(awk -F= -v k="$target" '$1==k {print $2; exit}' "$ALIAS_FILE")
-        [ -n "$pane" ] || die "alias '$target' not found in $ALIAS_FILE"
-        ;;
-esac
+
+# Registry lookup: resolves alias → pane id + target role + prompt subject
+# in one call. Replaces the legacy two-step (alias-file + $SRV.INFO query).
+# See docs/proposals/0005-operator-registry-consolidation.md.
+command -v orch-registry >/dev/null 2>&1 \
+    || die "orch-registry not on PATH (build cmd/orch-registry)"
+command -v jq            >/dev/null 2>&1 || die "jq not on PATH"
+
+_WORKER_JSON=$(orch-registry lookup --nats="${NATS_URL:-}" "$target" 2>/dev/null) || {
+    rc=$?
+    case $rc in
+        4) die "target '$target' not in the orch registry — check alias file or run orch-spawn" ;;
+        *) die "orch-registry lookup failed (rc=$rc) for target '$target'" ;;
+    esac
+}
+pane=$(printf '%s' "$_WORKER_JSON" | jq -r '.pane_id // empty')
+target_role=$(printf '%s' "$_WORKER_JSON" | jq -r '.role // "worker"')
+prompt_subject=$(printf '%s' "$_WORKER_JSON" | jq -r '.subjects.prompt // empty')
+[ -n "$pane" ] || die "registry returned worker without pane_id (target: $target)"
+[ -n "$prompt_subject" ] || die "registry returned worker without prompt subject (target: $target — shim may not have advertised endpoints)"
 
 # Worker→observer guard: a worker (ORCH_PANE_ID set) cannot redirect an
 # observer-class target unless --force.
-#
-# Target role is resolved from $SRV.INFO.agents (metadata.role). Falls back
-# to "worker" when NATS / jq are absent or the target is not registered —
-# unregistered panes are not subject to the guard (no role to enforce).
-if [ -n "${ORCH_PANE_ID:-}" ] && [ $FORCE -eq 0 ] \
-   && command -v nats >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-    # shellcheck disable=SC2016  # $SRV.INFO.agents is a NATS system subject (literal $)
-    _guard_raw=$(nats --server="${NATS_URL:-}" req '$SRV.INFO.agents' '' \
-                     --replies=0 "--reply-timeout=${DISCOVERY_TIMEOUT}" 2>/dev/null \
-                 | grep -v '^Received on\|^---\|^[[:space:]]*$' || true)
-    if [ -n "$_guard_raw" ]; then
-        target_role=$(printf '%s\n' "$_guard_raw" \
-                      | jq -r --arg p "$pane" \
-                          'select(.metadata.pane_id == $p) | .metadata.role // "worker"' \
-                          2>/dev/null | head -1)
-        if [ "$target_role" = "observer" ]; then
-            die "refusing to tell observer pane $pane (sender is worker $ORCH_PANE_ID); pass --force to override"
-        fi
-    fi
+if [ -n "${ORCH_PANE_ID:-}" ] && [ $FORCE -eq 0 ] && [ "$target_role" = "observer" ]; then
+    die "refusing to tell observer pane $pane (sender is worker $ORCH_PANE_ID); pass --force to override"
 fi
 
 if [ "$1" = "-" ]; then
@@ -121,58 +113,9 @@ _exit_for_error_code() {
     fi
 }
 
-# ── Discovery: resolve pane → prompt subject via $SRV.INFO.agents ────────────
-# Prints the prompt subject to stdout on success.
-# Returns 0 on match, non-zero on no-match / tooling-missing / bus-unreachable.
-# Assertion: exactly one agent matches; warn-and-pick-first on multiple.
-_discover_prompt_subject() {
-    local pane_id=$1
-
-    # Tooling missing → caller emits actionable error (no shim registered
-    # in environments without the nats CLI anyway).
-    command -v nats >/dev/null 2>&1 || return 10
-    command -v jq   >/dev/null 2>&1 || return 11
-
-    # Collect all $SRV.INFO.agents replies.
-    # --replies=0 means collect all until reply-timeout fires between replies.
-    # The nats CLI emits each reply body preceded by a "Received on ..." header
-    # line. We strip those and blank lines so only JSON bodies remain.
-    # NATS_URL — if unset, nats CLI uses its own default (nats://127.0.0.1:4222
-    # or NATS_URL env). Passing --server="" is harmless to the CLI, so the same
-    # form works whether or not we have a URL.
-    local raw=""
-    # shellcheck disable=SC2016  # $SRV.INFO.agents is a NATS system subject (literal $)
-    raw=$(nats --server="${NATS_URL:-}" req '$SRV.INFO.agents' '' \
-              --replies=0 "--reply-timeout=${DISCOVERY_TIMEOUT}" 2>/dev/null \
-          | grep -v '^Received on\|^---\|^[[:space:]]*$' || true)
-
-    # Empty $raw = no agents replied (bus unreachable, no agents registered,
-    # or all replies stripped as headers). Treat as no-match; caller decides.
-    [ -z "$raw" ] && return 1
-
-    # Filter: entries where metadata.pane_id matches; extract prompt subject.
-    # Each line of $raw is one JSON object from one agent.
-    local matched=""
-    matched=$(printf '%s\n' "$raw" \
-              | jq -r --arg p "$pane_id" \
-                  'select(.metadata.pane_id == $p)
-                   | .endpoints[]
-                   | select(.name == "prompt")
-                   | .subject' 2>/dev/null || true)
-
-    local match_count=0
-    [ -n "$matched" ] && match_count=$(printf '%s\n' "$matched" | grep -c .)
-
-    [ "$match_count" -eq 0 ] && return 1
-
-    if [ "$match_count" -gt 1 ]; then
-        printf 'orch-tell: warning: %d agents matched pane_id %s (expected 1); using first\n' \
-               "$match_count" "$pane_id" >&2
-    fi
-
-    printf '%s\n' "$matched" | head -1
-    return 0
-}
+# (Prompt-subject discovery moved upstream to orch-registry; the lookup
+# at the top of the script populates $pane / $target_role / $prompt_subject
+# in one round trip. See docs/proposals/0005-operator-registry-consolidation.md.)
 
 # ── Collect mode: request/reply with chunk streaming ─────────────────────────
 # Publishes prompt via NATS request; streams §6.2 response chunk .data to stdout
@@ -324,26 +267,14 @@ _write_send_log() {
 }
 
 # ── Main dispatch ─────────────────────────────────────────────────────────────
-# Discovery path. _discover_prompt_subject returns:
-#   0      → printed subject; use NATS
-#   1      → no match (no agents replied OR no pane_id match)
-#   10/11  → nats / jq tool missing
-prompt_subject=""
-discovery_rc=0
-prompt_subject=$(_discover_prompt_subject "$pane") || discovery_rc=$?
-
-if [ "$discovery_rc" -ne 0 ]; then
-    if [ "$COLLECT" -eq 1 ]; then
-        die "pane $pane not registered on the bus (run orch-spawn after Plan 8); --collect requires a shim"
-    fi
-    die "pane $pane not registered on the bus (run orch-spawn after Plan 8)"
-fi
-
+# $pane / $target_role / $prompt_subject were populated by the registry
+# lookup at the top of the script; no further discovery needed.
 if [ "$COLLECT" -eq 1 ]; then
     _collect_chunks "$prompt_subject" "$prompt"
 else
     # Fire-and-forget: publish to the prompt subject; no reply collection.
-    # NATS_URL — see _discover_prompt_subject for the empty-string rationale.
+    # NATS_URL — passing --server="" is harmless to the nats CLI, which
+    # falls back to $NATS_URL or its own localhost default.
     command -v nats >/dev/null 2>&1 \
         || die "nats CLI not found on PATH"
     nats --server="${NATS_URL:-}" pub "$prompt_subject" "$prompt" 2>/dev/null \

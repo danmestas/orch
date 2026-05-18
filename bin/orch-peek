@@ -2,32 +2,33 @@
 # orch-peek — status report for live worker harnesses.
 #
 # Usage:
-#   orch-peek                    # all live workers from $SRV.INFO.agents
+#   orch-peek                    # all live workers from the operator registry
 #   orch-peek %114 %115          # specific panes only
 #   orch-peek --json             # machine-readable output
 #   orch-peek --since 5m         # only workers that moved in the last duration
 #   orch-peek --all              # include dead-pane discovery entries
 #
-# "Live" = the pane id from a $SRV.INFO.agents discovery reply appears in
+# "Live" = the pane id from an orch-registry snapshot appears in
 # `tmux list-panes -a`. Dead-pane entries are stale shim records (the shim
-# died but a residual reply remains) and are filtered out by default.
+# died but a residual registry entry remains) and are filtered out by default.
 #
-# Per-worker fields come from the agent's metadata (pane_id / agent / role /
-# cwd) plus the worker's CC JSONL transcript at
+# The worker list comes from `orch-registry snapshot` (proposal 0005),
+# which joins $SRV.INFO.agents + agents.hb.> + ~/.config/orch-aliases +
+# ~/.cache/orch-operator.json behind one read interface. Per-worker
+# transcript fields are layered on top from the worker's CC JSONL at
 # ~/.claude/projects/<encoded-cwd>/<session>.jsonl. Encoding rule: resolve
 # symlinks on cwd via `(cd <p> && pwd -P)`, then replace each "/" and "_" with "-".
 #
-# Operator pane: an agent registered with metadata.role=="operator" (the
-# operator shell sets ORCH_ROLE=operator before starting the session) shows
-# up as the first row with agent="operator".
+# Operator pane: a worker whose Role=="operator" (set via ORCH_ROLE=operator
+# in the operator shell or pinned by the legacy ~/.cache/orch-operator.json
+# claim) shows up as the first row with agent="operator".
 set -euo pipefail
 
-command -v tmux >/dev/null 2>&1 || { echo "orch-peek: tmux not on PATH" >&2; exit 1; }
-command -v jq   >/dev/null 2>&1 || { echo "orch-peek: jq not on PATH" >&2; exit 1; }
-command -v nats >/dev/null 2>&1 || { echo "orch-peek: nats CLI not on PATH" >&2; exit 1; }
+command -v tmux           >/dev/null 2>&1 || { echo "orch-peek: tmux not on PATH" >&2; exit 1; }
+command -v jq             >/dev/null 2>&1 || { echo "orch-peek: jq not on PATH" >&2; exit 1; }
+command -v orch-registry  >/dev/null 2>&1 || { echo "orch-peek: orch-registry not on PATH (build cmd/orch-registry)" >&2; exit 1; }
 
 PROJECTS_DIR="${ORCH_PROJECTS_DIR:-$HOME/.claude/projects}"
-DISCOVERY_TIMEOUT="${ORCH_PEEK_DISCOVERY_TIMEOUT:-2s}"
 
 JSON=0
 ALL=0
@@ -86,17 +87,19 @@ LIVE_PANES=$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null) || {
 }
 is_live() { printf '%s\n' "$LIVE_PANES" | grep -qx "$1"; }
 
-# Snapshot $SRV.INFO.agents discovery once. One JSON object per line, keyed
-# by pane_id into AGENT_META for O(1) lookup.
-# shellcheck disable=SC2016  # $SRV.INFO.agents is a NATS system subject (literal $)
-DISCOVERY_RAW=$(nats --server="${NATS_URL:-}" req '$SRV.INFO.agents' '' \
-                    --replies=0 "--reply-timeout=${DISCOVERY_TIMEOUT}" 2>/dev/null \
-                | grep -v '^Received on\|^---\|^[[:space:]]*$' || true)
+# Snapshot live workers via the operator registry. One JSON object per line,
+# keyed by pane_id into AGENT_META for O(1) lookup. We extract the inner
+# `.metadata` block so existing jq filters (`.role`, `.agent`, `.cwd`, …)
+# continue to work without rewriting the call sites — the registry's flat
+# top-level fields project the same names so a future refactor can drop
+# the projection if desired.
+DISCOVERY_RAW=$(orch-registry snapshot --nats="${NATS_URL:-}" 2>/dev/null \
+                | jq -c '.[]' 2>/dev/null || true)
 
 declare -A AGENT_META
 while IFS= read -r line; do
     [ -n "$line" ] || continue
-    p=$(printf '%s' "$line" | jq -r '.metadata.pane_id // empty' 2>/dev/null)
+    p=$(printf '%s' "$line" | jq -r '.pane_id // empty' 2>/dev/null)
     [ -n "$p" ] || continue
     AGENT_META["$p"]=$(printf '%s' "$line" | jq -c '.metadata' 2>/dev/null)
 done <<< "$DISCOVERY_RAW"
@@ -106,7 +109,7 @@ TARGETS=()
 if [ ${#PANES_ARG[@]} -gt 0 ]; then
     for p in "${PANES_ARG[@]}"; do
         if [ -z "${AGENT_META[$p]+_}" ]; then
-            echo "orch-peek: $p not registered on \$SRV.INFO.agents — skipping" >&2
+            echo "orch-peek: $p not in the orch registry — skipping" >&2
             continue
         fi
         TARGETS+=("$p")
