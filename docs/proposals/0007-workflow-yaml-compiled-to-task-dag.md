@@ -270,7 +270,12 @@ For operators who want literal Archon — they can still use Archon directly. or
 
 ## Decisions deferred to design phase
 
-1. **Variable substitution location** — resolve at compile time (substitute literal values into task description) vs pull time (puller resolves dynamically). Lean: pull time — supports cross-task data flow without re-compiling.
+1. ~~**Variable substitution location**~~ → **Mixed-time: cleanest split** (Dan: 2026-05-18, "pick the cleanest way"). Different ref types resolve at different phases:
+
+   - **Compile-time** (substituted into task `description` as literals before seeding KV): env vars (`$ENV.NATS_URL`), workflow-static refs (`$WORKFLOW.scope_id`, `$WORKFLOW.name`), constants
+   - **Pull-time** (resolved by the puller against sesh KV when task is claimed): cross-task data flow (`$nodeId.output`, `$nodeId.output.json.path`)
+
+   Rationale: static refs are knowable at compile and don't need runtime indirection; cross-task refs MUST be pull-time because the upstream task hasn't run yet at compile. This is also the pattern used by GitHub Actions / GitLab CI / most CI/CD tools (mixed-time substitution by ref type). Cleaner than "everything one way" because each ref's semantics matches its actual data availability.
 2. **`approval:` node UX** — how does orch surface an interactive approval to the operator? Telegram? Slack? CLI prompt? Lean: CLI prompt v1, integrations later.
 3. **Failure semantics for `spawn:` nodes** — if spawn fails, does the workflow abort or retry? Lean: respect sesh's `max_attempts` task field — spawn failures retry until exhaustion, then the task is marked failed and the workflow stops at that branch.
 4. **Loop iteration storage** — each loop iteration's output stored as `<node>.iter[N].output`? Or just `<node>.output` for the final iteration? Lean: final only (matches Archon).

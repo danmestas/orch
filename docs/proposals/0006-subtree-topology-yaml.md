@@ -243,7 +243,7 @@ The topology and workflow yamls are independent — same topology can run multip
 
 ## Decisions deferred to design phase
 
-1. **Reconciliation loop?** v1 is push-once (no controller watching for drift). Reconciliation could be v2 — a daemon that watches the bus and re-applies on missing workers. Lean: v1 = push-once, v2 = lazy reconciliation gated on a `--watch` flag.
+1. ~~**Reconciliation loop?**~~ → **Push-once for v1** (Dan: 2026-05-18). Operator runs `orch subtree apply` imperatively; drift surfaces via `orch subtree status` and is fixed by re-applying. No controller loop, no daemon, no watch-and-repair. Avoids reinventing Kubernetes; matches the operator's mental model (apply is an imperative, not a desired-state contract). Reconciliation can be a v2 add-on gated on a `--watch` flag if multi-machine ops earn its keep.
 2. **`sesh: spawn:` semantics** — does the subtree's sesh hub live within the operator's hub mesh (as a leaf) or fully independent? Lean: leaf attachment by default; flag for full independence.
 3. **Cross-subtree references** — can a worker in subtree-A reach workers in subtree-B via the bus? Lean: yes if they share a hub; no isolation enforced at the topology layer (sesh's KV scoping handles isolation).
 4. **Templating** — variables like `$ORCH_NATS_URL` resolve from env. Should there be Go-template-style `{{ .NATS_URL }}` for richer interpolation? Lean: env-var only for v1.
