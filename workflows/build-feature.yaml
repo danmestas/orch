@@ -1,0 +1,62 @@
+# Reference workflow for Proposal 0007.
+#
+# Mirrors the example in docs/proposals/0007-workflow-yaml-compiled-to-task-dag.md
+# and is exercised by internal/workflow/validate_test.go's
+# "reference workflow from spec" case to keep spec + behaviour aligned.
+#
+# Try it:
+#   orch workflow validate workflows/build-feature.yaml
+#   orch workflow compile  workflows/build-feature.yaml --print
+#
+# Phase A: compile --print emits the planned task DAG as JSON. Phase B
+# wires apply/status/cancel onto the targeted subtree's KV scope.
+name: build-feature
+description: "Plan, implement, validate, review, PR — Archon-shaped reference workflow"
+
+# Optional. Overridable by `--scope-id` on apply; resolved against the
+# targeted subtree's workflow scope otherwise.
+scope-id: e2ecafe1
+
+nodes:
+  - id: plan
+    prompt: "Explore the codebase and create an implementation plan"
+    assign: lead-engineer
+
+  - id: spawn-verifier
+    depends_on: [plan]
+    spawn:
+      name: verifier
+      agent: claude-code
+      tmux:
+        headless: true
+      outfit:
+        bundle: backend/verifying
+
+  - id: implement
+    depends_on: [plan]
+    loop:
+      prompt: "Read the plan from $plan.output. Implement next task. Validate."
+      until: ALL_TASKS_COMPLETE
+      max_iterations: 5
+      fresh_context: true
+    assign: lead-engineer
+
+  - id: run-tests
+    depends_on: [implement]
+    bash: "bun run validate"
+
+  - id: review
+    depends_on: [run-tests, spawn-verifier]
+    prompt: "Review all changes against the plan. Fix any issues."
+    assign: verifier
+
+  - id: approve
+    depends_on: [review]
+    approval:
+      prompt: "Present the changes for review. Address any feedback."
+      until: APPROVED
+
+  - id: create-pr
+    depends_on: [approve]
+    prompt: "Push changes and create a pull request"
+    assign: lead-engineer
