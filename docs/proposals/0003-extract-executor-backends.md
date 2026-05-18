@@ -1,8 +1,10 @@
-# Proposal 0003 — Extract executor backends to sister repos
+# Proposal 0003 — Extract heavyweight executor backends to sister repos
 
 **Status:** draft (spec only; design + implementation will follow as Dan adds new execution targets)
 **Depends on:** Proposal 0002 (typed executor contract — required for clean per-repo backends)
 **Blocks:** none
+
+**Ousterhout-review adjustment (2026-05-18):** scope narrowed from "all executors" to "heavyweight only." `tmux:` backend (~50 LoC bash) STAYS in orch's main repo — extracting a shallow module creates release-coordination overhead for zero leverage gain. Extract only backends with substantial dependency footprints (CF Worker / Durable Object / future browser-tab / devcontainer).
 
 ## Why
 
@@ -32,16 +34,17 @@ Once Proposal 0002 lands (typed YAML contract), each backend becomes a process t
 
 Two sensible patterns; pick one:
 
-### Option A: one repo per backend
+### Option A: one repo per HEAVYWEIGHT backend
 
-- `github.com/danmestas/orch-executor-tmux`
 - `github.com/danmestas/orch-executor-cf-worker`
 - `github.com/danmestas/orch-executor-cf-durable-object`
 - `github.com/danmestas/orch-executor-devcontainer` (future)
 - `github.com/danmestas/orch-executor-browser-tab` (future)
 
-Pros: maximum independence; each repo's CI matches its language; clean release notes.
-Cons: more repos to discover / install.
+**Stays in orch's main repo:** `executors/tmux/` — too small to deserve extraction (~50 LoC bash). Dispatcher's PATH discovery still finds it at `~/.local/share/orch/executors/tmux/spawn`, bundled with orch.
+
+Pros: maximum independence for heavy backends; per-repo CI matches its language; clean release notes; tmux stays close to its only consumer.
+Cons: more repos to discover / install (but fewer than option B's "everything is a repo").
 
 ### Option B: one meta-repo with subdirs per backend
 
