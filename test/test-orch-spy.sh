@@ -74,25 +74,29 @@ cleanup_sandbox() {
 trap 'cleanup_sandbox' EXIT
 SPAWNED_PANES=""
 
-# ── Synthetic $SRV.INFO.agents service ───────────────────────────────────────
+# ── Synthetic registry + nats CLI stubs ──────────────────────────────────────
 #
-# orch-spy / orch-tell shell out to `nats req '$SRV.INFO.agents' ''` to resolve
-# target metadata. After issue #60, that's the only place pane metadata lives
-# — no more ~/.cache/orch-registry or ~/.cache/orch-operator.json. We install a
-# shell-script stub named `nats` at the front of PATH that emits canned replies
-# in the wire format the real CLI uses. The fixture set is updated per-section
-# by overwriting $NATS_STUB_FIXTURES (one JSON metadata object per line).
+# Post proposal 0005 (orch#144): orch-spy / orch-tell consult `orch-registry`
+# instead of doing inline `$SRV.INFO.agents` discovery. We install:
+#
+#   - orch-registry stub  → fakes `snapshot --json` and `lookup <target>`
+#   - nats stub           → keeps fire-and-forget `nats pub` no-op'd so
+#                            orch-tell's publish path doesn't try real I/O
+#
+# Both stubs read from the same fixture file (one JSON metadata object per
+# line), so tests can stay declarative: `set_agents "%900 worker /tmp"`.
 NATS_STUB_DIR="$SANDBOX/nats-bin"
 NATS_STUB_FIXTURES="$SANDBOX/nats-fixtures.jsonl"
 mkdir -p "$NATS_STUB_DIR"
 : > "$NATS_STUB_FIXTURES"
+
+# nats stub: swallow `pub` calls (orch-tell fire-and-forget) silently;
+# answers `req '$SRV.INFO.agents'` from fixtures for any legacy callers.
 cat > "$NATS_STUB_DIR/nats" <<STUB
 #!/usr/bin/env bash
-# Synthetic nats CLI for test-orch-spy. Replies to req '\$SRV.INFO.agents'
-# from the live fixture file; other invocations no-op.
 verb=""
 for arg in "\$@"; do
-    case "\$arg" in req) verb=req ;; esac
+    case "\$arg" in req|pub) verb="\$arg" ;; esac
 done
 if [ "\$verb" = req ] && [ -s "$NATS_STUB_FIXTURES" ]; then
     i=0
@@ -100,17 +104,102 @@ if [ "\$verb" = req ] && [ -s "$NATS_STUB_FIXTURES" ]; then
         [ -n "\$meta" ] || continue
         i=\$((i + 1))
         printf 'Received on "\$SRV.INFO.agents.fake%d"\n' "\$i"
-        # Emit each agent's full INFO response shape: metadata + endpoints[].
-        # orch-tell's discovery filters by metadata.pane_id then extracts
-        # endpoints[name=="prompt"].subject; without endpoints, discovery
-        # always returns no-match and (post-#98, with the tmux fallback
-        # removed) every orch-spy → orch-tell call becomes a hard error.
         printf '{"metadata":%s,"endpoints":[{"name":"prompt","subject":"agents.prompt.stub.fake.0"}]}\n' "\$meta"
     done < "$NATS_STUB_FIXTURES"
 fi
+# pub: silent success — orch-tell publishes fire-and-forget here.
 exit 0
 STUB
 chmod +x "$NATS_STUB_DIR/nats"
+
+# orch-registry stub: translates fixture lines into the registry JSON shape
+# the bins consume. snapshot → array; lookup → single object or exit 4.
+cat > "$NATS_STUB_DIR/orch-registry" <<STUB
+#!/usr/bin/env bash
+sub="\${1:-}"
+shift || true
+# Drop --nats=URL and --hb-window=DUR style flags; we don't need them.
+args=()
+target=""
+for a in "\$@"; do
+    case "\$a" in
+        --nats|--alias-file|--operator-file|--hb-window|--interval|--subject) skip_next=1 ;;
+        --nats=*|--alias-file=*|--operator-file=*|--hb-window=*|--interval=*|--subject=*) ;;
+        *)
+            if [ "\${skip_next:-0}" = 1 ]; then
+                skip_next=0
+            else
+                args+=("\$a")
+            fi
+            ;;
+    esac
+done
+[ \${#args[@]} -ge 1 ] && target="\${args[0]}"
+
+emit_worker() {
+    local meta="\$1"
+    # Project the metadata into a Worker JSON the bins consume.
+    jq -c --argjson m "\$meta" '
+        {
+            pane_id: \$m.pane_id,
+            instance_id: "stub-inst",
+            name:    (\$m.session // (\$m.pane_id | sub("^%"; "pct"))),
+            role:    (\$m.role // "worker"),
+            outfit:  (\$m.outfit // ""),
+            agent:   (\$m.agent // "claude-code"),
+            cwd:     (\$m.cwd // ""),
+            owner:   (\$m.owner // "stub"),
+            session: (\$m.session // ""),
+            alive:   true,
+            subjects: {
+                prompt: ("agents.prompt.stub.fake." + (\$m.pane_id | sub("^%"; "pct"))),
+                status: "",
+                hb:     ""
+            },
+            metadata: \$m
+        }' < /dev/null
+}
+
+case "\$sub" in
+    snapshot)
+        if [ ! -s "$NATS_STUB_FIXTURES" ]; then echo "[]"; exit 0; fi
+        out="["
+        first=1
+        while IFS= read -r meta; do
+            [ -n "\$meta" ] || continue
+            w=\$(emit_worker "\$meta")
+            if [ \$first = 1 ]; then first=0; else out+=","; fi
+            out+="\$w"
+        done < "$NATS_STUB_FIXTURES"
+        out+="]"
+        printf '%s\n' "\$out"
+        ;;
+    lookup)
+        if [ -z "\$target" ]; then
+            echo "orch-registry: usage: lookup <name|%pane>" >&2; exit 1
+        fi
+        while IFS= read -r meta; do
+            [ -n "\$meta" ] || continue
+            pane=\$(printf '%s' "\$meta" | jq -r .pane_id)
+            role=\$(printf '%s' "\$meta" | jq -r '.role // "worker"')
+            session=\$(printf '%s' "\$meta" | jq -r '.session // ""')
+            if [ "\$target" = "operator" ] || [ "\$target" = "op" ]; then
+                [ "\$role" = "operator" ] && { emit_worker "\$meta"; exit 0; }
+            elif [ "\$target" = "\$pane" ]; then
+                emit_worker "\$meta"; exit 0
+            elif [ "\$target" = "\$session" ] && [ -n "\$session" ]; then
+                emit_worker "\$meta"; exit 0
+            fi
+        done < "$NATS_STUB_FIXTURES"
+        echo "orch-registry: not found: \$target" >&2
+        exit 4
+        ;;
+    *)
+        echo "orch-registry stub: unknown subcommand: \$sub" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$NATS_STUB_DIR/orch-registry"
+
 export PATH="$NATS_STUB_DIR:$PATH"
 export NATS_URL="nats://stub.invalid:4222"
 
@@ -134,7 +223,7 @@ echo "=== suit precheck (skip via ORCH_SPY_SKIP_PRECHECK=1, exercised via PATH) 
 # Verify the precheck triggers when suit is not on PATH AND
 # ORCH_SPY_SKIP_PRECHECK is not set. Build a minimal PATH without suit.
 mkdir -p "$SANDBOX/no-suit-bin"
-for b in jq tmux orch-spawn orch-tell nats; do
+for b in jq tmux orch-spawn orch-tell nats orch-registry; do
     src=$(command -v "$b" 2>/dev/null) || continue
     ln -sf "$src" "$SANDBOX/no-suit-bin/$b"
 done
@@ -184,7 +273,7 @@ rm -f "$TMP_OUT" "$TMP_ERR"
 TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
 "$SPY" %999 "audit something" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
 assert "unknown-pane: rc=1" 1 "$rc"
-assert_contains "unknown-pane: stderr names SRV.INFO.agents" "SRV.INFO.agents" "$(cat "$TMP_ERR")"
+assert_contains "unknown-pane: stderr names orch registry" "orch registry" "$(cat "$TMP_ERR")"
 rm -f "$TMP_OUT" "$TMP_ERR"
 
 # 6) --quiet on error path → both streams empty
