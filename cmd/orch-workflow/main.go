@@ -86,14 +86,15 @@ func cmdValidate(args []string) error {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fleet := fs.String("fleet", "", "comma-separated worker names to enforce assign targets against")
-	if err := fs.Parse(args); err != nil {
+	path, err := parseOnePositional(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
+	if path == "" {
 		fs.Usage()
 		return errors.New("validate: exactly one yaml path required")
 	}
-	wf, err := workflow.ParseFile(fs.Arg(0))
+	wf, err := workflow.ParseFile(path)
 	if err != nil {
 		return err
 	}
@@ -105,9 +106,9 @@ func cmdValidate(args []string) error {
 		return errInvalid
 	}
 	if len(rpt.Warnings()) == 0 {
-		fmt.Fprintf(os.Stderr, "%s: ok\n", fs.Arg(0))
+		fmt.Fprintf(os.Stderr, "%s: ok\n", path)
 	} else {
-		fmt.Fprintf(os.Stderr, "%s: ok (%d warning(s))\n", fs.Arg(0), len(rpt.Warnings()))
+		fmt.Fprintf(os.Stderr, "%s: ok (%d warning(s))\n", path, len(rpt.Warnings()))
 	}
 	return nil
 }
@@ -117,14 +118,15 @@ func cmdCompile(args []string) error {
 	fs.SetOutput(os.Stderr)
 	print := fs.Bool("print", false, "print compiled task DAG as JSON to stdout")
 	fleet := fs.String("fleet", "", "comma-separated worker names for assign-target check")
-	if err := fs.Parse(args); err != nil {
+	path, err := parseOnePositional(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
+	if path == "" {
 		fs.Usage()
 		return errors.New("compile: exactly one yaml path required")
 	}
-	wf, err := workflow.ParseFile(fs.Arg(0))
+	wf, err := workflow.ParseFile(path)
 	if err != nil {
 		return err
 	}
@@ -145,8 +147,38 @@ func cmdCompile(args []string) error {
 		fmt.Println(string(buf))
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "%s: compiled %d task(s) for workflow %q\n", fs.Arg(0), len(plan.Tasks), plan.Workflow)
+	fmt.Fprintf(os.Stderr, "%s: compiled %d task(s) for workflow %q\n", path, len(plan.Tasks), plan.Workflow)
 	return nil
+}
+
+// parseOnePositional lets flags appear before OR after the single
+// positional file argument. Go's stdlib flag.Parse stops at the first
+// non-flag, so a Unix-style invocation like
+// `orch-workflow compile foo.yaml --print` would otherwise fail.
+//
+// Returns the positional and any parse error. Returns "" if no
+// positional was supplied (caller's job to surface usage). Returns an
+// error if a second positional shows up after re-parsing the trailing
+// flags.
+func parseOnePositional(fs *flag.FlagSet, args []string) (string, error) {
+	if err := fs.Parse(args); err != nil {
+		return "", err
+	}
+	if fs.NArg() == 0 {
+		return "", nil
+	}
+	positional := fs.Arg(0)
+	remaining := fs.Args()[1:]
+	if len(remaining) == 0 {
+		return positional, nil
+	}
+	if err := fs.Parse(remaining); err != nil {
+		return "", err
+	}
+	if fs.NArg() > 0 {
+		return "", fmt.Errorf("unexpected positional arg(s) after %q: %v", positional, fs.Args())
+	}
+	return positional, nil
 }
 
 func fleetOpts(csv string) []workflow.ValidateOption {
