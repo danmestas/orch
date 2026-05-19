@@ -17,6 +17,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/danmestas/orch/internal/workflow"
 )
@@ -189,17 +190,16 @@ func fleetOpts(csv string) []workflow.ValidateOption {
 	return []workflow.ValidateOption{workflow.WithFleet(names)}
 }
 
+// splitCSV splits on commas and trims whitespace around each element.
+// Empty elements (between consecutive commas or after trimming) are
+// dropped so `--fleet=" alice ,bob,"` matches workers "alice" and
+// "bob" without surfacing a phantom "" name.
 func splitCSV(s string) []string {
 	out := make([]string, 0, 4)
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == ',' {
-			out = append(out, s[start:i])
-			start = i + 1
+	for _, part := range strings.Split(s, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
 		}
-	}
-	if start < len(s) {
-		out = append(out, s[start:])
 	}
 	return out
 }
