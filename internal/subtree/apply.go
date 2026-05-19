@@ -174,7 +174,7 @@ func (e *Engine) Apply(ctx context.Context, t *Topology) (*ApplyResult, error) {
 	// YAML, but we re-run Validate here so the engine remains usable
 	// from contexts that construct Topology in code (tests, future
 	// programmatic callers) without bypassing the checks.
-	if err := Validate(t); err != nil {
+	if err := Validate(t).Err(); err != nil {
 		return nil, phaseErr(PhaseParse, err)
 	}
 
