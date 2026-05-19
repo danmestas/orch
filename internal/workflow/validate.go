@@ -99,15 +99,23 @@ type nodeIndex struct {
 	nodes  map[string]*Node // valid (non-empty-id) nodes
 	order  []string         // ids in declaration order
 	spawns map[string]bool  // ids of `spawn:` nodes (assign targets)
+
+	// cycleMembers is populated by checkCycles with every node id
+	// participating in the detected cycle, so checkUnreachable can
+	// skip them — cycle reporting makes the unreachability
+	// self-evident and stacking both diagnostics on the same node is
+	// noisy.
+	cycleMembers map[string]bool
 }
 
 var identRegexp = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
 
 func buildIndex(wf *Workflow, rpt *Report) *nodeIndex {
 	idx := &nodeIndex{
-		nodes:  make(map[string]*Node, len(wf.Nodes)),
-		order:  make([]string, 0, len(wf.Nodes)),
-		spawns: make(map[string]bool),
+		nodes:        make(map[string]*Node, len(wf.Nodes)),
+		order:        make([]string, 0, len(wf.Nodes)),
+		spawns:       make(map[string]bool),
+		cycleMembers: make(map[string]bool),
 	}
 	seen := make(map[string]int) // id → first source line we saw
 	for i := range wf.Nodes {
@@ -290,6 +298,11 @@ func checkCycles(_ *Workflow, idx *nodeIndex, rpt *Report) {
 				NodeID: cycle[0], Line: n.SourceLine,
 				Message: fmt.Sprintf("cyclic dependency: %s", path),
 			})
+			// Record every node in the cycle (cycle[len-1] duplicates
+			// cycle[0] to close the loop visually — the set handles it).
+			for _, m := range cycle {
+				idx.cycleMembers[m] = true
+			}
 			return // one cycle report is enough; operator fixes and re-validates
 		}
 	}
@@ -401,7 +414,11 @@ func checkUnreachable(_ *Workflow, idx *nodeIndex, rpt *Report) {
 		}
 		// Skip nodes already implicated in a cycle — cycle reporting
 		// makes the unreachability self-evident and stacking both
-		// diagnostics on the same node is noisy.
+		// diagnostics on the same node is noisy. checkCycles populated
+		// the membership set on idx for this check.
+		if idx.cycleMembers[id] {
+			continue
+		}
 		n := idx.nodes[id]
 		rpt.Add(Diagnostic{
 			Code: CodeUnreachable, Severity: SeverityError,

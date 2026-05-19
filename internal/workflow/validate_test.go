@@ -238,10 +238,10 @@ nodes:
 			wantValid: true,
 		},
 		{
-			name: "depends_on chain through cycle is unreachable forbidden",
-			// nodes that aren't ON a cycle but depend through one — make
-			// sure we don't double-report (cycle + unreachable on the same
-			// nodes).
+			name: "two-node cycle reports CodeCycle and does NOT double-report unreachable",
+			// Both a and b are IN the cycle. checkCycles records their
+			// membership; checkUnreachable must skip them so we don't
+			// stack diagnostics.
 			yaml: `name: x
 nodes:
   - id: a
@@ -252,7 +252,26 @@ nodes:
     prompt: b
 `,
 			wantCodes:   []string{CodeCycle},
-			forbidCodes: []string{},
+			forbidCodes: []string{CodeUnreachable},
+		},
+		{
+			name: "node depending into a cycle is still flagged unreachable",
+			// c is downstream of the a↔b cycle. We want CodeCycle for
+			// the cycle itself AND CodeUnreachable for c — c isn't a
+			// cycle member, just an unreachable dependent.
+			yaml: `name: x
+nodes:
+  - id: a
+    depends_on: [b]
+    prompt: a
+  - id: b
+    depends_on: [a]
+    prompt: b
+  - id: c
+    depends_on: [a]
+    prompt: c
+`,
+			wantCodes: []string{CodeCycle, CodeUnreachable},
 		},
 		{
 			name: "reference workflow from spec",
