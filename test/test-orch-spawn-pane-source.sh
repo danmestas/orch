@@ -13,6 +13,11 @@
 
 set -uo pipefail
 
+# Drop orch-spawn's interactive pause-on-exit wrapper tail so the
+# `orch-spawn pi --cwd /tmp` invocation below closes its pane cleanly
+# when pi is absent on the runner (closes #178).
+export ORCH_NO_PAUSE_ON_EXIT=1
+
 [ -n "${TMUX:-}" ] || { echo "skip: must run inside tmux"; exit 0; }
 
 PASS=0

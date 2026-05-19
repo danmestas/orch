@@ -107,6 +107,7 @@ jobs:
             test/test-orch-worktree-from.sh
             test/test-orch-cwd-quoting.sh
             test/test-orch-spawn-verify.sh
+            test/test-orch-spawn-no-pause-on-exit.sh
             test/test-orch-verify-retry.sh
             test/test-orch-tail.sh
             test/test-orch-version.sh

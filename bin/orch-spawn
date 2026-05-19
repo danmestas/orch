@@ -36,6 +36,16 @@
 #                            ~/.config/orch-aliases). Each --slug appends a
 #                            `<slug>=<pane_id>` line so other harnesses can
 #                            resolve the worker by name.
+#   ORCH_NO_PAUSE_ON_EXIT  — when set to 1, the spawned wrapper omits its
+#                            trailing `read; exec $SHELL -l` (the
+#                            "[agent exited — press enter]" pause +
+#                            shell-fallback). Use in CI / test contexts
+#                            where the agent's death should close the
+#                            pane cleanly; the interactive default
+#                            (unset/0) preserves the pause-and-inspect
+#                            behaviour operators expect. Closes #178 —
+#                            the read otherwise blocks indefinitely and
+#                            survives `tmux kill-pane`, leaking zombies.
 #
 # --sesh-session <label> sets the worker's cwd to the fossil checkout
 # provisioned by `sesh worktree <label>` — the worker-side leg of the

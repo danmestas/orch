@@ -21,6 +21,11 @@
 #   77  prerequisite not available (SKIP)
 set -euo pipefail
 
+# Drop orch-spawn's interactive pause-on-exit wrapper tail so the
+# `orch-spawn claude` invocation closes its pane cleanly if claude is
+# absent or crashes on the runner (closes #178).
+export ORCH_NO_PAUSE_ON_EXIT=1
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
 # ── prerequisite checks ──────────────────────────────────────────────────────

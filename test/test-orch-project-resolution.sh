@@ -9,6 +9,11 @@
 # Run with: bash test/test-orch-project-resolution.sh
 set -uo pipefail
 
+# Drop orch-spawn's interactive pause-on-exit wrapper tail so any
+# pane this test spawns (--headless --project) closes cleanly when
+# the agent (pi) is absent on the runner (closes #178).
+export ORCH_NO_PAUSE_ON_EXIT=1
+
 PASS=0
 FAIL=0
 FAILED_TESTS=()

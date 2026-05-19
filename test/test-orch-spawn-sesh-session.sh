@@ -13,6 +13,11 @@
 # Run with: bash test/test-orch-spawn-sesh-session.sh
 set -uo pipefail
 
+# Drop orch-spawn's interactive pause-on-exit wrapper tail — defensive
+# even though current tests early-exit before pane creation, so a future
+# mutation that does spawn won't leak zombies (closes #178).
+export ORCH_NO_PAUSE_ON_EXIT=1
+
 PASS=0
 FAIL=0
 FAILED_TESTS=()

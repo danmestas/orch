@@ -20,6 +20,11 @@
 # Run inside tmux (CI wraps this in a tmux session). Skips if no $TMUX.
 set -uo pipefail
 
+# Drop orch-spawn's interactive pause-on-exit wrapper tail so a failing
+# agent (pi missing, claude crashes, etc.) closes its pane cleanly
+# instead of leaving the wrapper blocked on `read` (closes #178).
+export ORCH_NO_PAUSE_ON_EXIT=1
+
 [ -n "${TMUX:-}" ] || { echo "skip: must run inside tmux"; exit 0; }
 
 PASS=0
