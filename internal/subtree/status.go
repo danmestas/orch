@@ -100,7 +100,7 @@ func (e *Engine) Diff(proposed *Topology) ([]DiffEntry, error) {
 	if proposed == nil {
 		return nil, fmt.Errorf("subtree diff: nil Topology")
 	}
-	if err := Validate(proposed); err != nil {
+	if err := Validate(proposed).Err(); err != nil {
 		return nil, err
 	}
 
