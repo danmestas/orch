@@ -95,6 +95,7 @@ Orch's binaries honor a small set of env vars. Defaults are sensible; override o
 | `ORCH_HEADLESS_SESSION` | `orch-spawn` | Name of the detached tmux session for `--headless` (default: `orch-headless`). |
 | `ORCH_WORKTREE_ROOT` | `orch-spawn` | Directory under which `--worktree-from <sha>` creates new worktrees (default: `${ORCH_PROJECTS_ROOT:-$HOME/projects}/<repo>-worktrees/`). Combined with `--slug <name>`, the full path is `<root>/<slug>`. |
 | `ORCH_ALIASES_FILE` | `orch-spawn` | Alias file written by `--slug <name>` (default: `~/.config/orch-aliases`). Each spawn with `--slug` appends a `<slug>=<pane_id>` line so other harnesses can resolve workers by name without an active bus subscription. |
+| `ORCH_NO_PAUSE_ON_EXIT` | `orch-spawn` (tmux executor) | When set to `1`, the spawned wrapper drops its trailing `read; exec $SHELL -l` so agent exit closes the pane cleanly. Default (unset) keeps the interactive `[agent exited — press enter]` pause + shell-fallback. Tests that spawn against runners where the agent binary is missing should set this to avoid zombie wrappers (closes #178). |
 | `NATS_URL` | shim, `orch-tell`, `orch-ask` | NATS connect URL (default: client-library default, typically `nats://127.0.0.1:4222`). |
 | `SESH_GOAL_ID` / `SESH_GOAL_SCOPE` / `SESH_GOAL_SCOPE_ID` | `orch-spawn`, goal-harness | Propagated into spawned panes so sesh-goal hooks activate. Usually set by `orch-goal-pursue`. |
 

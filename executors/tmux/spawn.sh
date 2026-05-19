@@ -118,7 +118,19 @@ case $AGENT in
         echo "orch-spawn: unknown agent: $AGENT (expected claude|pi|codex|gemini)" >&2; exit 1 ;;
 esac
 
-WRAP="$WRAP; echo; echo '[$AGENT exited — press enter]'; read; exec \$SHELL -l"
+# Wrapper tail behaviour: by default, after the agent exits we pause on a
+# `read` and then `exec $SHELL -l` so an interactive operator can inspect
+# output, drop to a shell, etc. In CI / test contexts that pause is the
+# source of zombie panes (closes #178): the agent fails fast, `read`
+# blocks forever, the test's `kill-pane` destroys the PTY but the zsh
+# wrapper survives (no TTY → `exec $SHELL -l` hangs strangely), and the
+# enclosing tmux session can't tear down. Setting
+# ORCH_NO_PAUSE_ON_EXIT=1 in the environment that orch-spawn runs in
+# drops the pause+shell-fallback tail so agent exit cleanly closes the
+# pane. Default behaviour (interactive operator use) is preserved.
+if [ "${ORCH_NO_PAUSE_ON_EXIT:-0}" -ne 1 ]; then
+    WRAP="$WRAP; echo; echo '[$AGENT exited — press enter]'; read; exec \$SHELL -l"
+fi
 
 if [ "${HEADLESS:-0}" -eq 1 ]; then
     SESSION=${ORCH_HEADLESS_SESSION:-orch-headless}
