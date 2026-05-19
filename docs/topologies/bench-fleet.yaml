@@ -1,0 +1,67 @@
+# bench-fleet — example subtree topology.
+#
+# Five workers + a shared sesh hub + a seed task. Used as the
+# acceptance-criteria reference in docs/proposals/0006-subtree-topology-yaml.md.
+#
+# Apply with (Phase B, once wired):
+#
+#   orch subtree apply docs/topologies/bench-fleet.yaml
+#
+# Phase A (current): validate and diff are wired; apply / status /
+# destroy / watch return a clear Phase-B-deferred message.
+
+name: bench-fleet
+description: "5-worker fleet for end-to-end bench validation"
+
+sesh:
+  # Share the operator's hub. Replace with $ORCH_NATS_URL once that env
+  # var is exported in your shell — the parser expands $VAR references
+  # at ResolveEnv time. Plain literal URLs work too.
+  existing: nats://127.0.0.1:58413
+
+workers:
+  - name: lead-engineer
+    agent: claude-code
+    outfit:
+      bundle: backend/executing+pr-policy
+    tmux:
+      headless: true
+
+  - name: verifier
+    agent: claude-code
+    outfit:
+      bundle: backend/verifying
+    tmux:
+      headless: true
+
+  - name: codex-eng
+    agent: codex
+    tmux:
+      headless: true
+
+  - name: pi-eng
+    agent: pi
+    tmux:
+      headless: true
+
+  - name: gemini-eng
+    agent: gemini
+    tmux:
+      headless: true
+
+state:
+  tasks:
+    - scope: workflow
+      scope-id: e2ecafe1
+      title: "seed task: run the bench and report"
+      max_attempts: 3
+
+  goals:
+    - scope: workflow
+      scope-id: e2ecafe1
+      objective: "Run the bench and report results"
+      budget_tokens: 50000
+
+labels:
+  purpose: bench
+  owner: dmestas
