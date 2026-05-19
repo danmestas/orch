@@ -154,13 +154,22 @@ subject_token_for() {
 log "=== Group 1: Hub lifecycle ==="
 
 # Pattern: Hub Auto-Spawn & Lifecycle
+#
+# sesh writes three URL files together (cli/hubinfo.go):
+#   hub.url       — leaf-node URL  (HubGuard O_EXCL lease)
+#   hub.nats.url  — NATS client URL  ← what NATS clients should read
+#   hub.fossil.url — Fossil HTTP endpoint
+# They share a lifetime: written on hub-up, removed on hub-down. We
+# check hub.nats.url primarily (the file orch consumers actually need)
+# and fall back to hub.url for compatibility with older sesh builds
+# that haven't yet split the files.
 log "T1.1: hub auto-spawn on first sesh up"
 sesh_full_reset
 if sesh_up_in /tmp/g1-spawn s1; then
-    if [ -f "$HOME/.sesh/hub.url" ]; then
-        assert "hub.url written after first sesh up" "yes" "yes"
+    if [ -f "$HOME/.sesh/hub.nats.url" ] || [ -f "$HOME/.sesh/hub.url" ]; then
+        assert "hub URL file written after first sesh up" "yes" "yes"
     else
-        assert "hub.url written after first sesh up" "yes" "no"
+        assert "hub URL file written after first sesh up" "yes" "no"
     fi
     sesh_down_in /tmp/g1-spawn s1
 else
@@ -170,20 +179,24 @@ fi
 log "T1.2: hub auto-shutdown when last leaf disconnects"
 # Sesh's autoShutdownLoop (cli/hub_serve.go) polls leaf count every 500ms;
 # after the last leaf disconnects it cancels the serve ctx, the hub
-# unwinds (h.Stop), and the deferred urlLease.Release removes hub.url.
+# unwinds (h.Stop), and the deferred urlLease.Release removes hub.url
+# (and the sibling hub.nats.url / hub.fossil.url written by hubinfo.go).
 # Wait up to ~6s in 1s steps so a slow Docker scheduler doesn't false-SKIP.
 gone=no
 for _ in 1 2 3 4 5 6; do
-    [ ! -f "$HOME/.sesh/hub.url" ] && { gone=yes; break; }
+    if [ ! -f "$HOME/.sesh/hub.nats.url" ] && [ ! -f "$HOME/.sesh/hub.url" ]; then
+        gone=yes
+        break
+    fi
     sleep 1
 done
 if [ "$gone" = "yes" ]; then
-    assert "hub.url removed after last leaf disconnect" "removed" "removed"
+    assert "hub URL files removed after last leaf disconnect" "removed" "removed"
 else
     # sesh#62 fixed the original autoShutdownLoop hadLeaf race — if this
     # ever fires again it's a regression, not an environmental SKIP.
     HUBLOG_TAIL=$(tail -5 "$HOME/.sesh/hub.log" 2>/dev/null | tr '\n' ';' | cut -c1-200)
-    assert "hub.url removed after last leaf disconnect" "removed" "still present after 6s (hub.log: ${HUBLOG_TAIL:-empty})"
+    assert "hub URL files removed after last leaf disconnect" "removed" "still present after 6s (hub.log: ${HUBLOG_TAIL:-empty})"
 fi
 
 # Pattern: Session Lockfile & Collision Detection
@@ -300,9 +313,10 @@ sesh_down_in /tmp/g3-leaf2 s2
 log "=== Group 4: JetStream durability ==="
 
 # Groups 4-5 need clean hub state. T1.2 demonstrates sesh isn't always
-# removing hub.url on shutdown — without the reset here, stale hub.url
-# from G3 causes sesh up to write the partial PID-only session JSON
-# instead of completing the publish step, and SESH_NATS_URL stays empty.
+# removing hub.url (and its hub.nats.url / hub.fossil.url siblings) on
+# shutdown — without the reset here, stale URL files from G3 cause sesh
+# up to write the partial PID-only session JSON instead of completing
+# the publish step, and SESH_NATS_URL stays empty.
 sesh_full_reset
 
 log "T4.1: JetStream enabled on the session NATS"

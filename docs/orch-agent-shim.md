@@ -102,7 +102,7 @@ then resolved defaults.
 | `--pane`   | —               | (required)                                | Raw tmux pane id, e.g. `%37`.                              |
 | `--owner`  | `ORCH_OWNER`    | `$USER` / passwd lookup                   | Lands in metadata.owner.                                   |
 | `--session`| `SESH_SESSION`  | `""` (omitted from metadata)              | Marks the agent as session-aware per §3.2.                 |
-| `--nats`   | `NATS_URL`      | `~/.sesh/hub.url` → `nats://127.0.0.1:4222` | URL resolution per `shim.ReadNATSURL`.                     |
+| `--nats`   | `NATS_URL`      | `~/.sesh/hub.nats.url` → `~/.sesh/hub.url` (legacy, deprecation warning) → `nats://127.0.0.1:4222` | URL resolution per `shim.ReadNATSURL`. `hub.nats.url` is the NATS client URL written by sesh's `cli/hubinfo.go`; `hub.url` is the leaf-node URL kept only for backwards compatibility. |
 | `--outfit` | `ORCH_OUTFIT`   | `""`                                      | orch-specific metadata (forward-compat per §12).           |
 | `--role`   | `ORCH_ROLE`     | `worker`                                  | orch-specific metadata.                                    |
 | `--cwd`    | —               | `tmux display-message -p '#{pane_current_path}'` | Used by the adapter to locate the transcript directory.    |

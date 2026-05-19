@@ -47,8 +47,10 @@
 //	                       panes
 //	ORCH_GOAL_TOKEN_ESTIMATE — optional; per-turn token estimate (default 5000)
 //	SESH_OPS_BIN         — optional; sesh-ops binary (default "sesh-ops")
-//	NATS_URL             — optional; NATS server URL (default reads ~/.sesh/hub.url,
-//	                       then nats://127.0.0.1:4222)
+//	NATS_URL             — optional; NATS server URL. Resolution order:
+//	                       $NATS_URL → ~/.sesh/hub.nats.url →
+//	                       ~/.sesh/hub.url (legacy; emits a deprecation
+//	                       warning on stderr) → nats://127.0.0.1:4222.
 //
 // PID file: ~/.cache/orch-goal-daemon/<goal-id>.pid
 // Cleaned up on exit.
@@ -70,6 +72,8 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+
+	"github.com/danmestas/orch/internal/natsurl"
 )
 
 const (
@@ -185,7 +189,7 @@ func loadConfig() (config, error) {
 		owner:         owner,
 		tokenEstimate: estimate,
 		seshOpsBin:    seshOpsBin,
-		natsURL:       readNATSURL(),
+		natsURL:       natsurl.Resolve("orch-goal-stop-account-daemon", ""),
 	}, nil
 }
 
@@ -284,23 +288,6 @@ func accountTurn(parentCtx context.Context, cfg config) error {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
-}
-
-// readNATSURL resolves the NATS URL via the same precedence chain used by
-// orch-agent-shim: $NATS_URL → ~/.sesh/hub.url → default loopback.
-func readNATSURL() string {
-	if u := os.Getenv("NATS_URL"); u != "" {
-		return u
-	}
-	home, err := os.UserHomeDir()
-	if err == nil {
-		if raw, err := os.ReadFile(filepath.Join(home, ".sesh", "hub.url")); err == nil {
-			if u := strings.TrimSpace(string(raw)); u != "" {
-				return u
-			}
-		}
-	}
-	return "nats://127.0.0.1:4222"
 }
 
 // writePID creates ~/.cache/orch-goal-daemon/<goal-id>.pid with the daemon's PID.
