@@ -151,7 +151,7 @@ func NewQueryChunk(id, replySubject, prompt string) Chunk
 func NewTerminatorChunk() Chunk
 func NewErrorChunk(code int, msg string, body map[string]any) Chunk
 
-// Resolves NATS URL using documented precedence: override → $NATS_URL → ~/.sesh/hub.url → default.
+// Resolves NATS URL using documented precedence: override → $NATS_URL → ~/.sesh/hub.nats.url → ~/.sesh/hub.url (legacy; deprecation warning) → default.
 func ReadNATSURL(override string) string
 ```
 

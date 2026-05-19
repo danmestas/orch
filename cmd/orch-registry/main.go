@@ -11,7 +11,8 @@
 //
 // All commands read $SRV.INFO.agents from NATS plus the operator's
 // ~/.config/orch-aliases. NATS URL resolution mirrors the shim:
-// --nats → $NATS_URL → ~/.sesh/hub.url → nats://127.0.0.1:4222.
+// --nats → $NATS_URL → ~/.sesh/hub.nats.url → ~/.sesh/hub.url
+// (legacy; deprecation warning) → nats://127.0.0.1:4222.
 //
 // Consumers:
 //
@@ -79,7 +80,7 @@ func usage() {
 		"  serve   [--nats URL] [--interval N]    Publish orch.registry.snapshot every N seconds (default 5s)\n" +
 		"\n" +
 		"Common flags:\n" +
-		"  --nats URL          NATS URL override (default $NATS_URL or ~/.sesh/hub.url)\n" +
+		"  --nats URL          NATS URL override (default $NATS_URL or ~/.sesh/hub.nats.url; falls back to ~/.sesh/hub.url with a deprecation warning)\n" +
 		"  --alias-file PATH   override ~/.config/orch-aliases\n" +
 		"  --operator-file PATH override ~/.cache/orch-operator.json\n" +
 		"  --hb-window D       alive threshold (default 90s)\n"
