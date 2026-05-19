@@ -82,6 +82,19 @@ Behind the scenes, each worker is a tmux pane running a full agent CLI with an o
 
 You don't drive any of this manually. You describe what you want; orch's installed skill suite handles the spawning, the addressing, the listening, and the escalation surface.
 
+## Environment variables
+
+Orch's binaries honor a small set of env vars. Defaults are sensible; override only when needed.
+
+| Variable | Consumer | Purpose |
+| --- | --- | --- |
+| `ORCH_SESH_BIN` | `orch-spawn` | Absolute path to the `sesh` binary for `--sesh-session` resolution (default: first `sesh` on PATH). Must be absolute; orch-spawn `cd`s during resolution, so a relative path can break silently. Bad / missing path → orch-spawn errors before spawning any pane. |
+| `ORCH_PROJECTS_ROOT` | `orch-spawn` | Fallback root for `--project <name>` when zoxide misses (default: `$HOME/projects`). |
+| `ORCH_VERIFY_TIMEOUT` | `orch-spawn` | Readiness poll budget in seconds for `--verify` (default: `60`). |
+| `ORCH_HEADLESS_SESSION` | `orch-spawn` | Name of the detached tmux session for `--headless` (default: `orch-headless`). |
+| `NATS_URL` | shim, `orch-tell`, `orch-ask` | NATS connect URL (default: client-library default, typically `nats://127.0.0.1:4222`). |
+| `SESH_GOAL_ID` / `SESH_GOAL_SCOPE` / `SESH_GOAL_SCOPE_ID` | `orch-spawn`, goal-harness | Propagated into spawned panes so sesh-goal hooks activate. Usually set by `orch-goal-pursue`. |
+
 ## Goal-harness (optional sesh integration)
 
 The goal-harness is orch's reference implementation of the [sesh goal-management spec](https://github.com/danmestas/sesh/blob/main/docs/goal-management.md). It wraps sesh's substrate-side goal records (token + wall-clock budgets, completion audit, hierarchical decomposition) with the harness-side discipline the spec calls out as non-substrate concerns: continuation, token accounting, context injection, completion verification.
