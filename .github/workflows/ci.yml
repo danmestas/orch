@@ -2,11 +2,19 @@ name: ci
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
 permissions:
   contents: read
+
+# Cancel superseded runs on the same ref so a follow-up push doesn't pile up
+# on top of an in-flight run. PRs running in the merge queue use a separate
+# ref so they aren't accidentally cancelled by direct-branch pushes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   static:
