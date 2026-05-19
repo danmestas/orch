@@ -114,8 +114,11 @@ func cmdValidate(args []string) error {
 		return err
 	}
 	subtree.ResolveEnv(t, os.Getenv)
-	if err := subtree.Validate(t); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	rpt := subtree.Validate(t)
+	if s := rpt.String(); s != "" {
+		fmt.Fprintln(os.Stderr, s)
+	}
+	if !rpt.Valid() {
 		return errInvalid
 	}
 	fmt.Fprintf(os.Stderr, "%s: ok (%d worker(s), %d task seed(s), %d goal seed(s))\n",
