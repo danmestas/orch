@@ -19,7 +19,10 @@
 #
 #   Optional:
 #     ORCH_HEADLESS_SESSION  — name for the headless tmux session (default: orch-headless)
-#     ORCH_VERIFY_TIMEOUT    — readiness poll budget in seconds (default: 60)
+#     ORCH_VERIFY_TIMEOUT    — total readiness poll budget in seconds (default: 60)
+#     ORCH_VERIFY_BACKOFF    — comma-separated wait sequence between verify
+#                              attempts (default: `1,2,4,8`). Total wall time
+#                              is capped by ORCH_VERIFY_TIMEOUT.
 #
 # Output contract (inherited from bin/orch-spawn):
 #   stdout — exactly one line: the new pane id (e.g. %42)
@@ -157,34 +160,106 @@ if [ "${VERIFY:-0}" -eq 1 ]; then
         pi)     BANNER="" ;;
         *)      BANNER="" ;;
     esac
-    deadline=$(( $(date +%s) + VERIFY_TIMEOUT ))
+
+    # Retry-with-backoff (closes #28). A fixed timeout is simultaneously too
+    # short for cold starts (heavy outfit, MCP load, slow CI runner) and too
+    # long for permanently-broken workers (missing binary, wrong CWD). The
+    # backoff sequence lets operators tolerate slow starts without paying
+    # the worst-case wall time on every failure.
+    #
+    # ORCH_VERIFY_BACKOFF is a comma-separated wait sequence (default
+    # `1,2,4,8`) — the wait BEFORE each attempt's readiness check. After
+    # the first attempt finishes its readiness probe, we sleep the second
+    # entry, probe again, and so on. The total wall time is capped at
+    # ORCH_VERIFY_TIMEOUT regardless of how many attempts remain.
+    #
+    # Fail-fast cases stop the loop before the next attempt:
+    #   - pane vanished from tmux (`pane died`) — the WRAP itself crashed,
+    #     no point retrying
+    #   - capture-pane shows `command not found` / `No such file or
+    #     directory` for the agent binary — harness isn't installed,
+    #     retrying won't summon it
+    BACKOFF_SPEC=${ORCH_VERIFY_BACKOFF:-1,2,4,8}
+    # Split comma-separated sequence into an array. Empty entries are
+    # tolerated (just skipped); non-numeric entries fall through to sleep
+    # which will error — refuse early instead.
+    IFS=',' read -r -a BACKOFF_WAITS <<< "$BACKOFF_SPEC"
+    for _w in "${BACKOFF_WAITS[@]}"; do
+        case "$_w" in
+            ''|*[!0-9.]*)
+                echo "orch-spawn: ORCH_VERIFY_BACKOFF must be comma-separated numbers (got: $BACKOFF_SPEC)" >&2
+                exit 1 ;;
+        esac
+    done
+    [ "${#BACKOFF_WAITS[@]}" -gt 0 ] || BACKOFF_WAITS=(1 2 4 8)
+
+    start_ts=$(date +%s)
+    deadline=$(( start_ts + VERIFY_TIMEOUT ))
     verify_state=""
-    while [ "$(date +%s)" -lt "$deadline" ]; do
+    attempt=0
+    attempts_made=0
+    for wait_s in "${BACKOFF_WAITS[@]}"; do
+        attempt=$((attempt + 1))
+        # Cap each wait so we never sleep past the deadline.
+        now=$(date +%s)
+        remaining=$(( deadline - now ))
+        [ "$remaining" -le 0 ] && break
+        # Truncate sleep if it would overshoot the deadline. Use python/awk-free
+        # integer comparison; sub-second backoffs are rare in practice.
+        eff_wait=$wait_s
+        # Compare as integers using awk only when fractional — keep the common
+        # integer case shell-only for portability.
+        case "$wait_s" in
+            *.*)
+                eff_wait=$(awk -v w="$wait_s" -v r="$remaining" 'BEGIN{print (w<r)?w:r}') ;;
+            *)
+                [ "$wait_s" -gt "$remaining" ] && eff_wait=$remaining ;;
+        esac
+        sleep "$eff_wait"
+        attempts_made=$attempt
+
+        # Fail-fast: pane gone.
         if ! tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx "$PANE"; then
             verify_state="died"; break
         fi
+
+        # Readiness probe: title rename OR banner match.
         cur_cmd=$(tmux display -p -t "$PANE" '#{pane_current_command}' 2>/dev/null || echo "")
         case "$cur_cmd" in
             ""|zsh|bash|sh|fish|dash|ksh)
-                # Title-rename not yet — try banner-match as the cheap
-                # fallback. If BANNER is empty we skip and keep polling.
                 if [ -n "$BANNER" ] && \
                    tmux capture-pane -p -J -t "$PANE" 2>/dev/null | grep -qF "$BANNER"; then
                     verify_state="ready"; break
+                fi
+                # Fail-fast: missing harness binary surfaces as a shell error
+                # line in the captured buffer. Patterns cover bash/zsh/dash and
+                # the macOS `not found` variant. The WRAP's trailing `read`
+                # keeps the pane alive with $SHELL foreground, so we'd
+                # otherwise burn the full ORCH_VERIFY_TIMEOUT before failing.
+                cap=$(tmux capture-pane -p -J -t "$PANE" 2>/dev/null || echo "")
+                if printf '%s' "$cap" | grep -qE "($AGENT: command not found|command not found: $AGENT|$AGENT: not found|No such file or directory.*$AGENT)"; then
+                    verify_state="missing-binary"; break
                 fi
                 ;;
             *)
                 verify_state="ready"; break ;;
         esac
-        sleep 0.5
+
+        # Out of attempts? Bail before the next iter's sleep so the failure
+        # surfaces against the attempt count, not the wall clock.
+        [ "$(date +%s)" -ge "$deadline" ] && break
     done
+
+    elapsed=$(( $(date +%s) - start_ts ))
     case "$verify_state" in
         ready)
-            echo "orch-spawn: agent ready in pane $PANE" >&2 ;;
+            echo "orch-spawn: agent ready in pane $PANE (attempt $attempts_made/${#BACKOFF_WAITS[@]}, ${elapsed}s)" >&2 ;;
         died)
-            echo "orch-spawn: agent failed to start in $PANE (pane died)" >&2; exit 1 ;;
+            echo "orch-spawn: agent failed to start in $PANE (pane died, attempt $attempts_made/${#BACKOFF_WAITS[@]})" >&2; exit 1 ;;
+        missing-binary)
+            echo "orch-spawn: agent failed to start in $PANE ($AGENT binary missing — install the harness CLI; verify failed after $attempts_made attempts)" >&2; exit 1 ;;
         *)
-            echo "orch-spawn: agent failed to start in $PANE (timeout)" >&2; exit 1 ;;
+            echo "orch-spawn: agent failed to start in $PANE (verify failed after $attempts_made attempts, timeout after ${elapsed}s; set ORCH_VERIFY_TIMEOUT or ORCH_VERIFY_BACKOFF, or pass --no-verify to skip)" >&2; exit 1 ;;
     esac
 else
     sleep 1

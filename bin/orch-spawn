@@ -17,7 +17,15 @@
 #                            any pane is spawned.
 #   ORCH_PROJECTS_ROOT     — fallback root for `--project <name>` lookups when
 #                            zoxide miss (default: $HOME/projects).
-#   ORCH_VERIFY_TIMEOUT    — readiness poll budget for --verify (default: 60s).
+#   ORCH_VERIFY_TIMEOUT    — total readiness poll budget for --verify
+#                            (default: 60s). Caps the cumulative wall time
+#                            across all retry attempts.
+#   ORCH_VERIFY_BACKOFF    — comma-separated wait sequence between --verify
+#                            attempts (default: `1,2,4,8`). Each entry is the
+#                            number of seconds to wait BEFORE the next
+#                            readiness probe. Total time capped by
+#                            ORCH_VERIFY_TIMEOUT; fail-fast on pane death or
+#                            missing harness binary.
 #   ORCH_HEADLESS_SESSION  — name of the detached headless tmux session
 #                            (default: orch-headless).
 #
@@ -58,11 +66,16 @@
 # when an agent's REPL is interactive before the title rename catches up
 # (heavy outfits with many MCP servers / hooks routinely cross the title
 # threshold late). The pane dying still counts as a failure. Default
-# budget is 60s, overridable via ORCH_VERIFY_TIMEOUT. On success, emits
-# one stderr line "orch-spawn: agent ready in pane %X". On failure, emits
-# "orch-spawn: agent failed to start in %X (pane died|timeout)" and exits
-# non-zero — useful for catching the silent-shell-pane failure mode where
-# the agent CLI never actually launches.
+# budget is 60s, overridable via ORCH_VERIFY_TIMEOUT. Retries follow the
+# ORCH_VERIFY_BACKOFF sequence (default `1,2,4,8` — exponential up to the
+# total timeout) so a slow cold start can succeed on a later attempt
+# without dragging the failure case out to the full timeout. Fail-fast on
+# pane death or "command not found" output for the harness binary. On
+# success, emits one stderr line "orch-spawn: agent ready in pane %X
+# (attempt N/M, Ts)". On failure, emits "orch-spawn: verify failed after
+# N attempts" (or "pane died" / "binary missing") and exits non-zero —
+# useful for catching the silent-shell-pane failure mode where the agent
+# CLI never actually launches.
 #
 # Examples:
 #   orch-spawn claude --project gonvex
@@ -105,7 +118,7 @@ set -euo pipefail
 
 AGENT=${1:-}
 shift 2>/dev/null || true
-[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim] [--executor tmux|wasm]    env: [ORCH_SESH_BIN=<abs-path>] [ORCH_PROJECTS_ROOT=<dir>] [ORCH_VERIFY_TIMEOUT=<sec>] [ORCH_HEADLESS_SESSION=<name>]" >&2; exit 1; }
+[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim] [--executor tmux|wasm]    env: [ORCH_SESH_BIN=<abs-path>] [ORCH_PROJECTS_ROOT=<dir>] [ORCH_VERIFY_TIMEOUT=<sec>] [ORCH_VERIFY_BACKOFF=1,2,4,8] [ORCH_HEADLESS_SESSION=<name>]" >&2; exit 1; }
 
 CWD=""
 SESH_SESSION_FLAG=""
