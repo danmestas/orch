@@ -145,7 +145,7 @@ Symptom → likely cause map:
 | symptom | likely cause | check |
 |---|---|---|
 | orch-spawn output doesn't start with `%` | warning printed before pane id, or pane creation failed | `orch-spawn ... 2>&1 \| grep -E '^%[0-9]+'` |
-| shim log shows "starting" but service never registers | wrong NATS_URL, or leaf vs hub confusion | `cat ~/.sesh/hub.url` vs the URL the shim was given |
+| shim log shows "starting" but service never registers | wrong NATS_URL, or leaf vs hub confusion | `cat ~/.sesh/hub.nats.url` (the NATS client URL) vs the URL the shim was given — NOT `hub.url`, which is the leaf-node URL |
 | shim log is empty / missing | shim crashed before logging, or adapter probe rejected | `ps -eo pid,command \| grep orch-agent-shim` |
 | pane exists but no shim | `--no-shim` was passed, or adapter probe failed (exit 2 path) | `ls -la ~/.cache/orch-shim/<pct-pane>.log` |
 | `$SRV.INFO.agents` shows stale workers | disowned shims from prior tests still alive | `pkill -f orch-agent-shim` or wait for sesh hub to die |
