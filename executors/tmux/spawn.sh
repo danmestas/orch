@@ -152,6 +152,12 @@ else
     PANE=$(tmux split-window -d "${SPLIT_ARGS[@]}" -P -F '#{pane_id}' -t "$CUR" "$WRAP")
 fi
 
+# Emit the pane id immediately so the dispatcher always learns it — even
+# when the verify loop below decides the agent isn't ready and exits 1.
+# The pane is real and the shim's pane-watchdog can manage it; gating the
+# pane id on verify success would strand a live worker (issue #185).
+echo "$PANE"
+
 # Brief settle so ORCH_PANE_ID is in the agent's env before the listener
 # might fire and so registry capture is meaningful.
 if [ "${VERIFY:-0}" -eq 1 ]; then
@@ -276,5 +282,4 @@ if [ "${VERIFY:-0}" -eq 1 ]; then
 else
     sleep 1
 fi
-
-echo "$PANE"
+# Pane id already echoed pre-verify; nothing more to emit on stdout.
