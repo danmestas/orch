@@ -509,8 +509,27 @@ SPAWN_SCRIPT="${ORCH_REPO_ROOT}/executors/${EXECUTOR}/spawn.sh"
 # Delegate to the executor. All resolved state is exported so the executor
 # script can read it without re-parsing args. stdout from the executor is the
 # pane id; we capture it for the shim launch downstream.
+#
+# Issue #185: the executor emits the pane id on stdout BEFORE its --verify
+# loop runs, so the pane id reaches us even when verify decides the agent
+# failed to start. We deliberately capture the executor's exit code into
+# SPAWN_RC (suppressing set -e via the `|| ...` form) and continue with the
+# slug labeling + shim launch path; the shim's pane-watchdog handles the
+# pane-died case cleanly, so launching it for an "unverified" pane is safe
+# and is the correct behaviour when the pane is in fact alive. We re-honour
+# the executor's exit code at the very end so callers still see rc=1 on
+# verify failure.
+SPAWN_RC=0
 PANE=$(export AGENT CWD HEADLESS NO_FLEET POSITION VERIFY OUTFIT BUNDLE GOAL_EXPORTS NO_SHIM ROLE; \
-      bash "$SPAWN_SCRIPT")
+      bash "$SPAWN_SCRIPT") || SPAWN_RC=$?
+
+# Pre-pane failure (e.g., unknown AGENT before split-window, or split-window
+# itself errored) — PANE is empty. No slug / shim work to do; just propagate
+# the executor's exit code. Stdout stays empty in this case, preserving the
+# pre-spawn error-path contract that test-orch-spawn-output.sh checks.
+if [ -z "$PANE" ]; then
+    exit "$SPAWN_RC"
+fi
 
 # Slug labeling (3 layers — operator-facing identity for the worker):
 #   1. tmux pane title via `tmux select-pane -T <slug>`. Operators see this
@@ -639,4 +658,13 @@ if [ $NO_SHIM -eq 0 ]; then
     fi
 fi
 
+# Emit the pane id (always — issue #185). The executor exported it on
+# stdout pre-verify so PANE is set even when --verify decided the agent
+# wasn't ready; the pane is real and the shim is now bound, so the
+# operator/caller needs the id to reach the worker even on the failure
+# path. We re-honour the executor's exit code so callers still see rc=1
+# when verify failed — preserving the failure signal — but stdout now
+# always carries the pane id, matching the contract documented in
+# executors/tmux/spawn.sh.
 echo "$PANE"
+exit "$SPAWN_RC"

@@ -82,12 +82,20 @@ echo "=== --verify with missing binary → timeout failure ==="
 export ORCH_VERIFY_TIMEOUT=3
 TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
 "$SPAWN" pi --no-fleet --verify >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
-# Even on failure, the pane was created — capture it for cleanup.
-maybe_pane=$(grep -oE '%[0-9]+' "$TMP_ERR" | head -1)
+# Pane is created before the verify loop runs — capture it for cleanup.
+# Issue #185 changed the contract: pane id is now ALSO on stdout on the
+# failure path (so callers can reach the live pane / bound shim), but
+# stderr's failure message still embeds the pane id, so either source
+# works for cleanup.
+maybe_pane=$(grep -oE '%[0-9]+' "$TMP_OUT" "$TMP_ERR" | head -1 | sed 's/.*://')
 [ -n "$maybe_pane" ] && SPAWNED_PANES+=("$maybe_pane")
 
 assert "missing-binary: rc=1" 1 "$rc"
-assert "missing-binary: stdout empty (no pane id leaked on failure)" "" "$(cat "$TMP_OUT")"
+# Issue #185: shim launch is decoupled from --verify. The pane id is
+# emitted on stdout regardless of verify outcome so the caller can reach
+# the now-shim-registered worker even when verify timed out. The single-
+# line shape of the canonical stdout contract is preserved.
+assert_contains "missing-binary: stdout carries the pane id (issue #185 contract)" "%" "$(cat "$TMP_OUT")"
 assert_contains "missing-binary: stderr names failure mode" "agent failed to start" "$(cat "$TMP_ERR")"
 # Could be "timeout", "pane died", or the explicit "binary missing" branch
 # (#28 introduced the latter as a fail-fast variant). All three are acceptable
