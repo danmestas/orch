@@ -50,7 +50,11 @@ NATS-publish hooks were retired in orch#94 — the shim is the only path.
 
 - The headless tmux session name defaults to `orch-headless`. Override with
   `ORCH_HEADLESS_SESSION`.
-- The readiness poll timeout defaults to 60 seconds. Override with
-  `ORCH_VERIFY_TIMEOUT`.
+- The readiness poll timeout defaults to 60 seconds total wall time.
+  Override with `ORCH_VERIFY_TIMEOUT`.
+- Verify retries follow `ORCH_VERIFY_BACKOFF` (default `1,2,4,8` — sleep
+  durations between attempts, in seconds). Total bounded by
+  `ORCH_VERIFY_TIMEOUT`. Fail-fast on pane death or "command not found"
+  output for the harness binary.
 - Agent banners verified for title-rename detection: `claude` ("Claude Code"),
   `gemini` ("Gemini CLI"). Codex and pi fall back to process-title rename only.

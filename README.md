@@ -90,7 +90,8 @@ Orch's binaries honor a small set of env vars. Defaults are sensible; override o
 | --- | --- | --- |
 | `ORCH_SESH_BIN` | `orch-spawn` | Absolute path to the `sesh` binary for `--sesh-session` resolution (default: first `sesh` on PATH). Must be absolute; orch-spawn `cd`s during resolution, so a relative path can break silently. Bad / missing path → orch-spawn errors before spawning any pane. |
 | `ORCH_PROJECTS_ROOT` | `orch-spawn` | Fallback root for `--project <name>` when zoxide misses (default: `$HOME/projects`). |
-| `ORCH_VERIFY_TIMEOUT` | `orch-spawn` | Readiness poll budget in seconds for `--verify` (default: `60`). |
+| `ORCH_VERIFY_TIMEOUT` | `orch-spawn` | Total readiness poll budget in seconds for `--verify` (default: `60`). Caps cumulative wall time across all retry attempts. |
+| `ORCH_VERIFY_BACKOFF` | `orch-spawn` | Comma-separated wait sequence between `--verify` attempts (default: `1,2,4,8` — exponential). Each entry is seconds to wait before the next readiness probe; total time bounded by `ORCH_VERIFY_TIMEOUT`. Fail-fast on pane death or missing harness binary. |
 | `ORCH_HEADLESS_SESSION` | `orch-spawn` | Name of the detached tmux session for `--headless` (default: `orch-headless`). |
 | `ORCH_WORKTREE_ROOT` | `orch-spawn` | Directory under which `--worktree-from <sha>` creates new worktrees (default: `${ORCH_PROJECTS_ROOT:-$HOME/projects}/<repo>-worktrees/`). Combined with `--slug <name>`, the full path is `<root>/<slug>`. |
 | `ORCH_ALIASES_FILE` | `orch-spawn` | Alias file written by `--slug <name>` (default: `~/.config/orch-aliases`). Each spawn with `--slug` appends a `<slug>=<pane_id>` line so other harnesses can resolve workers by name without an active bus subscription. |

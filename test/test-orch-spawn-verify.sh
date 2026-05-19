@@ -84,12 +84,14 @@ maybe_pane=$(grep -oE '%[0-9]+' "$TMP_ERR" | head -1)
 assert "missing-binary: rc=1" 1 "$rc"
 assert "missing-binary: stdout empty (no pane id leaked on failure)" "" "$(cat "$TMP_OUT")"
 assert_contains "missing-binary: stderr names failure mode" "agent failed to start" "$(cat "$TMP_ERR")"
-# Could be "timeout" or "pane died" depending on shell behaviour; both acceptable.
+# Could be "timeout", "pane died", or the explicit "binary missing" branch
+# (#28 introduced the latter as a fail-fast variant). All three are acceptable
+# as long as the operator gets a clear failure-mode hint.
 case "$(cat "$TMP_ERR")" in
-    *timeout*|*"pane died"*) match="ok" ;;
-    *)                       match="missing" ;;
+    *timeout*|*"pane died"*|*"binary missing"*) match="ok" ;;
+    *)                                          match="missing" ;;
 esac
-assert "missing-binary: stderr explains timeout|pane-died" "ok" "$match"
+assert "missing-binary: stderr explains timeout|pane-died|binary-missing" "ok" "$match"
 rm -f "$TMP_OUT" "$TMP_ERR"
 
 echo

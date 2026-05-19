@@ -107,6 +107,7 @@ jobs:
             test/test-orch-worktree-from.sh
             test/test-orch-cwd-quoting.sh
             test/test-orch-spawn-verify.sh
+            test/test-orch-verify-retry.sh
             test/test-orch-tail.sh
             test/test-orch-version.sh
             test/test-orch-observer-role.sh
@@ -122,10 +123,23 @@ jobs:
           chmod +x /tmp/orch-ci-runner.sh
 
           rm -f /tmp/orch-ci.log /tmp/orch-ci.rc
+          # After the runner script finishes, kill the ci tmux server unconditionally.
+          # Some tests (orch-spawn family) leave zombie panes that keep the session
+          # alive — without the trailing kill-server, has-session loops forever and
+          # the job hits the 6h GH Actions timeout. See #28's verify-retry test +
+          # follow-up issue tracking the per-test cleanup fix.
           ORCH_ROOT="$PWD" tmux -L ci new-session -d -s ci -x 200 -y 50 \
-            "/tmp/orch-ci-runner.sh > /tmp/orch-ci.log 2>&1; echo \$? > /tmp/orch-ci.rc"
+            "/tmp/orch-ci-runner.sh > /tmp/orch-ci.log 2>&1; echo \$? > /tmp/orch-ci.rc; tmux -L ci kill-server 2>/dev/null || true"
 
+          # Bounded wait — even if kill-server is racing, cap at 15 min so a
+          # bug here can't blow the entire CI budget.
+          deadline=$(( $(date +%s) + 900 ))
           while tmux -L ci has-session -t ci 2>/dev/null; do
+            if [ "$(date +%s)" -gt "$deadline" ]; then
+              echo "warn: ci tmux session lingered past 15min; force-killing"
+              tmux -L ci kill-server 2>/dev/null || true
+              break
+            fi
             sleep 1
           done
 
