@@ -93,6 +93,8 @@ Orch's binaries honor a small set of env vars. Defaults are sensible; override o
 | `ORCH_VERIFY_TIMEOUT` | `orch-spawn` | Total readiness poll budget in seconds for `--verify` (default: `60`). Caps cumulative wall time across all retry attempts. |
 | `ORCH_VERIFY_BACKOFF` | `orch-spawn` | Comma-separated wait sequence between `--verify` attempts (default: `1,2,4,8` — exponential). Each entry is seconds to wait before the next readiness probe; total time bounded by `ORCH_VERIFY_TIMEOUT`. Fail-fast on pane death or missing harness binary. |
 | `ORCH_HEADLESS_SESSION` | `orch-spawn` | Name of the detached tmux session for `--headless` (default: `orch-headless`). |
+| `ORCH_WORKTREE_ROOT` | `orch-spawn` | Directory under which `--worktree-from <sha>` creates new worktrees (default: `${ORCH_PROJECTS_ROOT:-$HOME/projects}/<repo>-worktrees/`). Combined with `--slug <name>`, the full path is `<root>/<slug>`. |
+| `ORCH_ALIASES_FILE` | `orch-spawn` | Alias file written by `--slug <name>` (default: `~/.config/orch-aliases`). Each spawn with `--slug` appends a `<slug>=<pane_id>` line so other harnesses can resolve workers by name without an active bus subscription. |
 | `NATS_URL` | shim, `orch-tell`, `orch-ask` | NATS connect URL (default: client-library default, typically `nats://127.0.0.1:4222`). |
 | `SESH_GOAL_ID` / `SESH_GOAL_SCOPE` / `SESH_GOAL_SCOPE_ID` | `orch-spawn`, goal-harness | Propagated into spawned panes so sesh-goal hooks activate. Usually set by `orch-goal-pursue`. |
 

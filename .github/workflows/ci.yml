@@ -96,6 +96,7 @@ jobs:
             test/test-orch-project-resolution.sh
             test/test-orch-spawn-output.sh
             test/test-orch-spawn-sesh-session.sh
+            test/test-orch-worktree-from.sh
             test/test-orch-cwd-quoting.sh
             test/test-orch-spawn-verify.sh
             test/test-orch-verify-retry.sh
@@ -103,6 +104,7 @@ jobs:
             test/test-orch-version.sh
             test/test-orch-observer-role.sh
             test/test-orch-spy.sh
+            test/test-orch-stack.sh
             test/test-cc-subagent-bridge.sh
           )
           for t in "${tests[@]}"; do

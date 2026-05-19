@@ -3,6 +3,7 @@
 #
 # Usage:
 #   orch-spawn <agent> [--cwd <path>] [--sesh-session <label>] [--project <name>]
+#                         [--worktree-from <sha>] [--slug <name>]
 #                         [--headless] [--no-fleet]
 #                         [--quiet] [--role <worker|observer>]
 #                         [--position <right|left|above|below>] [--verify]
@@ -28,6 +29,13 @@
 #                            missing harness binary.
 #   ORCH_HEADLESS_SESSION  — name of the detached headless tmux session
 #                            (default: orch-headless).
+#   ORCH_WORKTREE_ROOT     — directory under which --worktree-from creates new
+#                            worktrees (default:
+#                            ${ORCH_PROJECTS_ROOT:-$HOME/projects}/<repo>-worktrees/).
+#   ORCH_ALIASES_FILE      — alias file written by --slug (default:
+#                            ~/.config/orch-aliases). Each --slug appends a
+#                            `<slug>=<pane_id>` line so other harnesses can
+#                            resolve the worker by name.
 #
 # --sesh-session <label> sets the worker's cwd to the fossil checkout
 # provisioned by `sesh worktree <label>` — the worker-side leg of the
@@ -114,16 +122,41 @@
 # suit interop: prefers `suit prepare --quiet` (v0.10+) for clean bundle-path
 # capture; falls back to legacy stdout-tail capture on older suit so the
 # spawn keeps working without forcing a suit upgrade.
+#
+# --worktree-from <sha> + --slug <name>:
+#   The slug is a worker-identity concept; the worktree is a filesystem
+#   concept. The two flags are decoupled so callers can mix-and-match:
+#
+#   - Both set:   create worktree at <sha> under
+#                 ${ORCH_WORKTREE_ROOT}/<slug>; pane gets <slug> as its
+#                 title; ~/.config/orch-aliases gets a `<slug>=<pane_id>`
+#                 line so other harnesses can resolve by name.
+#   - --slug only:        cwd is unchanged; the pane is still labeled and
+#                         the alias is still written (useful for tagging a
+#                         worker spawned in the current repo).
+#   - --worktree-from only: an auto-slug `<sha7>-<rand4>` is synthesized
+#                         and used for both the worktree dir name and the
+#                         label.
+#   - Neither:    legacy behaviour (no worktree, no label, no alias).
+#
+#   --worktree-from is mutually exclusive with --cwd and --sesh-session
+#   (those flags pick their own checkout strategy; the worktree creator
+#   would just stomp them). --slug carries no checkout semantics on its
+#   own and composes freely with --cwd / --sesh-session / --project.
 set -euo pipefail
 
 AGENT=${1:-}
 shift 2>/dev/null || true
-[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim] [--executor tmux|wasm]    env: [ORCH_SESH_BIN=<abs-path>] [ORCH_PROJECTS_ROOT=<dir>] [ORCH_VERIFY_TIMEOUT=<sec>] [ORCH_VERIFY_BACKOFF=1,2,4,8] [ORCH_HEADLESS_SESSION=<name>]" >&2; exit 1; }
+[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--worktree-from sha] [--slug name] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim] [--executor tmux|wasm]    env: [ORCH_SESH_BIN=<abs-path>] [ORCH_PROJECTS_ROOT=<dir>] [ORCH_VERIFY_TIMEOUT=<sec>] [ORCH_VERIFY_BACKOFF=1,2,4,8] [ORCH_HEADLESS_SESSION=<name>] [ORCH_WORKTREE_ROOT=<dir>] [ORCH_ALIASES_FILE=<path>]" >&2; exit 1; }
 
 CWD=""
 SESH_SESSION_FLAG=""
 CWD_FROM_FLAG=0
 PROJECT=""
+WORKTREE_FROM=""
+WORKTREE_FROM_FLAG=0
+SLUG=""
+SLUG_FROM_FLAG=0
 HEADLESS=0
 NO_FLEET=0
 QUIET=0
@@ -142,6 +175,8 @@ while [ $# -gt 0 ]; do
         --cwd) CWD=$2; CWD_FROM_FLAG=1; shift 2 ;;
         --sesh-session) SESH_SESSION_FLAG=$2; shift 2 ;;
         --project) PROJECT=$2; shift 2 ;;
+        --worktree-from) WORKTREE_FROM=$2; WORKTREE_FROM_FLAG=1; shift 2 ;;
+        --slug) SLUG=$2; SLUG_FROM_FLAG=1; shift 2 ;;
         --headless) HEADLESS=1; shift ;;
         --no-fleet) NO_FLEET=1; shift ;;
         --quiet) QUIET=1; exec 2>/dev/null; shift ;;
@@ -193,6 +228,89 @@ if [ -z "$ROLE" ]; then
     esac
 fi
 [ -z "$ROLE" ] && ROLE=worker
+
+# --worktree-from resolution: create a git worktree at <sha> under the
+# worktree root and set that as the worker's cwd. Decoupled from --slug
+# (the label) so callers can use either flag independently — see header
+# comment for the matrix of combinations.
+#
+# Mutual exclusivity: --cwd and --sesh-session each pick their own
+# checkout strategy; layering --worktree-from on top of either would
+# stomp them silently. Refuse early with a helpful message.
+#
+# Slug synthesis when --worktree-from is set without --slug:
+# `<sha7>-<rand4>` — short enough for a tmux pane title, unique enough
+# under churn (4 random hex digits = 65k namespace per sha-prefix).
+#
+# Worktree root: ${ORCH_WORKTREE_ROOT} wins; otherwise we derive
+# `${ORCH_PROJECTS_ROOT:-$HOME/projects}/<repo>-worktrees/<slug>` from
+# the parent repo's basename. The parent repo is wherever orch-spawn is
+# invoked from; if that's not a git repo we surface the error before
+# touching the filesystem.
+if [ $WORKTREE_FROM_FLAG -eq 1 ]; then
+    if [ $CWD_FROM_FLAG -eq 1 ]; then
+        echo "orch-spawn: --worktree-from and --cwd are mutually exclusive (got --worktree-from=$WORKTREE_FROM, --cwd=$CWD)" >&2
+        exit 1
+    fi
+    if [ -n "$SESH_SESSION_FLAG" ]; then
+        echo "orch-spawn: --worktree-from and --sesh-session are mutually exclusive (got --worktree-from=$WORKTREE_FROM, --sesh-session=$SESH_SESSION_FLAG)" >&2
+        exit 1
+    fi
+    command -v git >/dev/null 2>&1 || { echo "orch-spawn: --worktree-from needs git on PATH" >&2; exit 1; }
+    # Locate the parent repo. `git rev-parse --show-toplevel` is the
+    # canonical way and reports the worktree's main checkout; that's
+    # what we want for sibling-worktree placement.
+    PARENT_REPO=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    if [ -z "$PARENT_REPO" ]; then
+        echo "orch-spawn: --worktree-from needs to be run inside a git repository (cwd: $(pwd))" >&2
+        exit 1
+    fi
+    # Verify the sha resolves to a commit. `git rev-parse --verify
+    # <sha>^{commit}` returns 0 only for a real commit-ish; that's what
+    # `git worktree add` needs. We probe here so the error attribution
+    # is clear ("bad sha") instead of git-worktree's terser output.
+    if ! WORKTREE_SHA_RESOLVED=$(git -C "$PARENT_REPO" rev-parse --verify "${WORKTREE_FROM}^{commit}" 2>/dev/null); then
+        echo "orch-spawn: --worktree-from sha not found in repo at $PARENT_REPO: $WORKTREE_FROM" >&2
+        exit 1
+    fi
+    # Synthesize a slug if none given. Bash $RANDOM is a 0..32767 int,
+    # printf %04x prints up to 4 hex chars; the leading-zero pad keeps
+    # the dir name stable-length.
+    if [ $SLUG_FROM_FLAG -eq 0 ]; then
+        SHA7=${WORKTREE_SHA_RESOLVED:0:7}
+        printf -v RAND4 '%04x' "$(( RANDOM & 0xffff ))"
+        SLUG="${SHA7}-${RAND4}"
+        SLUG_FROM_FLAG=1
+    fi
+    REPO_BASENAME=$(basename "$PARENT_REPO")
+    WORKTREE_ROOT="${ORCH_WORKTREE_ROOT:-${ORCH_PROJECTS_ROOT:-$HOME/projects}/${REPO_BASENAME}-worktrees}"
+    WORKTREE_DIR="${WORKTREE_ROOT}/${SLUG}"
+    if [ -e "$WORKTREE_DIR" ]; then
+        echo "orch-spawn: --worktree-from target dir already exists: $WORKTREE_DIR (pick a different --slug or remove the dir)" >&2
+        exit 1
+    fi
+    mkdir -p "$WORKTREE_ROOT"
+    WT_STDERR=$(mktemp)
+    if ! git -C "$PARENT_REPO" worktree add "$WORKTREE_DIR" "$WORKTREE_SHA_RESOLVED" 2>"$WT_STDERR" >/dev/null; then
+        echo "orch-spawn: git worktree add failed: $(cat "$WT_STDERR")" >&2
+        rm -f "$WT_STDERR"
+        exit 1
+    fi
+    rm -f "$WT_STDERR"
+    CWD=$WORKTREE_DIR
+fi
+
+# Slug-only validation (when --slug is set without --worktree-from). The
+# slug shows up in a tmux pane title and in an alias-file key, so refuse
+# values that would break either: shell metas, whitespace, slashes.
+if [ -n "$SLUG" ]; then
+    case "$SLUG" in
+        *[!a-zA-Z0-9._-]*|"")
+            echo "orch-spawn: --slug must match [a-zA-Z0-9._-]+ (got: $SLUG)" >&2
+            exit 1
+            ;;
+    esac
+fi
 
 # --sesh-session resolution: ask sesh's worker-cwd helper for the fossil
 # checkout dir. This is the worker-side leg of the fossil-as-trunk swarm
@@ -383,6 +501,55 @@ SPAWN_SCRIPT="${ORCH_REPO_ROOT}/executors/${EXECUTOR}/spawn.sh"
 # pane id; we capture it for the shim launch downstream.
 PANE=$(export AGENT CWD HEADLESS NO_FLEET POSITION VERIFY OUTFIT BUNDLE GOAL_EXPORTS NO_SHIM ROLE; \
       bash "$SPAWN_SCRIPT")
+
+# Slug labeling (3 layers — operator-facing identity for the worker):
+#   1. tmux pane title via `tmux select-pane -T <slug>`. Operators see this
+#      in status bars and in the borders that surface `pane_title`.
+#   2. ORCH_SLUG env var inside the pane (set via tmux send-keys against a
+#      pre-prompt shell is unreliable; we publish it via setenv on the
+#      session so subsequent panes spawned in the same window can read it).
+#   3. Alias file (~/.config/orch-aliases, override via ORCH_ALIASES_FILE)
+#      — appends `<slug>=<pane_id>` so orch-tell/orch-peek/orch-wait can
+#      resolve the slug to a pane id without an active bus subscription.
+#
+# Run only when --slug is in effect; absent slug, none of these layers
+# fire (preserves the legacy spawn shape).
+if [ -n "$SLUG" ]; then
+    # Layer 1 — pane title. Only meaningful for the tmux executor;
+    # wasm/cf-worker doesn't have a tmux pane to label, and the executor
+    # already mapped EXECUTOR=tmux as the only path that returns a
+    # tmux-shaped pane id. We guard on the leading `%` for safety.
+    case "$PANE" in
+        %*)
+            tmux select-pane -t "$PANE" -T "$SLUG" 2>/dev/null || true
+            ;;
+    esac
+    # Layer 3 — alias file. Multiple spawns can race here; we use a
+    # single-writer append via `flock` when available, falling back to a
+    # best-effort append otherwise (the file is operator-managed and the
+    # collision window is microseconds).
+    ALIASES_FILE=${ORCH_ALIASES_FILE:-$HOME/.config/orch-aliases}
+    mkdir -p "$(dirname "$ALIASES_FILE")"
+    touch "$ALIASES_FILE"
+    if command -v flock >/dev/null 2>&1; then
+        (
+            flock -x 9
+            # Strip any prior line for this slug so re-spawns don't
+            # accumulate stale entries.
+            if grep -qE "^${SLUG}=" "$ALIASES_FILE" 2>/dev/null; then
+                grep -vE "^${SLUG}=" "$ALIASES_FILE" > "${ALIASES_FILE}.tmp" || true
+                mv "${ALIASES_FILE}.tmp" "$ALIASES_FILE"
+            fi
+            printf '%s=%s\n' "$SLUG" "$PANE" >> "$ALIASES_FILE"
+        ) 9>>"$ALIASES_FILE"
+    else
+        if grep -qE "^${SLUG}=" "$ALIASES_FILE" 2>/dev/null; then
+            grep -vE "^${SLUG}=" "$ALIASES_FILE" > "${ALIASES_FILE}.tmp" || true
+            mv "${ALIASES_FILE}.tmp" "$ALIASES_FILE"
+        fi
+        printf '%s=%s\n' "$SLUG" "$PANE" >> "$ALIASES_FILE"
+    fi
+fi
 
 # Shim launch: start orch-agent-shim alongside the pane unless --no-shim.
 # The shim registers the pane on the Synadia Agent Protocol bus so callers
