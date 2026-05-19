@@ -54,10 +54,11 @@ assert_contains() {
     fi
 }
 
-SPAWN=$(command -v orch-spawn)
-[ -x "$SPAWN" ] || { echo "orch-spawn missing on PATH"; exit 2; }
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SPAWN="$REPO_ROOT/bin/orch-spawn"
+[ -x "$SPAWN" ] || { echo "in-tree bin/orch-spawn not found at $SPAWN"; exit 2; }
 
-TMUX_SPAWN_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/executors/tmux/spawn.sh"
+TMUX_SPAWN_SCRIPT="$REPO_ROOT/executors/tmux/spawn.sh"
 [ -f "$TMUX_SPAWN_SCRIPT" ] || { echo "in-tree executors/tmux/spawn.sh not found at $TMUX_SPAWN_SCRIPT"; exit 2; }
 
 SANDBOX=$(mktemp -d)
