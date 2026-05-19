@@ -9,6 +9,18 @@
 #                         [--outfit <name>] [--cut <name>] [--accessory <name>]...
 #                         [--no-shim] [--executor <tmux|wasm>]
 #
+# Environment variables:
+#   ORCH_SESH_BIN          — absolute path to the `sesh` binary (default: first
+#                            `sesh` on PATH). Must be absolute; orch-spawn `cd`s
+#                            during resolution, so a relative path can break
+#                            silently. Resolved early — error surfaces before
+#                            any pane is spawned.
+#   ORCH_PROJECTS_ROOT     — fallback root for `--project <name>` lookups when
+#                            zoxide miss (default: $HOME/projects).
+#   ORCH_VERIFY_TIMEOUT    — readiness poll budget for --verify (default: 60s).
+#   ORCH_HEADLESS_SESSION  — name of the detached headless tmux session
+#                            (default: orch-headless).
+#
 # --sesh-session <label> sets the worker's cwd to the fossil checkout
 # provisioned by `sesh worktree <label>` — the worker-side leg of the
 # fossil-as-trunk swarm workflow (sesh issue #64). orch-spawn shells out
@@ -93,7 +105,7 @@ set -euo pipefail
 
 AGENT=${1:-}
 shift 2>/dev/null || true
-[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim]..." >&2; exit 1; }
+[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim] [--executor tmux|wasm]    env: [ORCH_SESH_BIN=<abs-path>] [ORCH_PROJECTS_ROOT=<dir>] [ORCH_VERIFY_TIMEOUT=<sec>] [ORCH_HEADLESS_SESSION=<name>]" >&2; exit 1; }
 
 CWD=""
 SESH_SESSION_FLAG=""
@@ -191,9 +203,31 @@ if [ -n "$SESH_SESSION_FLAG" ]; then
         echo "orch-spawn: --cwd and --sesh-session are mutually exclusive (got --cwd=$CWD, --sesh-session=$SESH_SESSION_FLAG)" >&2
         exit 1
     fi
-    SESH_BIN=${ORCH_SESH_BIN:-sesh}
-    if ! command -v "$SESH_BIN" >/dev/null 2>&1 && [ ! -x "$SESH_BIN" ]; then
-        echo "orch-spawn: --sesh-session needs the 'sesh' binary on PATH (or set ORCH_SESH_BIN=<path>) — install from https://github.com/danmestas/sesh" >&2
+    # Resolve ORCH_SESH_BIN to an absolute path BEFORE any cd. orch-spawn
+    # later changes directory (via the executor's WRAP and via subshells
+    # like `cd "$CWD" && pwd -P`); a relative ORCH_SESH_BIN would resolve
+    # against whichever cwd happened to be active at call time, which is
+    # confusing and brittle. `command -v` returns an absolute path when the
+    # arg is a bare name on PATH; otherwise we accept the operator-supplied
+    # path and require it to be executable.
+    SESH_BIN_INPUT=${ORCH_SESH_BIN:-sesh}
+    SESH_BIN=""
+    case "$SESH_BIN_INPUT" in
+        /*)
+            # Already absolute — verify it's executable.
+            [ -x "$SESH_BIN_INPUT" ] && SESH_BIN=$SESH_BIN_INPUT ;;
+        */*)
+            # Relative path with directory component — resolve against pwd
+            # NOW (before any cd) and verify executable.
+            _resolved=$(cd "$(dirname "$SESH_BIN_INPUT")" 2>/dev/null && pwd -P)/$(basename "$SESH_BIN_INPUT")
+            [ -x "$_resolved" ] && SESH_BIN=$_resolved ;;
+        *)
+            # Bare name — look up on PATH. `command -v` returns the absolute
+            # path for binaries it finds.
+            SESH_BIN=$(command -v "$SESH_BIN_INPUT" 2>/dev/null || true) ;;
+    esac
+    if [ -z "$SESH_BIN" ] || [ ! -x "$SESH_BIN" ]; then
+        echo "orch-spawn: --sesh-session needs the 'sesh' binary on PATH (or set ORCH_SESH_BIN=<absolute-path>) — got '$SESH_BIN_INPUT' — install from https://github.com/danmestas/sesh" >&2
         exit 1
     fi
     SESH_STDERR=$(mktemp)
