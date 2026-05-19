@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# orch-tail — stream a worker's Claude Code transcript JSONL through a
+# trouble-detection filter. Emits one line per matched event so an operator
+# (or a Monitor() wrapper) gets push-style signal when a builder hits the
+# common failure tokens (FAIL/panic/build failed/test failed/etc).
+#
+# Usage:
+#   orch-tail <name|%pane>                          # follow, built-in regex
+#   orch-tail <name|%pane> --once                   # one-shot scan, exit
+#   orch-tail <name|%pane> --patterns='go: error|cargo:'
+#   orch-tail <name|%pane> --tool-results-only      # only match tool_result text
+#
+# Resolution:
+#   <name|%pane> is resolved via `orch-registry lookup` (proposal 0005),
+#   which joins alias-file + $SRV.INFO.agents. The worker JSON yields .cwd;
+#   we encode it the way Claude Code does (resolve symlinks then replace
+#   '/' and '_' with '-') and pick the newest <projects>/<encoded>/*.jsonl.
+#
+# Trouble regex (built-in default):
+#   FAIL |panic:|undefined:|cannot use|ambiguous|build failed|test failed
+#
+# That set surfaced real failures across multiple sessions; baking it in
+# means the catalog accumulates in one file instead of operator memory.
+# Override per-call with --patterns=<regex>. The regex is matched
+# case-insensitively against either:
+#   - assistant text + tool_result content (default), or
+#   - tool_result content only (when --tool-results-only).
+#
+# Output:
+#   One line per matched event. Format:
+#     [<HH:MM:SS>] <kind>: <one-line excerpt of the matching text>
+#   …where <kind> is "assistant" or "tool_result". The excerpt is the
+#   matched line within the event, trimmed to ~160 chars.
+#
+# Exit codes:
+#   0  follow ended cleanly (Ctrl-C / --once with no error)
+#   1  generic error
+#   4  target not in the orch registry
+#
+# Env:
+#   ORCH_PROJECTS_DIR  override ~/.claude/projects (mostly for tests)
+#   NATS_URL           passed through to orch-registry lookup
+set -euo pipefail
+
+die() { printf 'orch-tail: %s\n' "$*" >&2; exit 1; }
+
+usage() { sed -n '2,38p' "$0"; }
+
+PROJECTS_DIR="${ORCH_PROJECTS_DIR:-$HOME/.claude/projects}"
+
+# Default trouble regex. Mirrors the inline jq filter operators were
+# typing by hand before this tool existed. New patterns accumulate here.
+DEFAULT_PATTERNS='FAIL |panic:|undefined:|cannot use|ambiguous|build failed|test failed'
+
+PATTERNS="$DEFAULT_PATTERNS"
+FOLLOW=1
+TOOL_RESULTS_ONLY=0
+TARGET=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --help|-h)        usage; exit 0 ;;
+        --once)           FOLLOW=0; shift ;;
+        --follow)         FOLLOW=1; shift ;;
+        --tool-results-only) TOOL_RESULTS_ONLY=1; shift ;;
+        --patterns)       [ -n "${2:-}" ] || die "--patterns needs an argument"
+                          PATTERNS="$2"; shift 2 ;;
+        --patterns=*)     PATTERNS="${1#--patterns=}"; shift ;;
+        --)               shift; break ;;
+        --*)              die "unknown flag: $1" ;;
+        *)
+            if [ -z "$TARGET" ]; then
+                TARGET="$1"
+            else
+                die "unexpected extra arg: $1"
+            fi
+            shift ;;
+    esac
+done
+
+[ -n "$TARGET" ] || { usage; exit 1; }
+
+command -v jq            >/dev/null 2>&1 || die "jq not on PATH"
+command -v orch-registry >/dev/null 2>&1 || die "orch-registry not on PATH (build cmd/orch-registry)"
+
+# --- resolve target → cwd via registry ------------------------------------
+
+WORKER_JSON=$(orch-registry lookup --nats="${NATS_URL:-}" "$TARGET" 2>/dev/null) || {
+    rc=$?
+    case $rc in
+        4) printf 'orch-tail: target %q not in the orch registry — check alias file or run orch-spawn\n' "$TARGET" >&2
+           exit 4 ;;
+        *) die "orch-registry lookup failed (rc=$rc) for target '$TARGET'" ;;
+    esac
+}
+
+CWD=$(printf '%s' "$WORKER_JSON" | jq -r '.cwd // empty')
+[ -n "$CWD" ] || die "registry returned worker without .cwd (target: $TARGET)"
+
+encode_cwd() {
+    local cwd=$1 r
+    if r=$(cd "$cwd" 2>/dev/null && pwd -P); then :; else r=$cwd; fi
+    printf '%s' "$r" | sed 's|/|-|g; s|_|-|g'
+}
+
+ENCODED=$(encode_cwd "$CWD")
+SESSION_DIR="$PROJECTS_DIR/$ENCODED"
+[ -d "$SESSION_DIR" ] || die "no Claude Code session directory for $CWD (looked at $SESSION_DIR)"
+
+# Pick newest *.jsonl by mtime (portable across BSD/GNU stat).
+latest_jsonl_in() {
+    local dir=$1 best="" mt=0 cur f
+    for f in "$dir"/*.jsonl; do
+        [ -e "$f" ] || continue
+        cur=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+        if [ "$cur" -gt "$mt" ]; then
+            mt=$cur; best=$f
+        fi
+    done
+    [ -n "$best" ] && printf '%s\n' "$best"
+}
+
+JSONL=$(latest_jsonl_in "$SESSION_DIR" || true)
+[ -n "$JSONL" ] || die "no *.jsonl found under $SESSION_DIR"
+[ -f "$JSONL" ] || die "transcript file not readable: $JSONL"
+
+# --- jq filter ------------------------------------------------------------
+#
+# Per CC JSONL shape:
+#   {type:"assistant", message:{content:[ {type:"text", text:...},
+#                                          {type:"tool_use", ...} ]}}
+#   {type:"user",      message:{content:[ {type:"tool_result", content:[ {type:"text", text:...} ] } ] } }
+#
+# We extract candidate text from both shapes (or just tool_result when
+# --tool-results-only is set), tag each chunk with its kind, then drop
+# anything that doesn't match the trouble regex (case-insensitive via
+# the "i" flag on jq's test()).
+
+if [ "$TOOL_RESULTS_ONLY" -eq 1 ]; then
+    # shellcheck disable=SC2016  # jq program, $-vars are jq, not shell
+    EXTRACT='
+        if .type == "user" then
+            (.message.content // []) | .[]?
+            | select(.type == "tool_result")
+            | (.content // []) | .[]?
+            | select(.type == "text")
+            | {kind:"tool_result", text:.text, ts:($ts // "")}
+        else empty end
+    '
+else
+    # shellcheck disable=SC2016  # jq program, $-vars are jq, not shell
+    EXTRACT='
+        if .type == "assistant" then
+            (.message.content // []) | .[]?
+            | select(.type == "text")
+            | {kind:"assistant", text:.text, ts:($ts // "")}
+        elif .type == "user" then
+            (.message.content // []) | .[]?
+            | select(.type == "tool_result")
+            | (.content // []) | .[]?
+            | select(.type == "text")
+            | {kind:"tool_result", text:.text, ts:($ts // "")}
+        else empty end
+    '
+fi
+
+# Build the full jq program. We pull the timestamp from the outer event
+# before drilling into content (CC writes top-level .timestamp). For
+# each candidate text block we split into lines and emit one match per
+# line that hits the regex — operators want line granularity, not whole
+# multi-KB tool_result blobs.
+JQ_PROG="
+    . as \$ev
+    | (\$ev.timestamp // \"\") as \$ts
+    | ${EXTRACT}
+    | .kind as \$k
+    | (.text | split(\"\n\"))[]?
+    | select(test(\$pat; \"i\"))
+    | . as \$line
+    | (\$ts | (split(\".\")[0]) | (split(\"T\")[1] // .)) as \$hms
+    | \"[\" + \$hms + \"] \" + \$k + \": \" + (\$line | .[0:160])
+"
+
+# --- stream ---------------------------------------------------------------
+
+# jq -c, line-buffered, --unbuffered so Monitor() / live consumers see
+# events in real time. We feed the file through tail -F (follow + retry
+# on rotate) for --follow, or cat for --once.
+
+emit() {
+    jq -rR --unbuffered --arg pat "$PATTERNS" "
+        . as \$raw
+        | (try (\$raw | fromjson) catch null) as \$ev
+        | select(\$ev != null)
+        | \$ev
+        | $JQ_PROG
+    "
+}
+
+if [ "$FOLLOW" -eq 1 ]; then
+    # tail -F is the portable form (BSD + GNU both accept it; it follows
+    # by name and survives rotate). -n +1 streams the whole file first
+    # so callers see existing matches before live ones.
+    tail -F -n +1 "$JSONL" 2>/dev/null | emit
+else
+    emit < "$JSONL"
+fi

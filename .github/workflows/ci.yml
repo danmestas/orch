@@ -97,6 +97,7 @@ jobs:
             test/test-orch-spawn-output.sh
             test/test-orch-spawn-sesh-session.sh
             test/test-orch-spawn-verify.sh
+            test/test-orch-tail.sh
             test/test-orch-version.sh
             test/test-orch-observer-role.sh
             test/test-orch-spy.sh
