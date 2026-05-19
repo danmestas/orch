@@ -48,8 +48,9 @@ type Topology struct {
 	Workers []WorkerEntry `yaml:"workers,omitempty"`
 
 	// State is the optional seed-state section. Thin pass-through to
-	// sesh-ops; orch does NOT redefine the task/goal schemas. See
-	// state.go for the per-entry shape.
+	// sesh-ops; orch does NOT redefine the task/goal schemas. The
+	// per-entry shapes (StateSection / TaskSeed / GoalSeed / KVSeed)
+	// are declared further down in this file.
 	State StateSection `yaml:"state,omitempty"`
 
 	// Labels are cross-cutting metadata. Surfaced in `list` /
