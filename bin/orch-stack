@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+# orch-stack — sequential rebase+push for stacked PRs.
+#
+# A stacked PR flow is:
+#     main → bottom → mid → top
+# where each branch builds on the previous one's commits. This script
+# automates the mechanical "rebase each branch onto its parent, then push"
+# sequence, including conflict-recovery messaging.
+#
+# WHEN TO USE
+#   - Multiple PRs that are logically dependent: foundation → feature → glue.
+#   - You want PR3 reviewed against PR2's diff, not main+everything.
+#   - Reviewers have asked to land changes incrementally.
+#
+# WHEN NOT TO USE
+#   - You have N disjoint PRs you'd like reviewed in parallel. In that case
+#     branch each off main; the operator merges them in any order and you
+#     avoid the avoidable rebase cascade that stacking forces. See the
+#     "serial-off-main" recipe in CONTRIBUTING.
+#   - Your PRs share a file but not a logical dependency: same advice —
+#     branch off main, accept one rebase at the end, do not stack.
+#
+# PARENTHOOD MODEL
+#   Stack relationships are recorded in git-config under each branch:
+#       branch.<name>.orchStackParent = <parent-branch>
+#   Set with: `orch-stack base <parent>` (operates on current branch),
+#   or implicitly by passing branches in order to `push`/`land`.
+#
+# USAGE
+#   orch-stack list                       show the stack from current branch
+#   orch-stack base <parent>              mark current branch as stacked on <parent>
+#   orch-stack push                       rebase + push the stack rooted at current branch
+#   orch-stack push <bot> <mid> [...]     rebase + push an explicit stack (bottom-first)
+#   orch-stack land [<branch>]            merge bottom of stack, re-stack descendants
+#   orch-stack land <branch> --method squash|merge|rebase
+#                                         pass through to `gh pr merge`
+#
+# EXIT CODES
+#   0  success
+#   1  bad usage
+#   2  not in a git repo / no upstream remote / dirty worktree
+#   3  rebase conflict (script aborts cleanly, prints which branch failed)
+#   4  push rejected (likely non-fast-forward — investigate manually)
+#   5  gh pr merge failed
+set -euo pipefail
+
+PROG=orch-stack
+MAIN_BRANCH=${ORCH_STACK_MAIN:-main}
+REMOTE=${ORCH_STACK_REMOTE:-origin}
+
+die() { echo "$PROG: $*" >&2; exit "${2:-1}"; }
+
+require_git_repo() {
+    git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository" 2
+}
+
+require_clean_worktree() {
+    if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+        die "worktree has uncommitted changes; commit or stash first" 2
+    fi
+}
+
+current_branch() {
+    git symbolic-ref --short HEAD 2>/dev/null || die "detached HEAD; check out a branch" 2
+}
+
+branch_exists() {
+    git show-ref --verify --quiet "refs/heads/$1"
+}
+
+get_parent() {
+    # Returns the recorded parent of $1, or empty if none.
+    git config --get "branch.$1.orchStackParent" 2>/dev/null || true
+}
+
+set_parent() {
+    git config "branch.$1.orchStackParent" "$2"
+}
+
+# Walk parents from $1 down to (but not including) MAIN_BRANCH.
+# Prints branches bottom-up: [main-adjacent, ..., $1].
+walk_stack() {
+    local cur=$1
+    local chain=()
+    local seen=" "
+    while [ -n "$cur" ] && [ "$cur" != "$MAIN_BRANCH" ]; do
+        # Cycle guard.
+        case "$seen" in *" $cur "*) die "cycle detected in stack at '$cur'" 1 ;; esac
+        seen="$seen$cur "
+        chain=("$cur" "${chain[@]}")
+        cur=$(get_parent "$cur")
+    done
+    if [ ${#chain[@]} -eq 0 ]; then
+        return 0
+    fi
+    # If the deepest recorded parent isn't main, that's fine — we still
+    # rebase the deepest entry onto main.
+    printf '%s\n' "${chain[@]}"
+}
+
+cmd_list() {
+    require_git_repo
+    local head; head=$(current_branch)
+    if [ "$head" = "$MAIN_BRANCH" ]; then
+        echo "$PROG: current branch is $MAIN_BRANCH; nothing stacked here"
+        return 0
+    fi
+    local parent; parent=$(get_parent "$head")
+    if [ -z "$parent" ]; then
+        echo "$PROG: '$head' has no recorded parent (run: $PROG base <parent>)"
+        echo "$PROG: treating '$head' as a single-entry stack on $MAIN_BRANCH"
+        echo "  $MAIN_BRANCH"
+        echo "    └─ $head  (HEAD)"
+        return 0
+    fi
+    # Capture walk output up front so `die` inside walk_stack (cycle
+    # guard) propagates instead of being swallowed by the < <() redirect.
+    local chain
+    chain=$(walk_stack "$head") || exit $?
+    echo "$PROG: stack from '$head':"
+    echo "  $MAIN_BRANCH"
+    local prefix="    "
+    local first=1
+    while IFS= read -r b; do
+        [ -n "$b" ] || continue
+        if [ "$b" = "$head" ]; then
+            echo "${prefix}└─ $b  (HEAD)"
+        else
+            echo "${prefix}└─ $b"
+        fi
+        prefix="$prefix   "
+        first=0
+    done <<< "$chain"
+    [ $first -eq 1 ] && echo "    └─ $head  (HEAD)"
+}
+
+cmd_base() {
+    require_git_repo
+    [ $# -eq 1 ] || die "usage: $PROG base <parent-branch>"
+    local parent=$1
+    local head; head=$(current_branch)
+    [ "$head" != "$MAIN_BRANCH" ] || die "refusing to mark $MAIN_BRANCH as stacked"
+    branch_exists "$parent" || die "parent branch '$parent' does not exist"
+    [ "$parent" != "$head" ] || die "branch cannot be its own parent"
+    set_parent "$head" "$parent"
+    echo "$PROG: recorded $head → $parent"
+}
+
+# Rebase $branch onto $onto. On conflict, abort and exit 3.
+rebase_one() {
+    local branch=$1 onto=$2
+    echo "$PROG: rebasing $branch onto $onto"
+    git checkout --quiet "$branch" || die "checkout $branch failed" 3
+    if ! git rebase "$onto"; then
+        git rebase --abort 2>/dev/null || true
+        echo "" >&2
+        echo "$PROG: REBASE CONFLICT at branch '$branch' onto '$onto'." >&2
+        echo "$PROG: resolve manually:" >&2
+        echo "    git checkout $branch" >&2
+        echo "    git rebase $onto" >&2
+        echo "    # resolve conflicts, git add, git rebase --continue" >&2
+        echo "$PROG: then re-run: $PROG push" >&2
+        exit 3
+    fi
+}
+
+# Push $branch to $REMOTE with --force-with-lease (safe for rebased branches).
+push_one() {
+    local branch=$1
+    echo "$PROG: pushing $branch to $REMOTE (force-with-lease)"
+    if ! git push --force-with-lease "$REMOTE" "$branch"; then
+        die "push of '$branch' rejected — check remote state" 4
+    fi
+}
+
+# Resolve the stack to operate on. If positional args given, use them
+# (bottom-first); otherwise walk parents from HEAD.
+resolve_stack_args() {
+    if [ $# -gt 0 ]; then
+        # Validate each named branch exists; record parent relationships
+        # so subsequent `list` reflects the explicit order.
+        local prev=""
+        for b in "$@"; do
+            branch_exists "$b" || die "branch '$b' does not exist"
+            if [ -n "$prev" ]; then
+                set_parent "$b" "$prev"
+            fi
+            prev=$b
+        done
+        printf '%s\n' "$@"
+        return 0
+    fi
+    local head; head=$(current_branch)
+    [ "$head" != "$MAIN_BRANCH" ] || die "on $MAIN_BRANCH; pass branches or check out the top of a stack"
+    local chain
+    chain=$(walk_stack "$head")
+    if [ -z "$chain" ]; then
+        # No recorded parent — treat as single-entry stack.
+        echo "$head"
+    else
+        echo "$chain"
+    fi
+}
+
+cmd_push() {
+    require_git_repo
+    require_clean_worktree
+    local saved; saved=$(current_branch)
+
+    local stack
+    stack=$(resolve_stack_args "$@")
+
+    # Refresh main from the remote so we rebase onto the latest tip.
+    echo "$PROG: fetching $REMOTE/$MAIN_BRANCH"
+    git fetch --quiet "$REMOTE" "$MAIN_BRANCH" || die "fetch $REMOTE/$MAIN_BRANCH failed" 2
+
+    local onto="$REMOTE/$MAIN_BRANCH"
+    while IFS= read -r branch; do
+        [ -n "$branch" ] || continue
+        rebase_one "$branch" "$onto"
+        push_one "$branch"
+        onto=$branch
+    done <<< "$stack"
+
+    git checkout --quiet "$saved" 2>/dev/null || true
+    echo "$PROG: stack pushed."
+}
+
+cmd_land() {
+    require_git_repo
+    require_clean_worktree
+
+    local target=""
+    local merge_method="squash"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --method)
+                merge_method=${2:-}
+                case "$merge_method" in
+                    squash|merge|rebase) ;;
+                    *) die "--method must be one of: squash|merge|rebase" 1 ;;
+                esac
+                shift 2 ;;
+            --method=*)
+                merge_method=${1#--method=}
+                case "$merge_method" in
+                    squash|merge|rebase) ;;
+                    *) die "--method must be one of: squash|merge|rebase" 1 ;;
+                esac
+                shift ;;
+            -*) die "unknown flag: $1" 1 ;;
+            *)
+                [ -z "$target" ] || die "usage: $PROG land [<branch>] [--method ...]" 1
+                target=$1; shift ;;
+        esac
+    done
+
+    local head; head=$(current_branch)
+    if [ -z "$target" ]; then
+        # Default: bottom of the stack rooted at HEAD.
+        local chain; chain=$(walk_stack "$head")
+        [ -n "$chain" ] || die "no stack to land — pass <branch> or set a parent first"
+        target=$(printf '%s\n' "$chain" | head -n1)
+    fi
+
+    branch_exists "$target" || die "branch '$target' does not exist" 1
+
+    command -v gh >/dev/null 2>&1 || die "gh CLI not on PATH; required for land" 1
+
+    echo "$PROG: merging '$target' via gh pr merge --$merge_method --delete-branch"
+    if ! gh pr merge "$target" "--$merge_method" --delete-branch; then
+        die "gh pr merge failed for '$target' — resolve manually" 5
+    fi
+
+    # Find descendants of $target — branches whose recorded parent (transitively) is $target.
+    local descendants=()
+    while IFS= read -r b; do
+        [ -n "$b" ] || continue
+        local cur=$b
+        while [ -n "$cur" ] && [ "$cur" != "$MAIN_BRANCH" ]; do
+            local p; p=$(get_parent "$cur")
+            if [ "$p" = "$target" ]; then
+                descendants+=("$b")
+                break
+            fi
+            cur=$p
+        done
+    done < <(git for-each-ref --format='%(refname:short)' refs/heads/ | grep -v "^$target$" || true)
+
+    if [ ${#descendants[@]} -eq 0 ]; then
+        echo "$PROG: no descendants to re-stack."
+        return 0
+    fi
+
+    echo "$PROG: re-stacking descendants of '$target' onto $MAIN_BRANCH:"
+    for d in "${descendants[@]}"; do echo "  - $d"; done
+
+    echo "$PROG: fetching $REMOTE/$MAIN_BRANCH"
+    git fetch --quiet "$REMOTE" "$MAIN_BRANCH" || die "fetch $REMOTE/$MAIN_BRANCH failed" 2
+
+    # Re-parent: each direct child of $target now points to MAIN_BRANCH;
+    # transitive descendants keep their (now still-valid) recorded parent.
+    for d in "${descendants[@]}"; do
+        if [ "$(get_parent "$d")" = "$target" ]; then
+            git config --unset "branch.$d.orchStackParent" 2>/dev/null || true
+        fi
+    done
+
+    # Rebase each descendant onto main, then onto its (newly-rebased) parent.
+    local onto="$REMOTE/$MAIN_BRANCH"
+    local saved=$head
+    # Sort descendants by stack depth so we rebase bottom-first.
+    local sorted=()
+    while IFS= read -r b; do sorted+=("$b"); done < <(printf '%s\n' "${descendants[@]}" | while IFS= read -r br; do
+        depth=0
+        cur=$br
+        while [ -n "$cur" ] && [ "$cur" != "$MAIN_BRANCH" ]; do
+            depth=$((depth + 1))
+            cur=$(get_parent "$cur")
+        done
+        printf '%d\t%s\n' "$depth" "$br"
+    done | sort -n | cut -f2)
+
+    for d in "${sorted[@]}"; do
+        local p; p=$(get_parent "$d")
+        if [ -z "$p" ]; then
+            rebase_one "$d" "$onto"
+        else
+            rebase_one "$d" "$p"
+        fi
+        push_one "$d"
+    done
+
+    git checkout --quiet "$saved" 2>/dev/null || true
+    echo "$PROG: land complete."
+}
+
+usage() {
+    sed -n '2,46p' "$0"
+}
+
+[ $# -gt 0 ] || { usage; exit 1; }
+
+cmd=$1; shift
+case "$cmd" in
+    list)         cmd_list "$@" ;;
+    base)         cmd_base "$@" ;;
+    push)         cmd_push "$@" ;;
+    land)         cmd_land "$@" ;;
+    --help|-h|help) usage; exit 0 ;;
+    *) die "unknown subcommand '$cmd' (try: list, base, push, land)" 1 ;;
+esac

@@ -31,6 +31,7 @@
     "orch-show": "bin/orch-show",
     "orch-spawn": "bin/orch-spawn",
     "orch-spy": "bin/orch-spy",
+    "orch-stack": "bin/orch-stack",
     "orch-subscribe": "bin/orch-subscribe",
     "orch-tail": "bin/orch-tail",
     "orch-tell": "bin/orch-tell",
