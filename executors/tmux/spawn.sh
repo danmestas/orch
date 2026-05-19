@@ -163,12 +163,12 @@ if [ "${VERIFY:-0}" -eq 1 ]; then
     # Empty BANNER → title-rename only (unchanged legacy behaviour). Only
     # banners verified empirically against the agent's actual TUI go here —
     # a too-generic string risks false-positive matches against the WRAP's
-    # cwd-prompt or error text. codex / pi banners are not yet verified
-    # past their first-run dialogs; they fall through to title-rename.
+    # cwd-prompt or error text. pi's banner is not yet verified past its
+    # first-run dialog; it falls through to title-rename.
     case "$AGENT" in
         claude) BANNER="Claude Code" ;;
         gemini) BANNER="Gemini CLI" ;;
-        codex)  BANNER="" ;;
+        codex)  BANNER="OpenAI Codex" ;;
         pi)     BANNER="" ;;
         *)      BANNER="" ;;
     esac
