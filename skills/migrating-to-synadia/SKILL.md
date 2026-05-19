@@ -127,6 +127,65 @@ checklist against each skill body.
 
 5. **Commit** with `refactor(skills): update <skill-name> for Synadia cutover`.
 
+## For claude-code: prefer the Synadia channel plugin over the shim adapter
+
+Validated 2026-05-19. **`synadia-ai/synadia-agents/agents/claude-code`** is a NATS channel plugin that bridges claude-code natively to the Synadia Agent Protocol bus. Use it instead of `orch-spawn`'s shim+adapter pattern when the worker is claude-code.
+
+### Why
+
+The shim's claude-code adapter (JSONL transcript tailing + `tmux send-keys` for input) hits a known bug class (sister-shim #11, #13, #15, #16). The Synadia channel plugin:
+
+- Receives bus prompts as pushed turns via claude-code's `--dangerously-load-development-channels` mechanism (no tmux, no send-keys)
+- Publishes responses via an MCP tool the plugin exposes to claude (no JSONL tailing, no symlink-path bugs)
+- Uses session-name as the subject token (matches proposal 0009's design natively)
+- Heartbeats at 5s cadence with full envelope (`Sesh-Envelope`, `Sesh-Role`, `Sesh-Attempt`, traceparent)
+- v0.4.0 of the Synadia SDK (vs our shim's 0.3.0); supports attachments
+
+### Setup (one-time)
+
+Inside any claude-code session:
+
+```
+/plugin marketplace add synadia-ai/synadia-agents
+/plugin install nats-channel@synadia-plugins
+```
+
+User-scope installs to `~/.claude/plugins/`. Then for each claude session you want to bridge:
+
+```sh
+NATS_URL=$(cat ~/.sesh/hub.nats.url) \
+  claude --dangerously-skip-permissions \
+         --dangerously-load-development-channels 'plugin:nats-channel@synadia-plugins'
+```
+
+The `--dangerously-load-development-channels` flag is REQUIRED — without it, the plugin's MCP server runs but channel push (NATS → claude turn) is dormant.
+
+### Verified end-to-end
+
+```sh
+nats req agents.prompt.cc.<owner>.<session> '{"prompt":"respond with: OK"}' \
+  --replies=20 --reply-timeout=20s --timeout=45s
+# → {"type":"response","data":"OK"} → nil body (terminator)
+```
+
+Round-trip in ~8s (one full claude turn). Visible in the pane:
+
+```
+← nats: respond with: OK            ← inbound prompt pushed as user turn
+  Called plugin:nats-channel:nats   ← MCP tool call publishes response
+⏺ Replied OK.
+```
+
+### What this replaces
+
+- `orch-spawn claude ...` with shim + JSONL-tail adapter — the shim's claude-code adapter remains a legacy fallback for environments where the marketplace install isn't possible, but new operator setups should prefer the channel plugin.
+- sister-shim issues #11 / #13 / #15 / #16 are moot for claude-code if you adopt the plugin.
+
+### Open questions / not yet validated
+
+- codex / pi / gemini: no equivalent Synadia plugin shipped yet. Continue using the shim's adapters (or wait for vendor support / NATS↔ACP bridge per orch#180-style proposal).
+- Per-session config: the `/nats-channel:configure` skill manages connection + session-override. Not strictly needed; the plugin reads `$NATS_URL` and the cwd-basename as session.
+
 ## Cross-references
 
 - `docs/orch-agent-shim.md` — shim architecture, subject layout, §12 conformance map

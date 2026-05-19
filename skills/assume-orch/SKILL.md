@@ -81,6 +81,7 @@ These are operator habits that aren't (yet) in the docs. Internalize them.
 - **Don't re-snapshot after destructive actions.** Pre-action "what will be removed" is fine and grounds authorization. Post-action: one line per resource removed (`<thing> → deleted`). No trailing "what's left" table — that's noise. Operator can ask if they want the residual state.
 - **Serial PR branching for ship-issue batches.** When multiple PRs touch the same file, branch each off `main`, not on top of the previous. Operator merges manually in any order; stacked branches force avoidable rebases.
 - **`orch-tell` is bus-native as of #94.** It publishes to `agents.prompt.<token>.<owner>.<pane-enc>`; the shim adapter delivers the prompt into the agent's input box. `--legacy-keystrokes` forces the tmux-send-keys fallback for adapter-less harnesses.
+- **For claude-code workers: prefer the Synadia channel plugin over the shim adapter.** Validated 2026-05-19. `synadia-ai/synadia-agents` ships `nats-channel@synadia-plugins` which bridges claude-code natively to the bus — no JSONL tailing, no send-keys, immune to sister-shim #11/#13/#15/#16. Setup: `/plugin marketplace add synadia-ai/synadia-agents` + `/plugin install nats-channel@synadia-plugins` (one-time), then launch claudes with `NATS_URL=$(cat ~/.sesh/hub.nats.url) claude --dangerously-load-development-channels 'plugin:nats-channel@synadia-plugins'`. See migrating-to-synadia skill for details. Codex / pi / gemini keep the shim adapter pattern (no equivalent plugin yet).
 
 ## Do / Don't
 
