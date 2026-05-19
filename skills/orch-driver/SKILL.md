@@ -14,6 +14,31 @@ description: Drive interactive AI agent CLIs (claude, pi, codex, gemini) already
 
 Drive interactive AI agents in adjacent tmux panes from a parent Claude Code session, and react to their lifecycle events without polling — over the Synadia Agent Protocol bus.
 
+## Preferred primitives (fast reference)
+
+Scan this before reaching for a tmux/bash workaround. Each row says: what you're trying to do, what to actually use, and the wrong-reflex it replaces.
+
+| Operator intent | Preferred primitive | When NOT to use / antipattern it replaces |
+|---|---|---|
+| Send prompt + wait for reply | `orch-ask <pane> "..."` (tell + collect + diff) | Don't `orch-tell` then `tmux capture-pane` and try to diff yourself |
+| Send prompt fire-and-forget | `orch-tell <pane> "..."` | Don't `tmux send-keys` directly — drops the Enter race; also `orch-tell` refuses worker→observer unless `--force` |
+| Send multi-line prompt from script | `orch-tell <pane> -` (read prompt from stdin) | Don't heredoc into `harness-tell` or escape-quote a long string into `orch-tell` argv |
+| Wait for one pane to settle | `orch-wait <pane>` (universal screen-stability) | Don't `sleep N && ls /path/to/expected.output` — harness rule blocks long leading sleeps anyway |
+| Wait for an *event* (turn-end, query) | `Monitor` wrapping `nats sub 'agents.>' --raw` | Don't `Bash(run_in_background)` a polling loop — loses events between calls, doesn't survive session |
+| Subscribe to all bus events for the session | Arm `Monitor` on `nats sub 'agents.>' --raw` once at session start | Don't open a fresh sub each time you "want to see what happened" |
+| Narrow to one pane's events | `nats sub 'agents.events.>.<owner>.pct<N>'` (or `agents.hb.>` for heartbeats only) | Don't subscribe to `agents.>` and grep — wastes the push channel |
+| Read worker state / what it just said | The worker's JSONL transcript (path in `$SRV.INFO.agents` metadata, or for claude: `~/.claude/projects/<cwd-enc>/<session>.jsonl`) | Don't `tmux capture-pane -p \| tail -N` — screen buffer is lossy and truncates |
+| Find your own (operator) transcript | `orch-claim-operator` once at session start → reads `~/.cache/orch-operator.json` | Don't grep `ps`, scan `~/.claude/projects/` by mtime, or reverse-engineer the encoded cwd path |
+| Find a worker's transcript | `nats req '$SRV.INFO.agents' '' --replies=0` → `metadata.transcript_path` | Don't tail `~/.cache/orch-registry/` (legacy, retired in #94) |
+| Snapshot the live fleet | `orch-peek` (`--json`, `--since <dur>`, `--all`) | Don't iterate `tmux list-panes` and guess which is an agent |
+| Pick a pane interactively | `orch-tell --list` | Don't ask the user "which pane?" — list them |
+| Spawn a worker you'll drive | `orch-spawn <agent> [--outfit X --cut Y] [--headless]` | Don't `tmux split-window` + manual yolo flag — misses the shim, won't appear on the bus |
+| Spawn a spy/observer on a target | `orch-spy <target> <mission>` | Don't `orch-spawn claude --outfit stasi` by hand and reconstruct the brief envelope |
+| Move a worker between visible / hidden | `orch-show <pane>` / `orch-hide <pane>` | Don't `tmux break-pane`/`join-pane` raw — `orch-show`/`orch-hide` know about the `orch-headless` session |
+| Detect drift between repo and live install | `orch-version [--json]` | Don't `diff -r` the bin dirs manually |
+
+**Retired binaries — do NOT reach for these:** `orch-listen` (replaced by `nats sub 'agents.>'` + Monitor), `orch-subscribe` (no replacement; subscribe directly), `orch-register` (auto via shim's `$SRV.INFO.agents`), `orch-current-jsonl` (use the shim's `metadata.transcript_path`). Marker files under `~/.cache/orch-registry/` are gone too — read `$SRV.INFO.agents` instead.
+
 ## Tools (all in `~/.local/bin`)
 
 | command | what it does |
