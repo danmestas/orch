@@ -171,6 +171,7 @@ HEADLESS=0
 NO_FLEET=0
 QUIET=0
 ROLE_OVERRIDE=""
+CLASS_OVERRIDE=""
 POSITION="right"
 VERIFY=0
 OUTFIT=""
@@ -197,6 +198,12 @@ while [ $# -gt 0 ]; do
                 *) echo "orch-spawn: --role must be worker or observer (got: $ROLE_OVERRIDE)" >&2; exit 1 ;;
             esac
             shift 2 ;;
+        --class)
+            CLASS_OVERRIDE=${2:-}
+            shift 2 ;;
+        --class=*)
+            CLASS_OVERRIDE="${1#--class=}"
+            shift ;;
         --position)
             POSITION=${2:-}
             case "$POSITION" in
@@ -223,6 +230,13 @@ done
 
 [ $QUIET -eq 1 ] && exec 2>/dev/null
 
+# Validate --class override up-front: bail before any further resolution so the
+# error path is clean. Empty CLASS_OVERRIDE means "no override; derive below".
+if [ -n "$CLASS_OVERRIDE" ] && [ "$CLASS_OVERRIDE" != "active" ] && [ "$CLASS_OVERRIDE" != "observer" ]; then
+    printf 'orch-spawn: --class must be "active" or "observer", got %q\n' "$CLASS_OVERRIDE" >&2
+    exit 2
+fi
+
 # Resolve role: explicit --role wins; otherwise auto-detect from outfit/cut.
 # Observer-class outfits/cuts are meta panes (spies, auditors) — they watch
 # rather than do work, and bus subscribers filter them by metadata.role.
@@ -238,6 +252,17 @@ if [ -z "$ROLE" ]; then
     esac
 fi
 [ -z "$ROLE" ] && ROLE=worker
+
+# CLASS derivation mirrors ROLE's outfit/cut conditions: stasi outfit or
+# spy-on-* / wait-watch cut → observer, else active. Explicit --class wins.
+# Reference: docs/proposals/2026-05-21-agent-role-registration.md (sesh repo).
+if [ -n "$CLASS_OVERRIDE" ]; then
+    CLASS="$CLASS_OVERRIDE"
+elif [ "$ROLE" = "observer" ]; then
+    CLASS="observer"
+else
+    CLASS="active"
+fi
 
 # --worktree-from resolution: create a git worktree at <sha> under the
 # worktree root and set that as the worker's cwd. Decoupled from --slug
