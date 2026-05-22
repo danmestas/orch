@@ -183,7 +183,7 @@ orch-spawn claude --project myapp
 
 ### Env propagation
 
-Five env vars are resolved in the parent shell and forwarded explicitly
+Seven env vars are resolved in the parent shell and forwarded explicitly
 into the shim process (not inherited via shell env, so they survive
 `disown` correctly in both bash and zsh):
 
@@ -192,8 +192,21 @@ into the shim process (not inherited via shell env, so they survive
 | `ORCH_OWNER`  | `$SESH_OWNER` or `$USER`            |
 | `ORCH_OUTFIT` | resolved outfit name (may be empty) |
 | `ORCH_ROLE`   | `worker` or `observer`              |
+| `SESH_ROLE`   | mirrors `ORCH_ROLE` (the derived role); consumed by sesh adapters per `docs/proposals/2026-05-21-agent-role-registration.md` (sesh repo). |
+| `SESH_CLASS`  | `observer` when role-derivation lands on `observer` (stasi outfit / `wait-watch` cut / `spy-on-*` cut), else `active`. Override with `--class`. Drives coordination-subject routing on the sesh side. |
 | `SESH_SESSION`| resolved session label              |
 | `NATS_URL`    | from sesh hub URL or env            |
+
+### Role / class flags (orch-spawn)
+
+`orch-spawn` derives both the worker's `role` (worker / observer) and its
+`class` (active / observer) from the outfit and cut, with explicit
+overrides available:
+
+| Flag                       | Notes |
+|----------------------------|-------|
+| `--role worker\|observer`  | Overrides the outfit/cut-derived role. Drives `ORCH_ROLE` and `SESH_ROLE` in the worker env. Invalid values exit 1. |
+| `--class active\|observer` | Overrides the outfit/cut-derived class. Drives `SESH_CLASS` in the worker env. Invalid values exit 2. When omitted: `observer` if the resolved role is `observer` (stasi outfit / `wait-watch` cut / `spy-on-*` cut), else `active`. |
 
 ### Adapter-less harnesses
 
