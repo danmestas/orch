@@ -157,7 +157,7 @@ set -euo pipefail
 
 AGENT=${1:-}
 shift 2>/dev/null || true
-[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--worktree-from sha] [--slug name] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim] [--executor tmux|wasm]    env: [ORCH_SESH_BIN=<abs-path>] [ORCH_PROJECTS_ROOT=<dir>] [ORCH_VERIFY_TIMEOUT=<sec>] [ORCH_VERIFY_BACKOFF=1,2,4,8] [ORCH_HEADLESS_SESSION=<name>] [ORCH_WORKTREE_ROOT=<dir>] [ORCH_ALIASES_FILE=<path>]" >&2; exit 1; }
+[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--worktree-from sha] [--slug name] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--class active|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim] [--executor tmux|wasm]    env: [ORCH_SESH_BIN=<abs-path>] [ORCH_PROJECTS_ROOT=<dir>] [ORCH_VERIFY_TIMEOUT=<sec>] [ORCH_VERIFY_BACKOFF=1,2,4,8] [ORCH_HEADLESS_SESSION=<name>] [ORCH_WORKTREE_ROOT=<dir>] [ORCH_ALIASES_FILE=<path>]" >&2; exit 1; }
 
 CWD=""
 SESH_SESSION_FLAG=""
@@ -612,8 +612,11 @@ fi
 # Env vars are exported explicitly into the background process rather than
 # inherited implicitly — disown/nohup detach the process from the shell's
 # job table but the env block is already resolved in the parent before the
-# fork, so all five vars (ORCH_OWNER, ORCH_OUTFIT, ORCH_ROLE, SESH_SESSION,
-# NATS_URL) are correct in both bash and zsh.
+# fork, so all seven vars (ORCH_OWNER, ORCH_OUTFIT, ORCH_ROLE, SESH_ROLE,
+# SESH_CLASS, SESH_SESSION, NATS_URL) are correct in both bash and zsh.
+# SESH_ROLE mirrors ORCH_ROLE for sesh-adapter consumers (Phase 2 of the
+# agent role/class registration proposal); SESH_CLASS feeds the same
+# adapter's coordination-subject routing.
 #
 # Adapter-less harnesses (codex/pi/gemini until Plans 11-13): orch-agent-shim
 # exits 2 when invoked with an unknown adapter. We detect this by probing
@@ -667,6 +670,8 @@ if [ $NO_SHIM -eq 0 ]; then
             ORCH_OWNER="$SHIM_OWNER" \
             ORCH_OUTFIT="$OUTFIT" \
             ORCH_ROLE="$ROLE" \
+            SESH_ROLE="$ROLE" \
+            SESH_CLASS="$CLASS" \
             SESH_SESSION="$SHIM_SESSION" \
             NATS_URL="$SHIM_NATS" \
             orch-agent-shim \
