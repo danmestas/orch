@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/danmestas/orch/internal/spawnspec"
+	"gopkg.in/yaml.v3"
 )
 
 // ValidateOption tunes a single Validate call. The zero set is the
@@ -85,6 +88,7 @@ func Validate(wf *Workflow, opts ...ValidateOption) *Report {
 
 	checkDiscriminators(wf, idx, rpt)
 	checkSubFields(wf, idx, rpt)
+	checkSpawnBodies(wf, idx, rpt)
 	checkDepsExist(wf, idx, rpt)
 	checkCycles(wf, idx, rpt)
 	checkRefs(wf, idx, rpt)
@@ -220,6 +224,67 @@ func missingSubfield(id string, line int, field string) Diagnostic {
 		NodeID: id, Line: line,
 		Message: fmt.Sprintf("required field %q is missing", field),
 	}
+}
+
+// checkSpawnBodies enforces the SpawnSpec contract on every `spawn:`
+// node body. This is Phase B's "tighten spawn-body strictness" check
+// (orch#157): the Spawn struct uses `yaml:",inline"` for everything
+// except name, which defeats KnownFields strictness inside the spawn
+// body — typos like `agnet:` or `outfite:` would otherwise pass
+// silently through Phase A and surface as runtime errors deep inside
+// orch-spawn.
+//
+// The check delegates to spawnspec.UnmarshalSpec (strict decode,
+// unknown spec_version reject) + spawnspec.ValidateSpec (executor
+// XOR, dns-label name, agent enum, env-key shape, etc.). See
+// docs/executor-protocol.md for the validation contract.
+//
+// Nodes with no Spawn name are skipped — they already get a clearer
+// CodeMissingSubField diagnostic from checkSubFields; piling a
+// SpawnSpec validation error on top would just be noise.
+func checkSpawnBodies(_ *Workflow, idx *nodeIndex, rpt *Report) {
+	for _, id := range idx.order {
+		n := idx.nodes[id]
+		if n.Spawn == nil || n.Spawn.Name == "" {
+			continue
+		}
+		buf, err := yaml.Marshal(n.Spawn)
+		if err != nil {
+			rpt.Add(Diagnostic{
+				Code: CodeInvalidSpawn, Severity: SeverityError,
+				NodeID: id, Line: n.SourceLine,
+				Message: fmt.Sprintf("spawn body could not be re-encoded for validation: %v", err),
+			})
+			continue
+		}
+		spec, err := spawnspec.UnmarshalSpec(buf)
+		if err != nil {
+			rpt.Add(Diagnostic{
+				Code: CodeInvalidSpawn, Severity: SeverityError,
+				NodeID: id, Line: n.SourceLine,
+				Message: fmt.Sprintf("spawn body rejected by spawnspec parser: %s", trimSpawnErr(err)),
+			})
+			continue
+		}
+		if err := spawnspec.ValidateSpec(spec); err != nil {
+			rpt.Add(Diagnostic{
+				Code: CodeInvalidSpawn, Severity: SeverityError,
+				NodeID: id, Line: n.SourceLine,
+				Message: fmt.Sprintf("spawn body failed spawnspec validation: %s", trimSpawnErr(err)),
+			})
+		}
+	}
+}
+
+// trimSpawnErr strips the "spawnspec: " prefix that the spawnspec
+// package puts on its errors, since the diagnostic message already
+// names the source. Multi-line errors (struct-validator output) are
+// flattened to a single line so the workflow diagnostic stays
+// grep-able.
+func trimSpawnErr(err error) string {
+	msg := strings.TrimPrefix(err.Error(), "spawnspec: ")
+	msg = strings.ReplaceAll(msg, "\n", "; ")
+	return strings.TrimSpace(msg)
 }
 
 // checkDepsExist verifies every depends_on target resolves to a known

@@ -198,10 +198,82 @@ nodes:
     spawn:
       name: verifier
       agent: claude-code
+      tmux: {}
   - id: review
     depends_on: [provision]
     prompt: review please
     assign: verifier
+`,
+			wantValid: true,
+		},
+		{
+			name: "spawn body with typo'd field is rejected",
+			// `agnet:` is a typo of `agent:` — Phase A's KnownFields
+			// strictness used to be defeated by the spawn body's
+			// `yaml:",inline"` capture. Phase B routes the spawn body
+			// through spawnspec.UnmarshalSpec, which restores strictness.
+			yaml: `name: x
+nodes:
+  - id: provision
+    spawn:
+      name: verifier
+      agnet: claude-code
+      tmux: {}
+`,
+			wantCodes: []string{CodeInvalidSpawn},
+		},
+		{
+			name: "spawn body missing executor block is rejected",
+			// SpawnSpec requires exactly one of tmux / cf-worker /
+			// cf-durable-object — the executor_xor rule from spawnspec.
+			yaml: `name: x
+nodes:
+  - id: provision
+    spawn:
+      name: verifier
+      agent: claude-code
+`,
+			wantCodes: []string{CodeInvalidSpawn},
+		},
+		{
+			name: "spawn body with unknown agent enum is rejected",
+			yaml: `name: x
+nodes:
+  - id: provision
+    spawn:
+      name: verifier
+      agent: turbo-claude
+      tmux: {}
+`,
+			wantCodes: []string{CodeInvalidSpawn},
+		},
+		{
+			name: "spawn body missing name skips spawnspec check (single missing-subfield diag)",
+			// When `spawn.name` is empty, checkSubFields already emits
+			// CodeMissingSubField. checkSpawnBodies must skip these nodes
+			// so the operator sees ONE clear diagnostic, not two
+			// overlapping ones.
+			yaml: `name: x
+nodes:
+  - id: provision
+    spawn:
+      agent: claude-code
+`,
+			wantCodes:   []string{CodeMissingSubField},
+			forbidCodes: []string{CodeInvalidSpawn},
+		},
+		{
+			name: "valid spawn with full body passes",
+			yaml: `name: x
+nodes:
+  - id: provision
+    spawn:
+      name: verifier
+      agent: claude-code
+      tmux:
+        headless: true
+      outfit:
+        bundle: backend/verifying
 `,
 			wantValid: true,
 		},
