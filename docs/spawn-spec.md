@@ -8,6 +8,8 @@ backends. Shape borrowed from [Archon](https://github.com/Archon-research/archon
 (flat top-level, one-of executor discriminator). Rationale, alternatives,
 and decision history live in
 [docs/proposals/0002-typed-executor-contract.md](./proposals/0002-typed-executor-contract.md).
+The wire-level protocol (stdin/stdout/exit codes, validation contract)
+is in [docs/executor-protocol.md](./executor-protocol.md).
 
 | | |
 |---|---|

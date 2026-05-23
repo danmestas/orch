@@ -146,4 +146,12 @@ const (
 	CodeMissingSubField   = "missing-subfield"
 	CodeInvalidIdentifier = "invalid-identifier"
 	CodeJSONPathOnNonJSON = "json-path-on-non-json"
+	// CodeInvalidSpawn is emitted when a `spawn:` body fails the
+	// spawnspec.SpawnSpec parse or validation rules (unknown field,
+	// missing executor block, bad agent enum, etc.). See
+	// docs/executor-protocol.md for the validation contract — the
+	// workflow's compile step calls spawnspec.ValidateSpec exactly
+	// once per spawn node so typos surface here instead of at
+	// runtime inside a backend.
+	CodeInvalidSpawn = "invalid-spawn"
 )
