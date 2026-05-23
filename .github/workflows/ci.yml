@@ -56,6 +56,27 @@ jobs:
       - name: "npm pack — dry run (catches files: + bin-path regressions)"
         run: npm pack --dry-run
 
+  go-tests:
+    name: go unit tests + vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        # Runs all Go unit tests. Notably the spawnspec schema drift
+        # gate (internal/spawnspec/schema_drift_test.go) — fails when
+        # dist/schema/*.json is out of sync with the Go structs.
+        # Regen with: go run ./cmd/spawnspec-schema -out dist/schema
+        run: go test ./...
+
   integration:
     name: integration tests
     runs-on: ubuntu-latest
