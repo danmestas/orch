@@ -1,5 +1,8 @@
 # SpawnSpec & WorkerHandle — schema reference
 
+> See [spawn-spec-versioning.md](./spawn-spec-versioning.md) for the wire
+> stability contract and what triggers a v2 bump.
+
 The typed contract between `orch-spawn` (the dispatcher) and per-executor
 backends. Shape borrowed from [Archon](https://github.com/Archon-research/archon)
 (flat top-level, one-of executor discriminator). Rationale, alternatives,
