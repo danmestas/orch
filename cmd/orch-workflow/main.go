@@ -1,18 +1,21 @@
-// orch-workflow — Phase A CLI for the workflow YAML compiler.
+// orch-workflow — workflow YAML CLI.
 //
 // Subcommands:
 //
 //	orch-workflow validate <file>           — parse + validate; exit 0 if valid
-//	orch-workflow compile <file> [--print]  — validate + emit the planned task DAG
+//	orch-workflow compile  <file> [--print] — validate + emit the planned task DAG
+//	orch-workflow apply    <file> [flags]   — seed compiled tasks into a sesh scope
+//	orch-workflow status   <workflow-id>    — render live DAG progress for a workflow
+//	orch-workflow cancel   <workflow-id>    — mark all pending/blocked tasks cancelled
 //
-// Phase A scope: validator + diagnostic compile-print only. The apply /
-// status / cancel subcommands described in Proposal 0007 land in Phase
-// B once orch#141 (SpawnSpec) and orch#145 (Topology) are wired in.
-// Until then this binary explicitly refuses those subcommands with a
-// stable error code so harness code can detect "feature not ready".
+// Phase B (this binary) wires the apply/status/cancel verbs onto a
+// sesh-ops backend. The default backend shells out to the `sesh-ops`
+// binary on $PATH; --server / --session / --scope are forwarded
+// verbatim so this CLI inherits sesh-ops's resolution rules.
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -39,7 +42,7 @@ func main() {
 
 var (
 	errInvalid        = errors.New("workflow is invalid")
-	errNotImplemented = errors.New("subcommand not implemented in Phase A")
+	errNotImplemented = errors.New("subcommand not implemented")
 )
 
 func run(args []string) error {
@@ -53,8 +56,12 @@ func run(args []string) error {
 		return cmdValidate(rest)
 	case "compile":
 		return cmdCompile(rest)
-	case "apply", "status", "cancel":
-		return fmt.Errorf("%w: %s (waiting on orch#141 SpawnSpec + orch#145 Topology — see Proposal 0007 Phase B)", errNotImplemented, sub)
+	case "apply":
+		return cmdApply(rest)
+	case "status":
+		return cmdStatus(rest)
+	case "cancel":
+		return cmdCancel(rest)
 	case "-h", "--help", "help":
 		usage()
 		return nil
@@ -65,20 +72,30 @@ func run(args []string) error {
 }
 
 func usage() {
-	const help = `orch-workflow — compile + validate workflow YAML (Proposal 0007)
+	const help = `orch-workflow — compile + run workflow YAML (Proposal 0007)
 
 Subcommands:
   validate <file>             Parse + run compile-time DAG validation.
                               Exit 0 on valid; 2 on invalid; 1 on parse / IO error.
   compile  <file> [--print]   Validate then emit the planned task DAG.
                               With --print, writes pretty JSON to stdout.
-
-  apply / status / cancel     Reserved for Phase B (orch#141 + orch#145).
+  apply    <file> [flags]     Compile + seed tasks into a sesh scope.
+                              Idempotent: re-applying unchanged YAML is a no-op.
+  status   <workflow-id>      Show live DAG progress for an applied workflow.
+  cancel   <workflow-id>      Cancel all pending/blocked tasks in the workflow.
+                              In-flight tasks are NOT killed (see #180).
 
 Common flags:
   --fleet name1,name2,...     Enforce assign-target check against this fleet list.
                               Without it, assign references to non-spawn targets are
-                              not validated (Phase A default).
+                              not validated.
+
+Sesh-routing flags (apply / status / cancel):
+  --server URL                NATS URL (forwarded to sesh-ops; env $SESH_OPS_SERVER).
+  --session NAME              Sesh session name (forwarded to sesh-ops).
+  --scope NAME                Memory scope (default "workflow").
+  --scope-id ID               Scope identifier (apply uses workflow.scope-id if blank).
+  --sesh-ops PATH             Override the sesh-ops binary (default: lookup on $PATH).
 `
 	fmt.Fprint(os.Stderr, help)
 }
@@ -152,8 +169,127 @@ func cmdCompile(args []string) error {
 	return nil
 }
 
+func cmdApply(args []string) error {
+	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fleet := fs.String("fleet", "", "comma-separated worker names for assign-target check")
+	sesh := seshFlags(fs)
+	scopeIDOverride := fs.String("scope-id", "", "override workflow.scope-id (routes apply into a specific subtree)")
+
+	path, err := parseOnePositional(fs, args)
+	if err != nil {
+		return err
+	}
+	if path == "" {
+		fs.Usage()
+		return errors.New("apply: exactly one yaml path required")
+	}
+	wf, err := workflow.ParseFile(path)
+	if err != nil {
+		return err
+	}
+	rpt := workflow.Validate(wf, fleetOpts(*fleet)...)
+	if !rpt.Valid() {
+		fmt.Fprintln(os.Stderr, rpt.String())
+		return errInvalid
+	}
+	if w := rpt.Warnings(); len(w) > 0 {
+		fmt.Fprintln(os.Stderr, rpt.String())
+	}
+	client := sesh.client()
+	out, err := workflow.Apply(context.Background(), wf, client, workflow.ApplyOptions{
+		ScopeID: *scopeIDOverride,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Print(out.String())
+	return nil
+}
+
+func cmdStatus(args []string) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	sesh := seshFlags(fs)
+	scopeID := fs.String("scope-id", "", "scope identifier (required)")
+
+	workflowID, err := parseOnePositional(fs, args)
+	if err != nil {
+		return err
+	}
+	if workflowID == "" {
+		fs.Usage()
+		return errors.New("status: workflow id required (positional)")
+	}
+	if *scopeID == "" {
+		return errors.New("status: --scope-id is required")
+	}
+	report, err := workflow.Status(context.Background(), workflowID, *scopeID, sesh.client())
+	if err != nil {
+		return err
+	}
+	fmt.Print(report.String())
+	return nil
+}
+
+func cmdCancel(args []string) error {
+	fs := flag.NewFlagSet("cancel", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	sesh := seshFlags(fs)
+	scopeID := fs.String("scope-id", "", "scope identifier (required)")
+
+	workflowID, err := parseOnePositional(fs, args)
+	if err != nil {
+		return err
+	}
+	if workflowID == "" {
+		fs.Usage()
+		return errors.New("cancel: workflow id required (positional)")
+	}
+	if *scopeID == "" {
+		return errors.New("cancel: --scope-id is required")
+	}
+	report, err := workflow.Cancel(context.Background(), workflowID, *scopeID, sesh.client())
+	if err != nil {
+		return err
+	}
+	fmt.Print(report.String())
+	return nil
+}
+
+// seshFlagSet bundles the four sesh-ops routing flags. We register
+// them on every sesh-touching subcommand so operators don't need to
+// learn a per-command flag layout. The .client() helper returns a
+// configured SeshClient at execution time.
+type seshFlagSet struct {
+	binary  *string
+	server  *string
+	session *string
+	scope   *string
+}
+
+func seshFlags(fs *flag.FlagSet) *seshFlagSet {
+	return &seshFlagSet{
+		binary:  fs.String("sesh-ops", "", "sesh-ops binary override (default: lookup on $PATH)"),
+		server:  fs.String("server", "", "NATS URL forwarded to sesh-ops"),
+		session: fs.String("session", "", "sesh session name forwarded to sesh-ops"),
+		scope:   fs.String("scope", "workflow", "memory scope forwarded to sesh-ops"),
+	}
+}
+
+func (s *seshFlagSet) client() *workflow.ExecSeshClient {
+	c := workflow.NewExecSeshClient()
+	if *s.binary != "" {
+		c.Binary = *s.binary
+	}
+	c.Server = *s.server
+	c.SessionFile = *s.session
+	c.Scope = *s.scope
+	return c
+}
+
 // parseOnePositional lets flags appear before OR after the single
-// positional file argument. Go's stdlib flag.Parse stops at the first
+// positional argument. Go's stdlib flag.Parse stops at the first
 // non-flag, so a Unix-style invocation like
 // `orch-workflow compile foo.yaml --print` would otherwise fail.
 //

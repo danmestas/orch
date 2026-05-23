@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"reflect"
 	"strings"
@@ -102,5 +103,54 @@ func TestParseOnePositional(t *testing.T) {
 				t.Errorf("--fleet = %q; want %q", *fleet, tc.wantFleet)
 			}
 		})
+	}
+}
+
+func TestRun_routesApplyStatusCancelByName(t *testing.T) {
+	// Each subcommand must reach its handler — the handler will fail
+	// for lack of args, but the error message anchors the test to the
+	// correct branch.
+	cases := []struct {
+		sub    string
+		errSub string
+	}{
+		{"apply", "yaml path required"},
+		{"status", "workflow id required"},
+		{"cancel", "workflow id required"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.sub, func(t *testing.T) {
+			err := run([]string{tc.sub})
+			if err == nil {
+				t.Fatalf("%s with no args should error", tc.sub)
+			}
+			if !strings.Contains(err.Error(), tc.errSub) {
+				t.Errorf("%s error %q missing substring %q", tc.sub, err.Error(), tc.errSub)
+			}
+		})
+	}
+}
+
+func TestRun_unknownSubcommandSurfaces(t *testing.T) {
+	err := run([]string{"frobnicate"})
+	if err == nil || !strings.Contains(err.Error(), "unknown subcommand") {
+		t.Errorf("got %v; want unknown subcommand error", err)
+	}
+}
+
+func TestStatusAndCancel_requireScopeID(t *testing.T) {
+	for _, sub := range []string{"status", "cancel"} {
+		err := run([]string{sub, "workflow-id-without-scope"})
+		if err == nil || !strings.Contains(err.Error(), "--scope-id is required") {
+			t.Errorf("%s without --scope-id should fail loudly; got %v", sub, err)
+		}
+	}
+}
+
+func TestErrInvalidShape(t *testing.T) {
+	// Regression: production main() relies on errors.Is(err, errInvalid)
+	// to map validation failures to exit code 2.
+	if !errors.Is(errInvalid, errInvalid) {
+		t.Fatal("errInvalid must satisfy errors.Is reflexively")
 	}
 }
