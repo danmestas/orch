@@ -127,9 +127,14 @@ checklist against each skill body.
 
 5. **Commit** with `refactor(skills): update <skill-name> for Synadia cutover`.
 
-## For claude-code: prefer the Synadia channel plugin over the shim adapter
+## For claude-code: the Synadia channel plugin is the default bridge
 
-Validated 2026-05-19. **`synadia-ai/synadia-agents/agents/claude-code`** is a NATS channel plugin that bridges claude-code natively to the Synadia Agent Protocol bus. Use it instead of `orch-spawn`'s shim+adapter pattern when the worker is claude-code.
+Validated 2026-05-19, default-flipped in #182 (Proposal 0010 Phase A).
+**`synadia-ai/synadia-agents/agents/claude-code`** is a NATS channel plugin
+that bridges claude-code natively to the Synadia Agent Protocol bus.
+`orch-spawn claude` now loads it by default; `orch-spawn` no longer launches
+the shim sidecar for claude. Codex/pi/gemini still use the shim adapter
+pattern until they get equivalent plugins (Phase B).
 
 ### Why
 
@@ -141,7 +146,7 @@ The shim's claude-code adapter (JSONL transcript tailing + `tmux send-keys` for 
 - Heartbeats at 5s cadence with full envelope (`Sesh-Envelope`, `Sesh-Role`, `Sesh-Attempt`, traceparent)
 - v0.4.0 of the Synadia SDK (vs our shim's 0.3.0); supports attachments
 
-### Setup (one-time)
+### Setup (one-time, per machine)
 
 Inside any claude-code session:
 
@@ -150,15 +155,39 @@ Inside any claude-code session:
 /plugin install nats-channel@synadia-plugins
 ```
 
-User-scope installs to `~/.claude/plugins/`. Then for each claude session you want to bridge:
+User-scope installs to `~/.claude/plugins/`. Done — every subsequent
+`orch-spawn claude` picks up the plugin automatically.
+
+### Default spawn (post-#182)
 
 ```sh
-NATS_URL=$(cat ~/.sesh/hub.nats.url) \
-  claude --dangerously-skip-permissions \
-         --dangerously-load-development-channels 'plugin:nats-channel@synadia-plugins'
+orch-spawn claude --project myapp --outfit engineer
+# orch-spawn passes --dangerously-load-development-channels under the hood;
+# no orch-agent-shim sidecar is launched. The plugin advertises itself on
+# $SRV.INFO.agents from inside claude.
 ```
 
-The `--dangerously-load-development-channels` flag is REQUIRED — without it, the plugin's MCP server runs but channel push (NATS → claude turn) is dormant.
+### Fallback: shim-adapter
+
+Use `--bridge=shim-adapter` when the plugin isn't installed on the worker's
+machine, or for environments that can't load development channels (e.g.
+hardened CI runners). The shim adapter remains supported for the migration
+window — both paths coexist:
+
+```sh
+orch-spawn claude --project myapp --bridge=shim-adapter
+# Launches orch-agent-shim alongside the pane with the JSONL-tail adapter
+# (pre-#182 default behaviour).
+```
+
+### Bridge defaults by agent (post-#182)
+
+| Agent | Default `--bridge` | Notes |
+|---|---|---|
+| `claude` | `synadia-plugin` | Plugin loads inside claude; no shim sidecar |
+| `codex` | `shim-adapter` | No Synadia plugin yet; rejects `--bridge=synadia-plugin` |
+| `pi` | `shim-adapter` | No Synadia plugin yet; rejects `--bridge=synadia-plugin` |
+| `gemini` | `shim-adapter` | No Synadia plugin yet; rejects `--bridge=synadia-plugin` |
 
 ### Verified end-to-end
 
@@ -178,13 +207,18 @@ Round-trip in ~8s (one full claude turn). Visible in the pane:
 
 ### What this replaces
 
-- `orch-spawn claude ...` with shim + JSONL-tail adapter — the shim's claude-code adapter remains a legacy fallback for environments where the marketplace install isn't possible, but new operator setups should prefer the channel plugin.
-- sister-shim issues #11 / #13 / #15 / #16 are moot for claude-code if you adopt the plugin.
+- The shim's claude-code adapter (JSONL tailing + send-keys) is no longer
+  on the default path; use `--bridge=shim-adapter` to opt back in.
+- sister-shim issues #11 / #13 / #15 / #16 are moot for claude-code on the
+  default path.
 
 ### Open questions / not yet validated
 
-- codex / pi / gemini: no equivalent Synadia plugin shipped yet. Continue using the shim's adapters (or wait for vendor support / NATS↔ACP bridge per orch#180-style proposal).
-- Per-session config: the `/nats-channel:configure` skill manages connection + session-override. Not strictly needed; the plugin reads `$NATS_URL` and the cwd-basename as session.
+- codex / pi / gemini: no equivalent Synadia plugin shipped yet. Continue
+  using the shim's adapters (or wait for Phase B's NATS↔ACP bridge).
+- Per-session config: the `/nats-channel:configure` skill manages
+  connection + session-override. Not strictly needed; the plugin reads
+  `$NATS_URL` and the cwd-basename as session.
 
 ## Cross-references
 

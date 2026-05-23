@@ -62,7 +62,14 @@ fi
 
 # ---------- Test 3: orch-spawn produces a pane ----------
 log "=== T3: orch-spawn claude → pane id on stdout ==="
-PANE=$(orch-spawn claude --cwd /tmp --headless --verify 2>/dev/null | tail -1)
+# This bench exercises the orch-agent-shim adapter contract (T9-T11
+# below), so we opt-in to the shim-adapter bridge explicitly. Post-#182
+# (Proposal 0010), claude's default --bridge is synadia-plugin which
+# skips the shim sidecar; that path has its own coverage in
+# skills/migrating-to-synadia/SKILL.md's spike artifact. Here, "is the
+# shim still §12-compliant?" is the load-bearing question — so we ask
+# for the shim path by name.
+PANE=$(orch-spawn claude --cwd /tmp --headless --verify --bridge=shim-adapter 2>/dev/null | tail -1)
 if [ -n "$PANE" ] && [ "${PANE:0:1}" = "%" ]; then
     assert "orch-spawn output looks like pane id" "%-prefix" "%-prefix"
 else

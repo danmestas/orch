@@ -173,13 +173,22 @@ after service registration" guidance):
 ## Integration with orch-spawn
 
 `orch-spawn` launches `orch-agent-shim` as a default sidecar for every
-spawned pane (Plan 8 / orch#58). No operator flag is required.
+codex / pi / gemini pane (Plan 8 / orch#58). No operator flag is required.
 
 ```
-orch-spawn claude --project myapp
-# → splits pane, starts claude, then forks orch-agent-shim for that pane
+orch-spawn codex --project myapp
+# → splits pane, starts codex, then forks orch-agent-shim for that pane
 # → pane is discoverable via $SRV.INFO.agents within a few seconds
 ```
+
+**For `claude` panes (post-#182, Proposal 0010 Phase A):** the default
+bridge is the Synadia `nats-channel` plugin, which runs inside claude via
+`--dangerously-load-development-channels`. The shim sidecar is NOT launched
+for claude on the default path. Pass `--bridge=shim-adapter` to fall back
+to the legacy shim+JSONL-tail adapter (e.g. on a host that doesn't have
+the Synadia plugin installed). See
+`skills/migrating-to-synadia/SKILL.md` for the install + verification
+recipe.
 
 ### Env propagation
 

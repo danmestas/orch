@@ -5,10 +5,15 @@ By Daniel Mestas
 A lightweight, extensible substrate for autonomous long-running multi-agent coordination on tmux.
 
 Each pane orch spawns speaks the [Synadia Agent Protocol v0.3](docs/synadia-comparison.md)
-on NATS. `orch-spawn` launches an [`orch-agent-shim`](docs/orch-agent-shim.md) sibling that
-registers the pane on `$SRV.INFO.agents` and serves prompts at
-`agents.prompt.<token>.<owner>.<pane>`. `orch-tell` and `orch-ask` route through discovery;
-operator UX is unchanged, the wire under it is standard.
+on NATS. For `claude` workers, `orch-spawn` loads Synadia's
+[`nats-channel`](skills/migrating-to-synadia/SKILL.md) plugin inside claude itself —
+the bridge runs in-process (no sidecar) and the pane advertises on
+`$SRV.INFO.agents` from there. For `codex`/`pi`/`gemini` workers, `orch-spawn`
+launches an [`orch-agent-shim`](docs/orch-agent-shim.md) sibling that registers
+the pane and bridges prompts at `agents.prompt.<token>.<owner>.<pane>`.
+Pass `--bridge=shim-adapter` to opt claude back to the legacy shim path.
+`orch-tell` and `orch-ask` route through discovery; operator UX is unchanged,
+the wire under it is standard.
 
 ## Prerequisites
 

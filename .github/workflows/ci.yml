@@ -103,6 +103,7 @@ jobs:
             test/test-orch-bundle-gc.sh
             test/test-orch-project-resolution.sh
             test/test-orch-spawn-output.sh
+            test/test-orch-spawn-bridge.sh
             test/test-orch-spawn-sesh-session.sh
             test/test-orch-worktree-from.sh
             test/test-orch-cwd-quoting.sh

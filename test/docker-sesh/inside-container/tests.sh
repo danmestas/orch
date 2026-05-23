@@ -125,10 +125,19 @@ sesh_full_reset() {
 # the agents micro service against the leaf, so callers MUST sleep
 # after spawning before probing $SRV.INFO.agents or sending prompts.
 # Used by Groups 11 + 13-16.
+#
+# --bridge=shim-adapter is forced for the entire bench: post-#182
+# (Proposal 0010), claude's default bridge is synadia-plugin which runs
+# the bus bridge inside the real claude binary. This bench runs the mock
+# claude harness — the plugin can't load there, so the shim path is the
+# only path that produces $SRV.INFO.agents discovery for the worker.
+# Forcing the flag here keeps every harness in this bench on the same
+# bridge mode, and codex/pi/gemini default to shim-adapter anyway so
+# the flag is a no-op for them.
 spawn_worker_on_hub() {
     local harness=$1 proj=$2
     local raw p
-    raw=$(NATS_URL="$SESH_NATS_URL" orch-spawn "$harness" --cwd "$proj" --headless 2>&1)
+    raw=$(NATS_URL="$SESH_NATS_URL" orch-spawn "$harness" --cwd "$proj" --headless --bridge=shim-adapter 2>&1)
     # Filter to lines that look like pane IDs (start with %, then digits)
     # so warnings interleaved into stderr-merged stdout don't break tail -1.
     p=$(printf '%s\n' "$raw" | grep -E '^%[0-9]+' | tail -1)
@@ -483,8 +492,14 @@ run_synadia_contract() {
         return 0
     fi
 
+    # Force the shim-adapter bridge for this conformance loop. Post-#182
+    # (Proposal 0010), claude's default --bridge is synadia-plugin which
+    # skips the shim sidecar — but T9/T10/T11 ARE the shim's §12 contract
+    # test. Asking for the shim by name keeps the bench testing the
+    # bridge it's named after. codex/pi/gemini default to shim-adapter
+    # anyway; the flag is a no-op for them.
     local pane
-    pane=$(NATS_URL="$SESH_NATS_URL" orch-spawn "$harness" --cwd "$proj" --headless 2>&1 | tail -1)
+    pane=$(NATS_URL="$SESH_NATS_URL" orch-spawn "$harness" --cwd "$proj" --headless --bridge=shim-adapter 2>&1 | tail -1)
     if [ -z "$pane" ] || [ "${pane:0:1}" != "%" ]; then
         assert "${harness}: orch-spawn returned a pane id" "%-prefix" "${pane:0:10}"
         sesh_down_in "$proj" "$label"
