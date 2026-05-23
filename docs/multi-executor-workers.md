@@ -1,6 +1,10 @@
 # Multi-executor agent workers
 
-**Status:** Proposal — not yet implemented.
+**Status:** Partially implemented. The dispatcher in `bin/orch-spawn`
+ships hybrid discovery for executor backends; heavyweight backends are
+moving to sister repos (Proposal 0003 / issue #142). The rest of this
+document is the original architectural proposal and tracks the broader
+roadmap.
 
 Orch today is an agent host: bash + tmux, with the `suit` outfit system
 for skill / MCP / hook configuration. Sesh (sister project) is a neutral
@@ -13,6 +17,69 @@ Object, wasmtime, browser) while every worker participates fully in
 sesh — same subject hierarchy, same Fossil substrate, same scoped state.
 
 The proposal touches only orch. Sesh and EdgeSync stay unchanged.
+
+---
+
+## Current state — hybrid executor discovery (Proposal 0003)
+
+`orch-spawn --executor <name>` resolves the backend command through
+three layers, in this order:
+
+1. **Operator override** — `ORCH_EXECUTOR_<NAME>_CMD` env var. Value is
+   a shell command string interpreted by `bash -c` in the spawn
+   subshell. Useful for pointing at deployed cloud backends without
+   installing a local binary:
+
+   ```sh
+   ORCH_EXECUTOR_CF_WORKER_CMD="curl -sX POST https://my-cf.dev/spawn" \
+     orch-spawn claude --executor cf-worker --headless
+   ```
+
+   The name is uppercased with `-` → `_` (so `cf-durable-object` →
+   `ORCH_EXECUTOR_CF_DURABLE_OBJECT_CMD`). Quoting and expansion happen
+   inside the subshell, not in orch-spawn's parent — operator-supplied
+   strings never eval in the dispatcher's context.
+
+2. **PATH binary** — `command -v orch-executor-<name>`. Future native
+   binaries shipped by sister repos install here via npm / homebrew /
+   goreleaser, the same shape as `orch-agent-shim`. Discovery is PATH
+   only (no relative paths).
+
+3. **In-tree fallback** — `${ORCH_REPO_ROOT}/executors/<name>/spawn.sh`.
+   Preserves backward compatibility during the gradual cutover; the
+   in-tree script must be executable.
+
+If no layer resolves, the dispatcher exits non-zero with a diagnostic
+that enumerates all three layers and the exact lookup it tried.
+
+### Backend ownership (Proposal 0003, Ousterhout review 2026-05-18)
+
+- **`tmux` stays in-tree.** `executors/tmux/spawn.sh` is ~50 LoC bash;
+  extracting it would create release-coordination overhead exceeding the
+  value of separation. The in-tree fallback is its permanent home.
+- **`cf-worker` extracted to
+  [`orch-executor-cf-worker`](https://github.com/danmestas/orch-executor-cf-worker).**
+  Phase A scaffold merged 2026-05-23; Phase B (real implementation) is
+  tracked there. Until Phase B lands, the in-tree
+  `executors/wasm/cf-worker/` remains as the working backend
+  (Decision 5: gradual cutover).
+- **`cf-durable-object` extracted to
+  [`orch-executor-cf-durable-object`](https://github.com/danmestas/orch-executor-cf-durable-object).**
+  Same Phase A / Phase B split as cf-worker.
+- **Future heavyweight backends** (`devcontainer`, `browser-tab`, …)
+  follow the `orch-executor-<name>` naming convention and ship through
+  the PATH or env-override layer; orch's main repo no longer absorbs
+  their dependency footprint.
+
+### Resolution order, in one line
+
+`env-var > PATH binary > in-tree script` — operator override always
+wins; PATH wins over in-tree when both exist; the diagnostic on a
+failed resolution names every layer that was tried.
+
+See `bin/orch-spawn` (`resolve_executor()`) for the implementation and
+`test/test-orch-spawn-executor-resolution.sh` for the precedence
+regression test.
 
 ---
 

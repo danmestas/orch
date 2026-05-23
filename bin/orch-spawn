@@ -9,7 +9,7 @@
 #                         [--quiet] [--role <worker|observer>]
 #                         [--position <right|left|above|below>] [--verify]
 #                         [--outfit <name>] [--cut <name>] [--accessory <name>]...
-#                         [--no-shim] [--executor <tmux|wasm>]
+#                         [--no-shim] [--executor <name>]
 #
 # Environment variables:
 #   ORCH_SESH_BIN          — absolute path to the `sesh` binary (default: first
@@ -57,10 +57,18 @@
 # exclusive with --cwd; pass one or the other, not both.
 #
 # Executor selection (--executor, default: tmux):
-#   tmux  — spawns a tmux pane on the local machine (default). Delegates to
-#           executors/tmux/spawn.sh.
-#   wasm  — Cloudflare Worker executor. Delegates to executors/wasm/cf-worker/.
-#           (Requires wrangler configuration; see executors/wasm/cf-worker/README.md.)
+#   The dispatcher resolves an executor name (e.g., tmux, cf-worker,
+#   cf-durable-object) via hybrid discovery, in this order:
+#     1. ORCH_EXECUTOR_<NAME>_CMD env var  — operator override; a shell
+#        command string interpreted by `bash -c` in the spawn subshell
+#        (e.g., ORCH_EXECUTOR_CF_WORKER_CMD="curl -X POST https://my-cf.dev").
+#     2. `command -v orch-executor-<name>` — PATH binary installed by a
+#        sister-repo release (npm/brew/goreleaser per Proposal 0003).
+#     3. ${ORCH_REPO_ROOT}/executors/<name>/spawn.sh — in-tree fallback;
+#        preserves backward compat during the gradual cutover.
+#   tmux stays in-tree per the 2026-05-18 Ousterhout review (Proposal 0003
+#   §"Ousterhout-review adjustment"). Future heavyweight backends live in
+#   sister repos and ship via PATH or env-override.
 #
 # orch-agent-shim is launched by default alongside every spawned pane,
 # registering it as a Synadia Agent Protocol v0.3 agent on the sesh hub
@@ -193,7 +201,7 @@ set -euo pipefail
 
 AGENT=${1:-}
 shift 2>/dev/null || true
-[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--worktree-from sha] [--slug name] [--instance-id name] [--force-slug] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--class active|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim] [--bridge synadia-plugin|shim-adapter] [--executor tmux|wasm]    env: [ORCH_SESH_BIN=<abs-path>] [ORCH_PROJECTS_ROOT=<dir>] [ORCH_VERIFY_TIMEOUT=<sec>] [ORCH_VERIFY_BACKOFF=1,2,4,8] [ORCH_HEADLESS_SESSION=<name>] [ORCH_WORKTREE_ROOT=<dir>] [ORCH_ALIASES_FILE=<path>]" >&2; exit 1; }
+[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--worktree-from sha] [--slug name] [--instance-id name] [--force-slug] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--class active|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim] [--bridge synadia-plugin|shim-adapter] [--executor <name>]    env: [ORCH_SESH_BIN=<abs-path>] [ORCH_PROJECTS_ROOT=<dir>] [ORCH_VERIFY_TIMEOUT=<sec>] [ORCH_VERIFY_BACKOFF=1,2,4,8] [ORCH_HEADLESS_SESSION=<name>] [ORCH_WORKTREE_ROOT=<dir>] [ORCH_ALIASES_FILE=<path>]" >&2; exit 1; }
 
 CWD=""
 SESH_SESSION_FLAG=""
@@ -273,9 +281,15 @@ while [ $# -gt 0 ]; do
             shift ;;
         --executor)
             EXECUTOR=${2:-}
+            # Executor name must be a stable identifier — lowercase letters,
+            # digits, hyphens; starts with a letter. Used to construct env
+            # var names (ORCH_EXECUTOR_<NAME>_CMD), PATH binary names
+            # (orch-executor-<name>), and in-tree paths (executors/<name>/).
+            # All three need a safe character set; this is the intersection.
             case "$EXECUTOR" in
-                tmux|wasm) ;;
-                *) echo "orch-spawn: --executor must be tmux|wasm (got: $EXECUTOR)" >&2; exit 1 ;;
+                ''|*[!a-z0-9-]*|[!a-z]*)
+                    echo "orch-spawn: --executor must match [a-z][a-z0-9-]* (got: $EXECUTOR)" >&2
+                    exit 1 ;;
             esac
             shift 2 ;;
         *) echo "orch-spawn: unknown flag: $1" >&2; exit 1 ;;
@@ -636,12 +650,67 @@ for _i in 1 2 3 4 5; do
     esac
 done
 ORCH_REPO_ROOT="$(cd "$(dirname "$_SELF")/.." && pwd -P)"
-SPAWN_SCRIPT="${ORCH_REPO_ROOT}/executors/${EXECUTOR}/spawn.sh"
-[ -x "$SPAWN_SCRIPT" ] || { echo "orch-spawn: executor script not found or not executable: $SPAWN_SCRIPT" >&2; exit 1; }
+
+# resolve_executor — hybrid discovery for the executor backend command
+# (Proposal 0003 / issue #142). Resolution precedence:
+#   1. ${ORCH_EXECUTOR_<NAME>_CMD} — operator override. Value is treated as
+#      a shell command string and invoked via `bash -c`, so it can be a
+#      single binary path, a remote-invocation pipeline
+#      (`curl -X POST https://my-cf-worker.dev`), or any other invocation
+#      shape. Quoting/expansion happens inside the subshell, NOT in our
+#      `eval`-free parent. Empty / unset env var skips this layer.
+#   2. `command -v orch-executor-<name>` on PATH — for future native
+#      binaries installed via npm/brew/goreleaser per the per-backend
+#      release shape (Decision 8). PATH discovery only — no relative paths.
+#   3. In-tree fallback: `${ORCH_REPO_ROOT}/executors/<name>/spawn.sh` —
+#      preserves current behaviour during the gradual cutover (Decision 5).
+#      The in-tree script must be executable.
+#
+# Name normalisation: <NAME> in the env var is the executor name uppercased
+# with `-` → `_` (e.g., cf-worker → CF_WORKER). The PATH lookup and in-tree
+# fallback use the literal name.
+#
+# Writes the resolved command string to stdout on success; exits non-zero
+# with a diagnostic on stderr when no layer resolves.
+resolve_executor() {
+    local name=$1
+    local env_name env_val path_bin tree_script
+    env_name="ORCH_EXECUTOR_$(printf '%s' "$name" | tr 'a-z-' 'A-Z_')_CMD"
+    env_val=${!env_name:-}
+    if [ -n "$env_val" ]; then
+        printf '%s' "$env_val"
+        return 0
+    fi
+    path_bin=$(command -v "orch-executor-$name" 2>/dev/null || true)
+    if [ -n "$path_bin" ]; then
+        printf '%s' "$path_bin"
+        return 0
+    fi
+    tree_script="${ORCH_REPO_ROOT}/executors/${name}/spawn.sh"
+    if [ -x "$tree_script" ]; then
+        printf 'bash %q' "$tree_script"
+        return 0
+    fi
+    echo "orch-spawn: no executor backend resolved for '$name'. Tried:" >&2
+    echo "  1. \$${env_name} (operator override) — unset or empty" >&2
+    echo "  2. command -v orch-executor-${name} (PATH binary) — not found" >&2
+    echo "  3. ${tree_script} (in-tree fallback) — missing or not executable" >&2
+    echo "orch-spawn: install the backend (see docs/multi-executor-workers.md) or set ${env_name}=<command>" >&2
+    return 1
+}
+
+EXECUTOR_CMD=$(resolve_executor "$EXECUTOR") || exit 1
 
 # Delegate to the executor. All resolved state is exported so the executor
-# script can read it without re-parsing args. stdout from the executor is the
-# pane id; we capture it for the shim launch downstream.
+# can read it without re-parsing args. stdout from the executor is the pane
+# id (or backend-equivalent handle); we capture it for the shim launch
+# downstream.
+#
+# The resolved command is a shell-quoted string (in-tree fallback) or a
+# bare path/command (PATH binary or env override). `bash -c` interprets
+# it in a fresh subshell, so operator-supplied env overrides can carry
+# pipelines, quoting, and $-expansions safely without us eval'ing in the
+# parent. Exported vars (AGENT, CWD, …) propagate to the child shell.
 #
 # Issue #185: the executor emits the pane id on stdout BEFORE its --verify
 # loop runs, so the pane id reaches us even when verify decides the agent
@@ -654,7 +723,7 @@ SPAWN_SCRIPT="${ORCH_REPO_ROOT}/executors/${EXECUTOR}/spawn.sh"
 # verify failure.
 SPAWN_RC=0
 PANE=$(export AGENT CWD HEADLESS NO_FLEET POSITION VERIFY OUTFIT BUNDLE GOAL_EXPORTS SLUG_EXPORTS NO_SHIM ROLE BRIDGE; \
-      bash "$SPAWN_SCRIPT") || SPAWN_RC=$?
+      bash -c "$EXECUTOR_CMD") || SPAWN_RC=$?
 
 # Pre-pane failure (e.g., unknown AGENT before split-window, or split-window
 # itself errored) — PANE is empty. No slug / shim work to do; just propagate
