@@ -35,10 +35,12 @@
           "type": "string"
         },
         "wrangler_env": {
-          "type": "string"
+          "type": "string",
+          "description": "Wrangler environment such as production or staging. Empty uses wrangler's default environment."
         },
         "abort_endpoint": {
-          "type": "string"
+          "type": "string",
+          "description": "Worker route to POST for graceful shutdown. Empty disables imperative abort."
         }
       },
       "additionalProperties": false,
@@ -50,19 +52,23 @@
     "OutfitBlock": {
       "properties": {
         "bundle": {
-          "type": "string"
+          "type": "string",
+          "description": "Shorthand 'name/cut+accessory1+accessory2'. Mutually exclusive with name/cut/accessories."
         },
         "name": {
-          "type": "string"
+          "type": "string",
+          "description": "Outfit name (explicit form). Mutually exclusive with bundle."
         },
         "cut": {
-          "type": "string"
+          "type": "string",
+          "description": "Outfit cut (explicit form). Mutually exclusive with bundle."
         },
         "accessories": {
           "items": {
             "type": "string"
           },
-          "type": "array"
+          "type": "array",
+          "description": "Outfit accessories (explicit form). Empty list by default. Mutually exclusive with bundle."
         }
       },
       "additionalProperties": false,
@@ -74,49 +80,60 @@
           "type": "string",
           "enum": [
             "v1"
-          ]
+          ],
+          "description": "Wire contract version. Omit to default to v1; any other value fails validation."
         },
         "name": {
           "type": "string"
         },
         "description": {
-          "type": "string"
+          "type": "string",
+          "description": "Free-form operator notes. Not consumed by dispatcher or backends."
         },
         "agent": {
           "$ref": "#/$defs/Agent"
         },
         "session": {
-          "type": "string"
+          "type": "string",
+          "description": "Sesh session label and 5th subject token. Defaults to Name when omitted."
         },
         "cwd": {
-          "type": "string"
+          "type": "string",
+          "description": "Worker working directory. Empty defers to dispatcher resolution (current dir / --project / sesh worker-cwd)."
         },
         "owner": {
-          "type": "string"
+          "type": "string",
+          "description": "Operator handle used in subject tokens and registry filters. Defaults to $USER."
         },
         "labels": {
           "additionalProperties": {
             "type": "string"
           },
-          "type": "object"
+          "type": "object",
+          "description": "Arbitrary key/value metadata surfaced in $SRV.INFO. Empty by default; otherwise inert."
         },
         "outfit": {
-          "$ref": "#/$defs/OutfitBlock"
+          "$ref": "#/$defs/OutfitBlock",
+          "description": "Suit-prepare bundle. Omit to skip outfit application."
         },
         "env": {
           "additionalProperties": {
             "type": "string"
           },
-          "type": "object"
+          "type": "object",
+          "description": "Env vars passed to the worker. Keys must match [A-Z_][A-Z0-9_]*. Empty by default."
         },
         "tmux": {
-          "$ref": "#/$defs/TmuxBlock"
+          "$ref": "#/$defs/TmuxBlock",
+          "description": "Local tmux executor block. Set exactly one of tmux / cf-worker / cf-durable-object."
         },
         "cf-worker": {
-          "$ref": "#/$defs/CFWorkerBlock"
+          "$ref": "#/$defs/CFWorkerBlock",
+          "description": "Cloudflare Worker executor block. Set exactly one of tmux / cf-worker / cf-durable-object."
         },
         "cf-durable-object": {
-          "$ref": "#/$defs/CFDurableBlock"
+          "$ref": "#/$defs/CFDurableBlock",
+          "description": "Cloudflare Durable Object executor block. Set exactly one of tmux / cf-worker / cf-durable-object."
         }
       },
       "additionalProperties": false,
@@ -129,22 +146,28 @@
     "TmuxBlock": {
       "properties": {
         "headless": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Detach into the orch-headless session instead of splitting the current pane. Defaults to false."
         },
         "verify": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Poll the new pane for an agent banner before declaring success. Defaults to false."
         },
         "layout": {
-          "type": "string"
+          "type": "string",
+          "description": "Layout-orchestrator preset (default|grid|full). Empty defers to orch's default split behavior."
         },
         "position": {
-          "type": "string"
+          "type": "string",
+          "description": "Split direction off the current pane (right|left|above|below). Defaults to right."
         },
         "role": {
-          "type": "string"
+          "type": "string",
+          "description": "Pane role tag (worker|observer). Empty defers to orch-spawn auto-detect."
         },
         "no_shim": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Disable the orch-agent-shim sidecar. Defaults to false (shim attached)."
         }
       },
       "additionalProperties": false,

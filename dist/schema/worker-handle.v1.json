@@ -12,7 +12,8 @@
           "type": "string"
         },
         "keys": {
-          "type": "string"
+          "type": "string",
+          "description": "Keystrokes for kind=tmux-send-keys (e.g. 'C-c'). Empty/ignored for other kinds."
         }
       },
       "additionalProperties": false,
@@ -35,16 +36,20 @@
     "BusBlock": {
       "properties": {
         "prompt": {
-          "type": "string"
+          "type": "string",
+          "description": "NATS subject the worker reads prompts from. Empty when the backend did not wire a prompt subject."
         },
         "status": {
-          "type": "string"
+          "type": "string",
+          "description": "NATS subject the worker publishes status events to. Empty when not wired."
         },
         "hb": {
-          "type": "string"
+          "type": "string",
+          "description": "NATS subject the worker publishes heartbeats to. Empty when not wired."
         },
         "signal": {
-          "type": "string"
+          "type": "string",
+          "description": "NATS subject the worker reads control signals from. Empty when not wired."
         }
       },
       "additionalProperties": false,
@@ -56,7 +61,8 @@
           "type": "string",
           "enum": [
             "v1"
-          ]
+          ],
+          "description": "Wire contract version. Omit to default to v1; any other value fails validation."
         },
         "name": {
           "type": "string"
@@ -65,7 +71,8 @@
           "$ref": "#/$defs/Agent"
         },
         "session": {
-          "type": "string"
+          "type": "string",
+          "description": "Echoes SpawnSpec.Session (or the resolved fallback). Empty if unset on both sides."
         },
         "created_at": {
           "type": "string",
@@ -75,28 +82,35 @@
           "type": "string"
         },
         "pane_id": {
-          "type": "string"
+          "type": "string",
+          "description": "Tmux pane id (e.g. '%64') when executor=tmux. Empty for non-tmux backends; they populate id instead."
         },
         "id": {
-          "type": "string"
+          "type": "string",
+          "description": "Executor-generic worker id — DO id or Worker route. Empty for tmux (which uses pane_id)."
         },
         "bus": {
-          "$ref": "#/$defs/BusBlock"
+          "$ref": "#/$defs/BusBlock",
+          "description": "Per-worker NATS subject map. Omit if the backend did not wire the bus."
         },
         "abort": {
-          "$ref": "#/$defs/AbortBlock"
+          "$ref": "#/$defs/AbortBlock",
+          "description": "Imperative cancellation verb. Omit when imperative abort is not supported by the backend."
         },
         "log_file": {
-          "type": "string"
+          "type": "string",
+          "description": "Path to the shim's startup log. Diagnostic only; empty when not produced."
         },
         "pid": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Worker process id when knowable. Best-effort; 0 when unknown."
         },
         "status": {
           "type": "string"
         },
         "message": {
-          "type": "string"
+          "type": "string",
+          "description": "Human-readable cause when status=failed; what we're waiting on when status=pending. Empty when status=ready."
         }
       },
       "additionalProperties": false,
