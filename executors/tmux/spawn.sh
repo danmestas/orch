@@ -13,6 +13,8 @@
 #     NO_FLEET         — 1 to skip fleet-doctrine injection
 #     VERIFY           — 1 to poll for readiness before returning
 #     GOAL_EXPORTS     — shell fragment exporting SESH_GOAL_* vars (may be empty)
+#     SLUG_EXPORTS     — shell fragment exporting ORCH_INSTANCE_ID (may be empty;
+#                        Proposal 0009 / issue #181)
 #     NO_SHIM          — 1 to skip orch-agent-shim launch
 #     OUTFIT           — outfit name (may be empty)
 #     BUNDLE           — suit bundle dir (may be empty; set when OUTFIT is set)
@@ -62,10 +64,10 @@ case $AGENT in
                 [ -s "$MERGED" ] && printf '\n\n' >> "$MERGED"
                 cat "$HOME/.cache/orch-fleet-prompt.md" >> "$MERGED"
             fi
-            WRAP="trap 'rm -rf \"$BUNDLE\"' EXIT; export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && claude --dangerously-skip-permissions --add-dir \"$BUNDLE\""
+            WRAP="trap 'rm -rf \"$BUNDLE\"' EXIT; export ORCH_PANE_ID=\$TMUX_PANE;${SLUG_EXPORTS:-}${GOAL_EXPORTS} cd \"$CWD\" && claude --dangerously-skip-permissions --add-dir \"$BUNDLE\""
             [ -s "$MERGED" ] && WRAP="$WRAP --append-system-prompt-file \"$MERGED\""
         else
-            WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && claude --dangerously-skip-permissions"
+            WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${SLUG_EXPORTS:-}${GOAL_EXPORTS} cd \"$CWD\" && claude --dangerously-skip-permissions"
             [ "${NO_FLEET:-0}" -eq 0 ] && WRAP="$WRAP --append-system-prompt-file $HOME/.cache/orch-fleet-prompt.md"
         fi
         # Bridge=synadia-plugin (default for claude — Proposal 0010, #182):
@@ -87,7 +89,7 @@ case $AGENT in
         # has no blocking first-run dialogs (no trust gate, no telemetry
         # consent, no model picker — source-confirmed in pi-coding-agent's
         # interactive-mode init), so nothing else needs bypassing.
-        WRAP="export ORCH_PANE_ID=\$TMUX_PANE PI_TELEMETRY=0;${GOAL_EXPORTS} cd \"$CWD\" && pi --offline"
+        WRAP="export ORCH_PANE_ID=\$TMUX_PANE PI_TELEMETRY=0;${SLUG_EXPORTS:-}${GOAL_EXPORTS} cd \"$CWD\" && pi --offline"
         [ "${NO_FLEET:-0}" -eq 0 ] && WRAP="$WRAP --append-system-prompt $HOME/.cache/orch-fleet-prompt.md"
         ;;
     codex)
@@ -129,7 +131,7 @@ case $AGENT in
         if ! grep -qF "[projects.\"$CANON_CWD\"]" "$HOME/.codex/config.toml"; then
             printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$CANON_CWD" >> "$HOME/.codex/config.toml"
         fi
-        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && codex --disable external_migration --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
+        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${SLUG_EXPORTS:-}${GOAL_EXPORTS} cd \"$CWD\" && codex --disable external_migration --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
         ;;
     gemini)
         # --skip-trust bypasses gemini's Folder Trust dialog (only active when
@@ -140,7 +142,7 @@ case $AGENT in
         # automated environments". Auth / theme / IDE-nudge dialogs do not
         # fire when ~/.gemini/{settings.json,oauth_creds.json} already exist
         # with a selectedAuthType — true on any host signed in once.
-        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && gemini --yolo --skip-trust"
+        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${SLUG_EXPORTS:-}${GOAL_EXPORTS} cd \"$CWD\" && gemini --yolo --skip-trust"
         ;;
     *)
         echo "orch-spawn: unknown agent: $AGENT (expected claude|pi|codex|gemini)" >&2; exit 1 ;;

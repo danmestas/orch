@@ -49,8 +49,16 @@ type JoinInputs struct {
 //
 //   - Identity (pane_id, instance_id) comes from $SRV.INFO.agents only.
 //     A worker without a $SRV.INFO entry is not in the registry.
-//   - Name resolution: alias-file entry > metadata.session > pct-form of pane
-//     (e.g. "%64" → "pct64"). Operator's explicit alias always wins.
+//   - Worker.InstanceID: metadata.instance_id (the stable slug published
+//     by the shim's --instance-id flag, Proposal 0009 / issue #181) when
+//     present; otherwise the micro-service info_response id (a UUID
+//     per-shim-process). The slug is the operator-meaningful identity
+//     that survives pane recycles; the micro id is a diagnostic fallback.
+//   - Name resolution: alias-file entry > metadata.instance_id (slug) >
+//     metadata.session > pct-form of pane (e.g. "%64" → "pct64").
+//     Operator's explicit alias always wins; below that the stable slug
+//     takes precedence over the session label so workers identified by
+//     --instance-id surface under that name in orch-peek output.
 //   - Operator override: if OperatorPane matches an agent's pane_id, that
 //     worker's Role is forced to "operator" even when metadata says
 //     otherwise. This preserves backwards compatibility with the legacy
@@ -86,9 +94,17 @@ func Join(in JoinInputs) []Worker {
 			continue
 		}
 
+		// InstanceID: prefer the slug (metadata.instance_id) over the
+		// per-process micro service id. The slug is stable across
+		// shim restarts; the micro id changes on every shim launch.
+		instanceID := a.Metadata["instance_id"]
+		if instanceID == "" {
+			instanceID = a.InstanceID
+		}
+
 		w := Worker{
 			PaneID:     pane,
-			InstanceID: a.InstanceID,
+			InstanceID: instanceID,
 			Role:       a.Metadata["role"],
 			Outfit:     a.Metadata["outfit"],
 			Agent:      a.Metadata["agent"],
@@ -112,12 +128,22 @@ func Join(in JoinInputs) []Worker {
 		// subject is implicit in §8.2.
 		w.Subjects.HB = heartbeatSubject(a.Metadata)
 
-		// Name precedence: operator alias > session > pct-form fallback.
-		if n, ok := paneToAlias[pane]; ok && n != "" {
-			w.Name = n
-		} else if w.Session != "" {
+		// Name precedence: operator alias > metadata.instance_id (slug,
+		// Proposal 0009) > session > pct-form fallback. The slug ranks
+		// above the session because operators set it explicitly via
+		// orch-spawn --instance-id; the session is often auto-derived
+		// from $SESH_SESSION and is the slug source itself when not
+		// overridden, so the two collapse to the same value in the
+		// common case. An explicit slug that diverges from the session
+		// (e.g. --instance-id overrides $SESH_SESSION) wins.
+		switch {
+		case paneToAlias[pane] != "":
+			w.Name = paneToAlias[pane]
+		case a.Metadata["instance_id"] != "":
+			w.Name = a.Metadata["instance_id"]
+		case w.Session != "":
 			w.Name = w.Session
-		} else {
+		default:
 			w.Name = paneToPctForm(pane)
 		}
 

@@ -33,11 +33,12 @@ type Live struct {
 	opts    LiveOptions
 	readers Readers
 
-	mu       sync.RWMutex
-	workers  []Worker
-	byPane   map[string]Worker
-	byName   map[string]Worker
-	lastErrs Errors
+	mu         sync.RWMutex
+	workers    []Worker
+	byPane     map[string]Worker
+	byName     map[string]Worker
+	byInstance map[string]Worker
+	lastErrs   Errors
 
 	subsMu sync.Mutex
 	subs   []chan Event
@@ -59,11 +60,12 @@ func NewLive(r Readers, opts LiveOptions) *Live {
 		opts.WatchBuffer = defaultWatchBuffer
 	}
 	return &Live{
-		opts:    opts,
-		readers: r,
-		byPane:  map[string]Worker{},
-		byName:  map[string]Worker{},
-		closeCh: make(chan struct{}),
+		opts:       opts,
+		readers:    r,
+		byPane:     map[string]Worker{},
+		byName:     map[string]Worker{},
+		byInstance: map[string]Worker{},
+		closeCh:    make(chan struct{}),
 	}
 }
 
@@ -105,15 +107,23 @@ func (l *Live) refresh(ctx context.Context) error {
 	old := l.byPane
 	newByPane := make(map[string]Worker, len(workers))
 	newByName := make(map[string]Worker, len(workers))
+	newByInstance := make(map[string]Worker, len(workers))
 	for _, w := range workers {
 		newByPane[w.PaneID] = w
 		if w.Name != "" {
 			newByName[w.Name] = w
 		}
+		// Index by stable slug too so Lookup resolves --instance-id
+		// values that don't match the display Name (e.g. when an alias
+		// overrides). Proposal 0009 / issue #181.
+		if w.InstanceID != "" {
+			newByInstance[w.InstanceID] = w
+		}
 	}
 	l.workers = workers
 	l.byPane = newByPane
 	l.byName = newByName
+	l.byInstance = newByInstance
 	l.lastErrs = errs
 	l.mu.Unlock()
 
@@ -151,8 +161,14 @@ func (l *Live) Snapshot() []Worker {
 	return out
 }
 
-// Lookup resolves by alias name or pane id. Pane ids are recognised by
-// the leading "%".
+// Lookup resolves by name, instance-id slug, or pane id. Pane ids are
+// recognised by the leading "%".
+//
+// Resolution order for non-pane keys: display Name first (operator's
+// chosen handle: alias > slug > session > pct), then InstanceID (the
+// stable slug from --instance-id) as a fallback so callers can pass
+// either the alias-overridden name or the underlying slug and reach the
+// same worker.
 func (l *Live) Lookup(nameOrPane string) (Worker, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -160,7 +176,10 @@ func (l *Live) Lookup(nameOrPane string) (Worker, bool) {
 		w, ok := l.byPane[nameOrPane]
 		return w, ok
 	}
-	w, ok := l.byName[nameOrPane]
+	if w, ok := l.byName[nameOrPane]; ok {
+		return w, true
+	}
+	w, ok := l.byInstance[nameOrPane]
 	return w, ok
 }
 
