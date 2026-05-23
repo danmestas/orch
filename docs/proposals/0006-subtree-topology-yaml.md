@@ -279,3 +279,29 @@ The topology and workflow yamls are independent — same topology can run multip
 - Days 4-6: `apply` / `status` / `destroy` / `diff` / `list` / `watch` subcommands
 - Days 7-8: state cache, idempotency tests
 - Days 9-10: bench migration to topology yaml; demo recipes; docs
+
+## Phase B status — 2026-05-22
+
+Phase B ships the live-infra wiring for the five-phase apply pipeline. The phase interfaces from Phase A get concrete implementations under `internal/subtree/`:
+
+| Phase | Interface | Concrete impl | File |
+| --- | --- | --- | --- |
+| Resolve sesh | `SeshResolver` | `LiveSeshResolver` — env-expand for `existing:`; shell `sesh up --session=<label> --scope=<scope>` for `spawn:`, poll `.sesh/sessions/<label>.json` for `nats_url` | `sesh_resolver.go` |
+| Registry snapshot | `LiveRegistry` | `NATSLiveRegistry` — wraps `internal/registry/sources.NATSSource.Agents()`; emits the set of `metadata.instance_id` (preferred) and `metadata.session` (fallback) for matching against `Topology.Workers[*].Name` | `live_registry.go` |
+| Spawn workers | `WorkerSpawner` | `OrchSpawnWorkerSpawner` — translates `SpawnSpec` → `orch-spawn` CLI args, captures stdout pane id, returns `WorkerHandle` with `Abort{Kind:tmux-send-keys, Target:<pane>, Keys:C-c}` | `worker_spawner.go` |
+| Seed state | `StateSeeder` | `SeshOpsStateSeeder` — shells `sesh-ops task add` / `sesh-ops goal create` with `--server`, `--scope`, `--scope-id`, `--title`/`--objective`; idempotency delegated to sesh-ops (CAS-on-id for tasks, upsert-on-scope-id for goals) | `state_seeder.go` |
+| Persist | `CacheStore` (Phase A) | `fileCache` (Phase A) — unchanged | `cache.go` |
+| Destroy — kill | `WorkerKiller` | `TmuxWorkerKiller` — `tmux send-keys C-c` → wait grace → `tmux kill-pane`; idempotent on missing panes | `worker_killer.go` |
+| Destroy — teardown | `SeshTeardown` | `SeshDownTeardown` — `sesh down --session=<label>`; idempotent on already-down | `sesh_teardown.go` |
+| Watch | `EventStream` | `NATSEventStream` — subscribes `agents.events.>` + `agents.hb.>`, filters by worker name set built from the cached `AppliedSubtree` | `event_stream.go` |
+
+CLI `cmd/orch-subtree/main.go` wires these into the `apply`, `status`, `destroy`, `watch` subcommands. NATS URL precedence on every wired verb: `--nats-url` flag > `$ORCH_NATS_URL` > the cached `applied.yaml`'s `resolved_nats` (status / watch only). `apply` soft-fails registry connect: if the bus is unreachable, every worker reads as missing and the apply (re-)spawns the full set — that's the safe default since claiming "already running" against an unreachable bus would skip spawning workers that aren't there.
+
+Idempotency contracts are pinned by `internal/subtree/integration_test.go` (`TestEndToEndApply`): three successive apply runs against the same topology demonstrate (1) cold start spawns everything, (2) all-alive re-apply spawns nothing, (3) adding one worker spawns only the new one. The Phase A contract tests in `contract_test.go` continue to cover phase ordering, partial-failure rollback, destroy idempotency, and apply re-validation.
+
+Out of scope for Phase B (deferred to Phase B+ / Phase C):
+
+- `--purge-state` (issue #159) — still refuses up front; sesh-ops needs a `scope-purge` verb first.
+- CF Worker / CF Durable Object spawn + kill — only `executor=tmux` is wired today; non-tmux executors surface a clear "not yet supported" error at apply time.
+- `orch subtree adopt` — reconstruct cache from live registry when the local applied.yaml is missing.
+- Bench-fleet migration to topology yaml (Phase C, separate PR).

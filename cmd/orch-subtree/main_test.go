@@ -67,12 +67,51 @@ func TestRunDiffFromScratch(t *testing.T) {
 	}
 }
 
-func TestRunDeferredVerb(t *testing.T) {
-	for _, verb := range []string{"apply", "status", "destroy", "watch"} {
-		err := run([]string{verb, "nope"})
-		if err == nil || !strings.Contains(err.Error(), "Phase B") {
-			t.Errorf("%s: expected Phase B not-implemented error, got %v", verb, err)
+// Phase B wires the previously-deferred verbs (apply/status/destroy/
+// watch) to live infrastructure. We can't run those against real NATS
+// in a unit test, so the smoke check is: the verbs exist (no "unknown
+// subcommand" error) and they fail in the expected way on an
+// unreachable subtree (cache-miss for status/destroy/watch, parse
+// error for apply on a non-existent file).
+func TestRunWiredVerbsExist(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		verb    string
+		args    []string
+		wantSub string // substring expected in the error message
+	}{
+		// status / destroy / watch all read the cache first; an
+		// unknown subtree name surfaces "not found in cache".
+		{"status", []string{"--cache-dir", dir, "nope"}, "not found"},
+		{"destroy", []string{"--cache-dir", dir, "nope"}, ""}, // destroy is idempotent on unknown subtree → nil err
+		{"watch", []string{"--cache-dir", dir, "nope"}, "not found"},
+		// apply requires a yaml path; bogus path errors at parse.
+		{"apply", []string{"--cache-dir", dir, "/nonexistent/x.yaml"}, "no such file"},
+	}
+	for _, c := range cases {
+		err := run(append([]string{c.verb}, c.args...))
+		if c.wantSub == "" {
+			if err != nil {
+				t.Errorf("%s: expected nil error (idempotent no-op), got %v", c.verb, err)
+			}
+			continue
 		}
+		if err == nil {
+			t.Errorf("%s: expected error containing %q, got nil", c.verb, c.wantSub)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.wantSub) {
+			t.Errorf("%s: error mismatch; want substring %q got %v", c.verb, c.wantSub, err)
+		}
+	}
+}
+
+// Sanity: unknown verbs still surface as "unknown subcommand" rather
+// than being misrouted into apply/status/etc.
+func TestRunUnknownVerb(t *testing.T) {
+	err := run([]string{"bogus"})
+	if err == nil || !strings.Contains(err.Error(), "unknown subcommand") {
+		t.Errorf("expected unknown subcommand error, got %v", err)
 	}
 }
 
