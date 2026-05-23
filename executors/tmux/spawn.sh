@@ -95,13 +95,25 @@ case $AGENT in
         # codex stores the user's "skip until next version" choice in
         # ~/.codex/config.toml after one interactive answer. One-time manual
         # step for new installs.
+        #
+        # The hooks-trust dialog (closes #188) fires whenever the sha256 of any
+        # enabled hook entry isn't in [hooks.state."<path>:<event>:<g>:<i>"]'s
+        # trusted_hash. Any plugin install that touches ~/.codex/hooks.json or
+        # adds plugin-contributed hooks invalidates the cache and wedges the
+        # TUI behind "Hooks need review" — no banner renders, --verify times
+        # out, fleet workers stay unreachable. Codex shipped
+        # `--dangerously-bypass-hook-trust` for "automation that already vets
+        # hook sources" (see codex --help). orch is exactly that automation:
+        # operator-owned hooks, installed deliberately. Bypass per-invocation
+        # — no config mutation, no drift, cannot get out of sync with whatever
+        # hooks.json or plugins look like at spawn time.
         CANON_CWD=$(cd "$CWD" && pwd -P)
         mkdir -p "$HOME/.codex"
         touch "$HOME/.codex/config.toml"
         if ! grep -qF "[projects.\"$CANON_CWD\"]" "$HOME/.codex/config.toml"; then
             printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$CANON_CWD" >> "$HOME/.codex/config.toml"
         fi
-        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && codex --disable external_migration --dangerously-bypass-approvals-and-sandbox"
+        WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && codex --disable external_migration --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
         ;;
     gemini)
         # --skip-trust bypasses gemini's Folder Trust dialog (only active when
