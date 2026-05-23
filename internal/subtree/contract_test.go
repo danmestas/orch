@@ -306,14 +306,39 @@ func TestDestroyPreservesStateByDefault(t *testing.T) {
 }
 
 func TestDestroyPurgeStateNotImplemented(t *testing.T) {
-	eng, r, _ := newRecordingEngine(t, nil)
+	eng, r, cache := newRecordingEngine(t, nil)
 	if _, err := eng.Apply(context.Background(), goodTopology()); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	killer := &fakeKiller{r: r}
-	_, err := eng.Destroy(context.Background(), "fleet", killer, nil, DestroyOptions{PurgeState: true})
+	res, err := eng.Destroy(context.Background(), "fleet", killer, nil, DestroyOptions{PurgeState: true})
 	if err == nil {
-		t.Error("expected --purge-state to surface a clear not-implemented error")
+		t.Fatal("expected --purge-state to surface a clear not-implemented error")
+	}
+
+	// Issue #159: when --purge-state is set and the sesh-ops scope-purge
+	// verb is missing, Destroy must refuse BEFORE killing any worker
+	// or mutating the cache. Otherwise the operator ends up with
+	// workers dead + cache claiming they're alive.
+	if len(killer.killed) != 0 {
+		t.Errorf("expected zero workers killed when --purge-state refuses; got %v", killer.killed)
+	}
+	if res == nil {
+		t.Fatalf("expected non-nil result even on refusal; got nil")
+	}
+	if len(res.WorkersKilled) != 0 {
+		t.Errorf("expected WorkersKilled empty when --purge-state refuses; got %v", res.WorkersKilled)
+	}
+	if res.CacheRemoved {
+		t.Errorf("expected CacheRemoved=false when --purge-state refuses; got true")
+	}
+	if _, ok := cache.entries["fleet"]; !ok {
+		t.Errorf("expected cache entry preserved when --purge-state refuses; entry missing")
+	}
+	for _, c := range r.calls {
+		if len(c) >= 5 && c[:5] == "kill:" {
+			t.Errorf("expected no kill calls in trace when --purge-state refuses; got %q", c)
+		}
 	}
 }
 

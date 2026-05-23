@@ -65,6 +65,14 @@ type DestroyResult struct {
 // Idempotent: re-destroying a no-longer-cached subtree returns nil
 // (no-op). Partial failures stop the pipeline so the operator can
 // investigate without state mutation continuing.
+//
+// --purge-state is a Phase-B flag whose state-purge backend
+// (sesh-ops scope-purge) is not yet implemented. Destroy refuses
+// up front when opts.PurgeState is set so the operator does NOT
+// end up with workers killed + cache claiming they're alive
+// (issue #159). When Phase B lands, the early-return is replaced
+// with the real PurgeState → Kill → SeshTeardown → CacheDelete
+// ordering.
 func (e *Engine) Destroy(ctx context.Context, name string, killer WorkerKiller, sesh SeshTeardown, opts DestroyOptions) (*DestroyResult, error) {
 	if e == nil {
 		return nil, fmt.Errorf("subtree: nil Engine")
@@ -72,6 +80,18 @@ func (e *Engine) Destroy(ctx context.Context, name string, killer WorkerKiller, 
 	if killer == nil {
 		return nil, fmt.Errorf("subtree destroy: nil WorkerKiller")
 	}
+
+	// Refuse --purge-state up front, BEFORE any kill or cache mutation.
+	// State purge is wired in when sesh-ops gains a scope-purge verb.
+	// Phase A leaves the hook in place so the CLI flag is already
+	// valid; the operator gets a clear "not yet wired" surface rather
+	// than silent skip — and, critically, no workers are killed
+	// (issue #159: ordering used to kill first then refuse, leaving
+	// the cache claiming workers were alive after they were dead).
+	if opts.PurgeState {
+		return &DestroyResult{}, fmt.Errorf("subtree destroy: --purge-state not yet implemented (sesh-ops scope-purge verb missing); workers not killed")
+	}
+
 	applied, err := e.Cache.Read(name)
 	if err != nil {
 		// Idempotent: if the cache entry is gone, there's nothing to
@@ -108,14 +128,6 @@ func (e *Engine) Destroy(ctx context.Context, name string, killer WorkerKiller, 
 			return res, fmt.Errorf("subtree destroy: sesh down %q: %w", session, err)
 		}
 		res.SeshTornDown = true
-	}
-
-	if opts.PurgeState {
-		// State purge is wired in when sesh-ops gains a scope-purge
-		// verb. Phase A leaves the hook in place so the CLI flag is
-		// already valid; the operator gets a clear "not yet wired"
-		// surface rather than silent skip.
-		return res, fmt.Errorf("subtree destroy: --purge-state not yet implemented (Phase B)")
 	}
 
 	if err := e.Cache.Delete(name); err != nil {
