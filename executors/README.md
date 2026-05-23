@@ -45,13 +45,36 @@ the inline `wrangler.toml` for deployment instructions).
 
 ## Adding a new executor
 
-1. Create `executors/<type>/` with at minimum a `spawn.sh` that:
+Names must match `[a-z][a-z0-9-]*` (lowercase letters, digits, hyphens;
+starts with a letter). The dispatcher's `resolve_executor()` accepts any
+such name and discovers the backend through three layers
+(`ORCH_EXECUTOR_<NAME>_CMD` env var → `command -v orch-executor-<name>`
+on PATH → in-tree `executors/<name>/spawn.sh`); see
+[docs/multi-executor-workers.md](../docs/multi-executor-workers.md)
+§ "Current state — hybrid executor discovery" for the full precedence
+and the Proposal 0003 sister-repo split.
+
+### For in-tree backends (lightweight only — tmux pattern)
+
+1. Create `executors/<name>/` with a `spawn.sh` that:
    - Reads context from exported env vars (AGENT, CWD, HEADLESS, ROLE, etc.)
    - Starts the agent process
    - Writes exactly one line to stdout: the instance id
    - Writes informational / error messages to stderr
-2. Add `<type>` to the `--executor` validation list in `bin/orch-spawn`.
-3. Write a `README.md` documenting the spawn/stop contract and any
-   infrastructure prerequisites (e.g. wrangler credentials, SSH access).
+2. Write a `README.md` documenting the spawn/stop contract and any
+   infrastructure prerequisites.
 
-The tmux executor's `spawn.sh` is the reference implementation.
+No dispatcher edit is required — `resolve_executor()` picks the new
+script up via the in-tree fallback layer.
+
+### For sister-repo backends (heavyweight — cf-worker pattern)
+
+Per Proposal 0003, heavyweight backends (TS + wrangler, devcontainer,
+browser-tab, …) ship as their own repo named `orch-executor-<name>`.
+Operators install them via the per-language release shape (npm /
+homebrew / goreleaser) so the binary lands on PATH; alternatively, they
+set `ORCH_EXECUTOR_<NAME>_CMD=<command>` to point at a deployed remote
+endpoint.
+
+The tmux executor's `spawn.sh` is the reference implementation for the
+spawn-side contract regardless of where the backend lives.

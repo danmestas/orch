@@ -1,10 +1,17 @@
 # Proposal 0003 — Extract heavyweight executor backends to sister repos
 
-**Status:** draft (spec only; design + implementation will follow as Dan adds new execution targets)
+**Status:** Partial implementation in progress. See [§ Status](#status) below.
 **Depends on:** Proposal 0002 (typed executor contract — required for clean per-repo backends)
 **Blocks:** none
 
 **Ousterhout-review adjustment (2026-05-18):** scope narrowed from "all executors" to "heavyweight only." `tmux:` backend (~50 LoC bash) STAYS in orch's main repo — extracting a shallow module creates release-coordination overhead for zero leverage gain. Extract only backends with substantial dependency footprints (CF Worker / Durable Object / future browser-tab / devcontainer).
+
+## Status
+
+- **2026-05-23 — sister repos scaffolded.** [`orch-executor-cf-worker`](https://github.com/danmestas/orch-executor-cf-worker) and [`orch-executor-cf-durable-object`](https://github.com/danmestas/orch-executor-cf-durable-object) each have a Phase A scaffold merged. Phase B (real implementation moving the existing `executors/wasm/cf-{worker,durable-object}/` code to the sister repos) is tracked in those repos.
+- **2026-05-23 — operator decisions locked.** Eight defaults confirmed: (1) one sister repo per backend, (2) per-backend distribution (CF backends ship as deployable Workers; future native binaries follow shim's goreleaser+npm pattern), (3) hybrid discovery (PATH + env override), (4) independent semver per backend, (5) gradual cutover (in-tree code stays until sister Phase B lands), (6) `orch-executor-<name>` naming locked, (7) sister repos own integration tests, (8) per-language build shape.
+- **orch-side hybrid discovery refactor (this PR — issue #142).** `bin/orch-spawn` now resolves executors through `resolve_executor()`: `ORCH_EXECUTOR_<NAME>_CMD` > `command -v orch-executor-<name>` > `${ORCH_REPO_ROOT}/executors/<name>/spawn.sh`. The in-tree fallback preserves backward compatibility during the gradual cutover. `tmux` stays in-tree permanently per the Ousterhout narrow. Test coverage lives in `test/test-orch-spawn-executor-resolution.sh`; operator-facing docs in `docs/multi-executor-workers.md` §"Current state".
+- **Pending.** Phase B real implementations in the two CF sister repos. Once they land, the in-tree `executors/wasm/cf-{worker,durable-object}/` directories can be removed (the dispatcher's PATH/env-override layers already cover them).
 
 ## Why
 
