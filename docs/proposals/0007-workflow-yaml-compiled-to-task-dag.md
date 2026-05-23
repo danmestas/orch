@@ -1,8 +1,52 @@
 # Proposal 0007 — Workflow YAML (compiled to sesh task DAG)
 
-**Status:** draft
+**Status:** Phase B implemented (apply/status/cancel wired); Phase C (docker-sesh bench) pending.
 **Depends on:** Proposal 0002 (SpawnSpec — workflow can include `spawn:` nodes), Proposal 0006 (topology — workflow targets a subtree's KV scope)
 **Inspired by:** [coleam00/Archon](https://github.com/coleam00/Archon) workflow grammar
+
+## Phase B status (2026-05-22)
+
+Phase B landed `apply`, `status`, and `cancel` as orch-workflow
+subcommands wired to a sesh-ops backend.
+
+- **Apply** (`internal/workflow/apply.go`): compiles the YAML →
+  topo-sorts → walks nodes in dependency order, calling `sesh-ops
+  task add` for each new node. The identity triple for idempotency
+  is `(workflow.name, node.id, fingerprint)` carried inside the
+  task's `metadata.orch_workflow.*` block; the body fingerprint
+  (SHA-256 truncated to 64 bits) is the content key. Same triple →
+  unchanged (no-op); different fingerprint → fresh sesh task with a
+  new ULID (the old record is left for `cancel` to clean up).
+  Dependencies are translated from node IDs to sesh task IDs as
+  Apply walks the DAG. Apply also ensures a per-workflow sesh goal
+  exists and links every task to it so cancel has something concrete
+  to target.
+- **Status** (`internal/workflow/status.go`): single `task list
+  --json` read per call → filter to this workflow_id → dedupe by
+  node id (most-alive record wins when an earlier body got
+  superseded) → render per-node state table plus a tallied totals
+  line.
+- **Cancel** (`internal/workflow/cancel.go`): ensures the workflow
+  goal exists, then calls `sesh-ops goal cleanup-tasks <goal-id>`.
+  cleanup-tasks CAS-flips every linked pending task to cancelled;
+  blocked / in_progress / terminal records are left alone. The
+  report surfaces the skipped set so operators know what still needs
+  attention (per #180 the in_progress kill path lives in orch-spawn).
+
+Sesh-ops integration is via a `SeshClient` interface; production
+wires `ExecSeshClient` (shells out to the binary on `$PATH`), tests
+inject an in-memory fake. The CLI forwards `--server`, `--session`,
+`--scope`, and `--scope-id` to sesh-ops verbatim.
+
+Goal anchoring (the apply-side `EnsureWorkflowGoal` + `LinkTaskToGoal`
+pair) is the v1 mechanism that lets us cancel pending tasks via the
+existing public sesh-ops surface — `goal cleanup-tasks` is the only
+verb that CAS-flips pending → cancelled. A future sesh-ops release
+adding a per-task `task cancel` verb would let us drop the goal
+anchoring; the SeshClient interface isolates that future migration
+to one file.
+
+
 
 ## Mental model — the key insight
 

@@ -3,12 +3,13 @@
 This page documents the YAML grammar accepted by `orch workflow`. It tracks
 the locked decisions in [Proposal 0007](proposals/0007-workflow-yaml-compiled-to-task-dag.md).
 
-> **Phase A scope.** This package today ships the parser, the
-> compile-time DAG validator, and a diagnostic `compile --print` that
-> emits the planned task DAG as JSON. Apply / status / cancel land in
-> Phase B once [orch#141](https://github.com/danmestas/orch/issues/141)
-> (SpawnSpec) and [orch#145](https://github.com/danmestas/orch/issues/145)
-> (Topology) merge.
+> **Phase B status.** The full apply/status/cancel surface is now
+> wired. The validator + diagnostic `compile --print` from Phase A
+> still ship; `apply` seeds the compiled DAG into a sesh scope via
+> `sesh-ops`, `status` aggregates per-node state from the same scope,
+> and `cancel` flips every pending/blocked task to cancelled (running
+> tasks are left alone — killing pullers is orch-spawn territory,
+> tracked at #180).
 
 ## Top-level shape
 
@@ -116,21 +117,71 @@ the spec mentions parses + validates clean." See
 orch workflow validate workflows/build-feature.yaml
 orch workflow validate workflows/build-feature.yaml --fleet lead-engineer,verifier
 
-# Show the planned task DAG as JSON (Phase A diagnostic)
+# Show the planned task DAG as JSON (diagnostic; no sesh writes)
 orch workflow compile --print workflows/build-feature.yaml
 
-# Phase B — not yet wired:
-# orch workflow apply  workflows/build-feature.yaml --subtree bench-fleet
-# orch workflow status build-feature --subtree bench-fleet
-# orch workflow cancel build-feature --subtree bench-fleet
+# Phase B — seed compiled tasks into a sesh scope (idempotent)
+orch workflow apply workflows/build-feature.yaml --session bench-fleet
+orch workflow apply workflows/build-feature.yaml --session bench-fleet \
+  --scope-id e2ecafe1                  # override workflow.scope-id
+
+# Phase B — live progress
+orch workflow status build-feature --session bench-fleet --scope-id e2ecafe1
+
+# Phase B — cancel all pending/blocked tasks (in-flight tasks untouched)
+orch workflow cancel build-feature --session bench-fleet --scope-id e2ecafe1
 ```
+
+`apply`/`status`/`cancel` shell out to the `sesh-ops` binary on
+`$PATH`. The `--server`, `--session`, `--scope`, and `--scope-id`
+flags forward verbatim to sesh-ops so resolution rules are inherited
+(see `sesh-ops --help`).
+
+### Idempotency model
+
+`apply` is the workhorse: it compiles the YAML, lists every task in
+the targeted scope, and reconciles against the compiled plan. The
+lookup key for "do I already have this task?" is the triple
+`(workflow.name, node.id, fingerprint)` — the fingerprint is a
+SHA-256 over the node body (kind + description + deps + assign +
+pull-refs), so any body change flips the fingerprint and gets a
+fresh sesh task:
+
+- **Same triple already exists** — task is left in place. Apply
+  reports `unchanged`.
+- **Different fingerprint** — fresh sesh task is created with a new
+  ULID; the old record is left alone (per the proposal's
+  content-addressed-task model). Run `orch workflow cancel` if you
+  want to retire stale pending work. Apply reports `created`.
+- **No existing record** — a new task is created. Apply reports
+  `created`.
+
+Apply also ensures a per-workflow sesh goal exists and links every
+applied task to it. The goal is metadata-tagged
+(`owner=orch-workflow`, `metadata.orch_workflow_goal=true`) so
+operators querying `sesh-ops goal list` can tell it apart from their
+own goals.
+
+### Cancel semantics
+
+`cancel` looks up the workflow's anchor goal in the targeted scope
+and invokes `sesh-ops goal cleanup-tasks`. cleanup-tasks CAS-flips
+every linked task currently in `pending` to `cancelled`. Tasks in
+`in_progress`, `blocked`, or any terminal status are **deliberately
+left alone** — sesh-ops's public surface only cancels pending
+records, and killing pullers is orch-spawn territory (issue #180).
+The cancel report calls out the skipped set so operators know what's
+still in flight.
+
+Cancel against a workflow id that was never applied is a clean
+no-op: the report comes back empty and no goal is created.
 
 Exit codes:
 
-- `0` — success (validate passed; compile succeeded)
-- `1` — parse / IO error
+- `0` — success
+- `1` — parse / IO / sesh-ops error
 - `2` — workflow is invalid (one or more error-severity diagnostics)
-- `3` — subcommand not implemented in this phase
+- `3` — reserved (unused now that all subcommands are wired)
 
 ## Reference workflow
 
