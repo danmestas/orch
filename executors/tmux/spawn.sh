@@ -16,6 +16,12 @@
 #     NO_SHIM          — 1 to skip orch-agent-shim launch
 #     OUTFIT           — outfit name (may be empty)
 #     BUNDLE           — suit bundle dir (may be empty; set when OUTFIT is set)
+#     BRIDGE           — synadia-plugin | shim-adapter (Proposal 0010, #182).
+#                        For claude: when synadia-plugin, the WRAP appends
+#                        --dangerously-load-development-channels so the
+#                        Synadia nats-channel plugin is loaded at startup
+#                        and the in-process bus bridge is live. The shim
+#                        sidecar is skipped by the dispatcher in that mode.
 #
 #   Optional:
 #     ORCH_HEADLESS_SESSION  — name for the headless tmux session (default: orch-headless)
@@ -61,6 +67,16 @@ case $AGENT in
         else
             WRAP="export ORCH_PANE_ID=\$TMUX_PANE;${GOAL_EXPORTS} cd \"$CWD\" && claude --dangerously-skip-permissions"
             [ "${NO_FLEET:-0}" -eq 0 ] && WRAP="$WRAP --append-system-prompt-file $HOME/.cache/orch-fleet-prompt.md"
+        fi
+        # Bridge=synadia-plugin (default for claude — Proposal 0010, #182):
+        # load the Synadia nats-channel plugin at startup so the in-process
+        # bus bridge is live the moment claude reaches its first prompt.
+        # The flag is REQUIRED — without it the plugin's MCP server runs
+        # but channel-push (NATS → claude turn) stays dormant. One-time
+        # install: `/plugin install nats-channel@synadia-plugins` from any
+        # claude session (see skills/migrating-to-synadia/SKILL.md).
+        if [ "${BRIDGE:-shim-adapter}" = "synadia-plugin" ]; then
+            WRAP="$WRAP --dangerously-load-development-channels 'plugin:nats-channel@synadia-plugins'"
         fi
         ;;
     pi)

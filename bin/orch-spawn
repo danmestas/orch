@@ -72,6 +72,22 @@
 # until Plans 11-13) spawn with the shim disabled and a warning; the legacy
 # marker-hook fallback was retired in #94 (Synadia is the only path).
 #
+# Bridge selection (--bridge, claude only — Proposal 0010 / issue #182):
+#   synadia-plugin (default for claude) — load the Synadia nats-channel
+#                  plugin inside claude via --dangerously-load-development-channels.
+#                  The plugin bridges claude-code natively to NATS (in-process
+#                  MCP tool + channel push); no orch-agent-shim sidecar is
+#                  launched. Requires a one-time
+#                  `/plugin install nats-channel@synadia-plugins` per machine.
+#   shim-adapter   — legacy path: launch orch-agent-shim alongside the pane
+#                    with the claude-code JSONL/send-keys adapter. Use as a
+#                    fallback when the plugin isn't installed locally, or
+#                    for environments that can't load development channels.
+# Codex/pi/gemini stay on shim-adapter and reject --bridge=synadia-plugin
+# until Synadia ships equivalent plugins (Phase B builds a NATS↔ACP bridge
+# for them). --no-shim still wins over both bridge modes (disables all bus
+# integration).
+#
 # --position controls where the new pane is split off the current pane in headed
 # mode. Default `right` preserves prior behavior (tmux split-window -h). Mapping:
 # right=`-h`, left=`-h -b`, above=`-v -b`, below=`-v`. Ignored in --headless.
@@ -157,7 +173,7 @@ set -euo pipefail
 
 AGENT=${1:-}
 shift 2>/dev/null || true
-[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--worktree-from sha] [--slug name] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--class active|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim] [--executor tmux|wasm]    env: [ORCH_SESH_BIN=<abs-path>] [ORCH_PROJECTS_ROOT=<dir>] [ORCH_VERIFY_TIMEOUT=<sec>] [ORCH_VERIFY_BACKOFF=1,2,4,8] [ORCH_HEADLESS_SESSION=<name>] [ORCH_WORKTREE_ROOT=<dir>] [ORCH_ALIASES_FILE=<path>]" >&2; exit 1; }
+[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--worktree-from sha] [--slug name] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--class active|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim] [--bridge synadia-plugin|shim-adapter] [--executor tmux|wasm]    env: [ORCH_SESH_BIN=<abs-path>] [ORCH_PROJECTS_ROOT=<dir>] [ORCH_VERIFY_TIMEOUT=<sec>] [ORCH_VERIFY_BACKOFF=1,2,4,8] [ORCH_HEADLESS_SESSION=<name>] [ORCH_WORKTREE_ROOT=<dir>] [ORCH_ALIASES_FILE=<path>]" >&2; exit 1; }
 
 CWD=""
 SESH_SESSION_FLAG=""
@@ -180,6 +196,7 @@ ACCESSORIES=()
 NO_GOAL_ACCESSORY=0
 NO_SHIM=0
 EXECUTOR="tmux"
+BRIDGE=""
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -217,6 +234,20 @@ while [ $# -gt 0 ]; do
         --accessory) ACCESSORIES+=("$2"); shift 2 ;;
         --no-goal-accessory) NO_GOAL_ACCESSORY=1; shift ;;
         --no-shim) NO_SHIM=1; shift ;;
+        --bridge)
+            BRIDGE=${2:-}
+            case "$BRIDGE" in
+                synadia-plugin|shim-adapter) ;;
+                *) echo "orch-spawn: --bridge must be synadia-plugin|shim-adapter (got: $BRIDGE)" >&2; exit 1 ;;
+            esac
+            shift 2 ;;
+        --bridge=*)
+            BRIDGE="${1#--bridge=}"
+            case "$BRIDGE" in
+                synadia-plugin|shim-adapter) ;;
+                *) echo "orch-spawn: --bridge must be synadia-plugin|shim-adapter (got: $BRIDGE)" >&2; exit 1 ;;
+            esac
+            shift ;;
         --executor)
             EXECUTOR=${2:-}
             case "$EXECUTOR" in
@@ -262,6 +293,30 @@ elif [ "$ROLE" = "observer" ]; then
     CLASS="observer"
 else
     CLASS="active"
+fi
+
+# Bridge resolution (Proposal 0010 / issue #182). Default per agent:
+#   claude              → synadia-plugin (Phase A: nats-channel plugin
+#                         bridges claude-code natively to the bus; no
+#                         orch-agent-shim sidecar needed)
+#   codex|pi|gemini|... → shim-adapter   (no Synadia plugin exists yet;
+#                         Phase B's NATS↔ACP bridge replaces these)
+#
+# Explicit --bridge overrides the default. Codex/pi/gemini reject
+# --bridge=synadia-plugin loudly — fail-loud preserves the operator's
+# intent rather than silently downgrade them to a no-op shim launch.
+# Likewise, --no-shim still suppresses any bus integration; bridge mode
+# only controls WHICH bridge runs, not whether one runs at all.
+if [ -z "$BRIDGE" ]; then
+    case "$AGENT" in
+        claude) BRIDGE=synadia-plugin ;;
+        *)      BRIDGE=shim-adapter ;;
+    esac
+fi
+if [ "$BRIDGE" = "synadia-plugin" ] && [ "$AGENT" != "claude" ]; then
+    echo "orch-spawn: --bridge=synadia-plugin is currently only supported for agent=claude (got: $AGENT)" >&2
+    echo "orch-spawn: codex/pi/gemini use --bridge=shim-adapter until Phase B's NATS↔ACP bridge lands" >&2
+    exit 1
 fi
 
 # --worktree-from resolution: create a git worktree at <sha> under the
@@ -545,7 +600,7 @@ SPAWN_SCRIPT="${ORCH_REPO_ROOT}/executors/${EXECUTOR}/spawn.sh"
 # the executor's exit code at the very end so callers still see rc=1 on
 # verify failure.
 SPAWN_RC=0
-PANE=$(export AGENT CWD HEADLESS NO_FLEET POSITION VERIFY OUTFIT BUNDLE GOAL_EXPORTS NO_SHIM ROLE; \
+PANE=$(export AGENT CWD HEADLESS NO_FLEET POSITION VERIFY OUTFIT BUNDLE GOAL_EXPORTS NO_SHIM ROLE BRIDGE; \
       bash "$SPAWN_SCRIPT") || SPAWN_RC=$?
 
 # Pre-pane failure (e.g., unknown AGENT before split-window, or split-window
@@ -627,7 +682,14 @@ fi
 #
 # Stderr goes to ~/.cache/orch-shim/<pane_id>.log (pane id has %, use
 # pct-form in path). Stdout is discarded (not part of spawn output contract).
-if [ $NO_SHIM -eq 0 ]; then
+#
+# Bridge=synadia-plugin (claude only): skip the shim entirely — the
+# Synadia nats-channel plugin runs inside claude and provides the bus
+# bridge in-process. Launching the shim alongside would duplicate the
+# bridge and race for the same subject. See Proposal 0010 / issue #182.
+if [ "$BRIDGE" = "synadia-plugin" ]; then
+    : # plugin runs inside claude; no sidecar shim
+elif [ $NO_SHIM -eq 0 ]; then
     if command -v orch-agent-shim >/dev/null 2>&1; then
         # Translate agent name into the canonical Synadia identifier so
         # metadata.agent matches Appendix C. orch-spawn accepts "claude"
