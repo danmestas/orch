@@ -4,6 +4,7 @@
 # Usage:
 #   orch-spawn <agent> [--cwd <path>] [--sesh-session <label>] [--project <name>]
 #                         [--worktree-from <sha>] [--slug <name>]
+#                         [--instance-id <name>] [--force-slug]
 #                         [--headless] [--no-fleet]
 #                         [--quiet] [--role <worker|observer>]
 #                         [--position <right|left|above|below>] [--verify]
@@ -169,11 +170,30 @@
 #   (those flags pick their own checkout strategy; the worktree creator
 #   would just stomp them). --slug carries no checkout semantics on its
 #   own and composes freely with --cwd / --sesh-session / --project.
+#
+# --instance-id <name> (Proposal 0009 / issue #181):
+#   Synonym for --slug — the worker's stable identity on the Synadia
+#   Agent Protocol bus. Passed straight through to
+#   `synadia-agent-shim --instance-id <slug>`, which uses it as the
+#   primary subject-token in agents.{prompt,status}.<token>.<owner>.<slug>
+#   (the pct-keyed legacy track stays live until ORCH_SLUG_DUAL_PUBLISH=0).
+#   When neither --slug nor --instance-id is given, orch-spawn derives the
+#   slug from $SESH_SESSION (if set in the parent shell) so workers spawned
+#   inside a sesh session inherit a stable identity automatically. When no
+#   slug source is available at all, the spawn proceeds with a warning
+#   (legacy pct-keyed identity only) — operators get a release to migrate.
+#
+# --force-slug:
+#   By default a slug that already maps to a different pane in the alias
+#   file is refused (so two workers can't claim the same name and stomp
+#   each other's bus identity). --force-slug bypasses the collision check
+#   and overwrites the alias-file entry; the previous worker on that slug
+#   keeps running but loses its alias.
 set -euo pipefail
 
 AGENT=${1:-}
 shift 2>/dev/null || true
-[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--worktree-from sha] [--slug name] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--class active|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim] [--bridge synadia-plugin|shim-adapter] [--executor tmux|wasm]    env: [ORCH_SESH_BIN=<abs-path>] [ORCH_PROJECTS_ROOT=<dir>] [ORCH_VERIFY_TIMEOUT=<sec>] [ORCH_VERIFY_BACKOFF=1,2,4,8] [ORCH_HEADLESS_SESSION=<name>] [ORCH_WORKTREE_ROOT=<dir>] [ORCH_ALIASES_FILE=<path>]" >&2; exit 1; }
+[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--worktree-from sha] [--slug name] [--instance-id name] [--force-slug] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--class active|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim] [--bridge synadia-plugin|shim-adapter] [--executor tmux|wasm]    env: [ORCH_SESH_BIN=<abs-path>] [ORCH_PROJECTS_ROOT=<dir>] [ORCH_VERIFY_TIMEOUT=<sec>] [ORCH_VERIFY_BACKOFF=1,2,4,8] [ORCH_HEADLESS_SESSION=<name>] [ORCH_WORKTREE_ROOT=<dir>] [ORCH_ALIASES_FILE=<path>]" >&2; exit 1; }
 
 CWD=""
 SESH_SESSION_FLAG=""
@@ -183,6 +203,7 @@ WORKTREE_FROM=""
 WORKTREE_FROM_FLAG=0
 SLUG=""
 SLUG_FROM_FLAG=0
+FORCE_SLUG=0
 HEADLESS=0
 NO_FLEET=0
 QUIET=0
@@ -205,6 +226,8 @@ while [ $# -gt 0 ]; do
         --project) PROJECT=$2; shift 2 ;;
         --worktree-from) WORKTREE_FROM=$2; WORKTREE_FROM_FLAG=1; shift 2 ;;
         --slug) SLUG=$2; SLUG_FROM_FLAG=1; shift 2 ;;
+        --instance-id) SLUG=$2; SLUG_FROM_FLAG=1; shift 2 ;;
+        --force-slug) FORCE_SLUG=1; shift ;;
         --headless) HEADLESS=1; shift ;;
         --no-fleet) NO_FLEET=1; shift ;;
         --quiet) QUIET=1; exec 2>/dev/null; shift ;;
@@ -402,6 +425,27 @@ if [ -n "$SLUG" ]; then
     esac
 fi
 
+# Slug derivation when neither --slug, --instance-id, nor --worktree-from set
+# one (Proposal 0009 / issue #181). The bus needs a stable identity per worker
+# so subjects/aliases survive pane recycles; pct<pane-id> identity flips on
+# every spawn. Preference order:
+#   1. $SESH_SESSION from the parent shell (a sesh session label is already a
+#      stable handle and matches the slug regex by convention).
+#   2. None — emit a warning and fall through. The legacy pct-keyed track stays
+#      live so the spawn still works; the operator gets a release to migrate.
+# We re-run the slug regex against $SESH_SESSION because session labels can
+# include characters outside [a-zA-Z0-9._-]; if it fails, we degrade to the
+# "no slug" path rather than reject the spawn.
+if [ -z "$SLUG" ] && [ -n "${SESH_SESSION:-}" ]; then
+    case "$SESH_SESSION" in
+        *[!a-zA-Z0-9._-]*|"") ;;
+        *) SLUG=$SESH_SESSION; SLUG_FROM_FLAG=1 ;;
+    esac
+fi
+if [ -z "$SLUG" ]; then
+    echo "orch-spawn: no --instance-id / --slug given and \$SESH_SESSION is unset/invalid — falling back to pct-keyed identity. Migrate to stable slug identity per docs/migration/0009-instance-id.md before the next release deprecates pct-keyed subjects." >&2
+fi
+
 # --sesh-session resolution: ask sesh's worker-cwd helper for the fossil
 # checkout dir. This is the worker-side leg of the fossil-as-trunk swarm
 # workflow (sesh issue #64) — the worker lands inside a provisioned
@@ -567,6 +611,15 @@ if [ -n "${SESH_GOAL_ID:-}" ]; then
     [ -n "${SESH_GOAL_SCOPE_ID:-}" ] && goal_append SESH_GOAL_SCOPE_ID "$SESH_GOAL_SCOPE_ID"
 fi
 
+# Slug-keyed env exports for the worker pane (Proposal 0009 / issue #181).
+# Exports ORCH_INSTANCE_ID alongside the legacy ORCH_PANE_ID so workers can
+# self-identify on the bus via a stable slug instead of a recyclable pane id.
+# Empty when no slug source resolved (legacy pct-keyed identity path).
+SLUG_EXPORTS=""
+if [ -n "$SLUG" ]; then
+    printf -v SLUG_EXPORTS " export ORCH_INSTANCE_ID=%q;" "$SLUG"
+fi
+
 # Locate the executor script relative to this binary. When orch-spawn is a
 # symlink (e.g. ~/.local/bin/orch-spawn → /path/to/repo/bin/orch-spawn), we
 # must resolve the symlink to find the repo root. readlink -f / realpath both
@@ -600,7 +653,7 @@ SPAWN_SCRIPT="${ORCH_REPO_ROOT}/executors/${EXECUTOR}/spawn.sh"
 # the executor's exit code at the very end so callers still see rc=1 on
 # verify failure.
 SPAWN_RC=0
-PANE=$(export AGENT CWD HEADLESS NO_FLEET POSITION VERIFY OUTFIT BUNDLE GOAL_EXPORTS NO_SHIM ROLE BRIDGE; \
+PANE=$(export AGENT CWD HEADLESS NO_FLEET POSITION VERIFY OUTFIT BUNDLE GOAL_EXPORTS SLUG_EXPORTS NO_SHIM ROLE BRIDGE; \
       bash "$SPAWN_SCRIPT") || SPAWN_RC=$?
 
 # Pre-pane failure (e.g., unknown AGENT before split-window, or split-window
@@ -637,9 +690,31 @@ if [ -n "$SLUG" ]; then
     # single-writer append via `flock` when available, falling back to a
     # best-effort append otherwise (the file is operator-managed and the
     # collision window is microseconds).
+    #
+    # Collision policy (Proposal 0009 / issue #181): if the slug is already
+    # mapped to a DIFFERENT pane, refuse the spawn unless --force-slug was
+    # passed. Re-mapping the same slug to the same pane (idempotent
+    # re-spawn) is always allowed. Without this guard, two workers can
+    # claim the same bus identity and the second silently steals the
+    # first's subjects.
     ALIASES_FILE=${ORCH_ALIASES_FILE:-$HOME/.config/orch-aliases}
     mkdir -p "$(dirname "$ALIASES_FILE")"
     touch "$ALIASES_FILE"
+    # Use -F (fixed-string) match with explicit "^...=" anchoring via awk
+    # so a slug containing regex metachars (e.g. "a.b") can't accidentally
+    # match a sibling line like "axb=%99". The slug regex permits "." and
+    # "-" so the risk is real even though the namespace is tiny.
+    EXISTING_PANE=$(awk -F= -v s="$SLUG" '$1==s {print $2; exit}' "$ALIASES_FILE" 2>/dev/null)
+    if [ -n "$EXISTING_PANE" ] && [ "$EXISTING_PANE" != "$PANE" ] && [ $FORCE_SLUG -eq 0 ]; then
+        echo "orch-spawn: slug '$SLUG' is already in use by $EXISTING_PANE (alias file: $ALIASES_FILE). Pass --force-slug to take over the alias (the previous worker keeps running but loses its name), or pick a different --instance-id." >&2
+        # The pane has already been spawned by the executor; orch-down is
+        # the cleanup primitive but we can't reliably invoke it from here
+        # without leaking complexity. Surface the pane id so the operator
+        # can clean up themselves; exit non-zero so callers don't treat
+        # this as a successful spawn.
+        echo "$PANE"
+        exit 1
+    fi
     if command -v flock >/dev/null 2>&1; then
         (
             flock -x 9
@@ -729,6 +804,19 @@ elif [ $NO_SHIM -eq 0 ]; then
             mkdir -p "$SHIM_LOG_DIR"
             SHIM_LOG="$SHIM_LOG_DIR/${PANE_SAFE}.log"
 
+            # Build shim arg list. --instance-id is appended only when a
+            # slug resolved (Proposal 0009 / issue #181); without it the
+            # shim defaults to pct-keyed identity, preserving legacy
+            # behaviour for the deprecation window.
+            SHIM_ARGS=(
+                --agent "$SHIM_AGENT"
+                --pane "$PANE"
+                --cwd "$CWD"
+            )
+            if [ -n "$SLUG" ]; then
+                SHIM_ARGS+=(--instance-id "$SLUG")
+            fi
+
             ORCH_OWNER="$SHIM_OWNER" \
             ORCH_OUTFIT="$OUTFIT" \
             ORCH_ROLE="$ROLE" \
@@ -736,10 +824,7 @@ elif [ $NO_SHIM -eq 0 ]; then
             SESH_CLASS="$CLASS" \
             SESH_SESSION="$SHIM_SESSION" \
             NATS_URL="$SHIM_NATS" \
-            orch-agent-shim \
-                --agent "$SHIM_AGENT" \
-                --pane "$PANE" \
-                --cwd "$CWD" \
+            orch-agent-shim "${SHIM_ARGS[@]}" \
                 >"$SHIM_LOG" 2>&1 &
             disown
         else

@@ -36,6 +36,37 @@ func TestParseAgentInfo_FullPayload(t *testing.T) {
 	}
 }
 
+func TestParseAgentInfo_PreservesInstanceIDInMetadata(t *testing.T) {
+	// Proposal 0009 / issue #181: shim publishes metadata.instance_id as
+	// the stable slug. parseAgentInfo's metadata projection is generic so
+	// the slug rides through automatically; this test pins the contract
+	// in place so a future "promote selected metadata fields to typed
+	// AgentInfo struct" refactor doesn't silently drop the slug.
+	body := []byte(`{
+		"id":"abc123",
+		"name":"agents",
+		"metadata": {
+			"pane_id":"%64",
+			"instance_id":"lead-engineer",
+			"agent":"claude-code",
+			"owner":"dmestas"
+		}
+	}`)
+	info, err := parseAgentInfo(body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if info.Metadata["instance_id"] != "lead-engineer" {
+		t.Errorf("metadata.instance_id not preserved: got %q want lead-engineer",
+			info.Metadata["instance_id"])
+	}
+	// AgentInfo.InstanceID still surfaces the micro-service id (a per-process
+	// UUID); the join layer promotes metadata.instance_id over it.
+	if info.InstanceID != "abc123" {
+		t.Errorf("AgentInfo.InstanceID should hold micro id: got %q", info.InstanceID)
+	}
+}
+
 func TestParseAgentInfo_AbsentMetadataDefaultsEmpty(t *testing.T) {
 	body := []byte(`{"id":"abc123","name":"agents"}`)
 	info, err := parseAgentInfo(body)
