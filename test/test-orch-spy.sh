@@ -207,19 +207,45 @@ chmod +x "$NATS_STUB_DIR/orch-registry"
 export PATH="$NATS_STUB_DIR:$PATH"
 export NATS_URL="nats://stub.invalid:4222"
 
+# Post-#189 fixture-injection seam for the new `orch` Go binary. See the
+# matching block in test-orch-observer-role.sh.
+ORCH_REGISTRY_FIXTURE_FILE="$SANDBOX/orch-registry-fixture.json"
+export ORCH_REGISTRY_FIXTURE_FILE
+
 # Helper: rewrite the fixture file from one or more "pane role cwd" tuples.
 # Each tuple is a single string; whitespace-split into 3 fields.
 # Usage: set_agents "%900 worker /tmp" "%901 operator /home/me"
 set_agents() {
     : > "$NATS_STUB_FIXTURES"
     local entry pane role cwd
+    local rows_json="[]"
     for entry in "$@"; do
         # shellcheck disable=SC2086  # word splitting is intentional here
         set -- $entry
         pane=$1; role=$2; cwd=$3
         jq -nc --arg p "$pane" --arg r "$role" --arg c "$cwd" --arg a "claude" \
             '{pane_id:$p, role:$r, cwd:$c, agent:$a}' >> "$NATS_STUB_FIXTURES"
+        rows_json=$(jq -nc --argjson prev "$rows_json" --arg p "$pane" --arg r "$role" --arg c "$cwd" --arg a "claude" '
+            $prev + [{
+                pane_id: $p,
+                instance_id: "stub-inst",
+                name: ($p | sub("^%"; "pct")),
+                role: $r,
+                outfit: "",
+                agent: $a,
+                cwd: $c,
+                owner: "stub",
+                session: "",
+                alive: true,
+                subjects: {
+                    prompt: ("agents.prompt.stub.fake." + ($p | sub("^%"; "pct"))),
+                    status: "",
+                    hb: ""
+                },
+                metadata: {pane_id: $p, role: $r, cwd: $c, agent: $a}
+            }]')
     done
+    printf '%s\n' "$rows_json" > "$ORCH_REGISTRY_FIXTURE_FILE"
 }
 
 echo "=== suit precheck (skip via ORCH_SPY_SKIP_PRECHECK=1, exercised via PATH) ==="
