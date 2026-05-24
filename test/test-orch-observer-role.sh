@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Regression tests for the observer-role tag end-to-end.
 #
-# After issue #60 (retire ~/.cache/orch-registry in favor of $SRV.INFO.agents)
-# and #94 (retire orch-listen and the marker hooks):
+# After issue #60 (retire ~/.cache/orch-registry in favor of $SRV.INFO.agents),
+# #94 (retire orch-listen and the marker hooks), and #189 (collapse the bash
+# CLIs into the `orch` Go binary):
 #
-#   - orch-register is a no-op stub (deprecation message, exit 0)
-#   - orch-tell and orch-peek resolve roles via $SRV.INFO.agents
+#   - orch-register is gone — registration happens via the shim's
+#     $SRV.INFO.agents advertisement at spawn time.
+#   - `orch tell` and `orch peek` resolve roles via $SRV.INFO.agents.
 #   - Bus subscribers (no longer a built-in CLI) filter observers by
-#     metadata.role
+#     metadata.role.
 #
 # Run with: bash test/test-orch-observer-role.sh
 set -uo pipefail
@@ -44,38 +46,15 @@ assert_contains() {
     fi
 }
 
-REGBIN=$(command -v orch-register)
 SPAWN=$(command -v orch-spawn)
-TELL=$(command -v orch-tell)
-PEEK=$(command -v orch-peek)
-[ -x "$REGBIN" ] && [ -x "$SPAWN" ] && [ -x "$TELL" ] && [ -x "$PEEK" ] || {
-    echo "binaries missing on PATH"; exit 2; }
+ORCH=$(command -v orch)
+[ -x "$SPAWN" ] && [ -x "$ORCH" ] || {
+    echo "binaries missing on PATH (need orch-spawn and orch)"; exit 2; }
 
 SANDBOX=$(mktemp -d)
 trap 'rm -rf "$SANDBOX"' EXIT
 
-# ── orch-register stub ────────────────────────────────────────────────────────
-
-echo "=== orch-register is a no-op stub ==="
-
-# 1) Any invocation exits 0 regardless of args.
-TMP_ERR=$(mktemp)
-"$REGBIN" %900 pi /tmp >"$SANDBOX/reg_out" 2>"$TMP_ERR" && rc=0 || rc=$?
-assert "register stub: exit 0" 0 "$rc"
-
-# 2) Stub emits a deprecation message on stderr.
-assert_contains "register stub: deprecation on stderr" "deprecated" "$(cat "$TMP_ERR")"
-rm -f "$TMP_ERR"
-
-# 3) Stub accepts the --role flag without erroring.
-"$REGBIN" %901 claude /tmp --role observer >"$SANDBOX/reg_out" 2>/dev/null && rc=0 || rc=$?
-assert "register stub: --role flag accepted" 0 "$rc"
-
-# 4) Stub does not create any registry file.
-[ ! -f "$SANDBOX/registry/%900.json" ] && absent=1 || absent=0
-assert "register stub: no registry file written" 1 "$absent"
-
-# ── orch-tell + orch-peek now use orch-registry for target resolution ───────
+# ── orch tell + orch peek now use orch-registry for target resolution ───────
 #
 # Post proposal 0005 (orch#144), the bins consult `orch-registry` instead of
 # doing inline `$SRV.INFO.agents` discovery via the nats CLI. We install
@@ -226,21 +205,21 @@ if [ -n "$TARGET_PANE" ]; then
 
     # 6) Worker-source (ORCH_PANE_ID set) refused without --force
     TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
-    ORCH_PANE_ID=%999 ORCH_TELL_MAX_WAIT=2 "$TELL" "$TARGET_PANE" "hello" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
+    ORCH_PANE_ID=%999 ORCH_TELL_MAX_WAIT=2 "$ORCH" tell "$TARGET_PANE" "hello" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
     assert "tell worker→observer: refused" 1 "$rc"
     assert_contains "tell worker→observer: error names refusal" "refusing to tell observer" "$(cat "$TMP_ERR")"
     rm -f "$TMP_OUT" "$TMP_ERR"
 
     # 7) --force bypasses the guard
     TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
-    ORCH_PANE_ID=%999 ORCH_TELL_MAX_WAIT=5 "$TELL" --force "$TARGET_PANE" "hello" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
+    ORCH_PANE_ID=%999 ORCH_TELL_MAX_WAIT=5 "$ORCH" tell --force "$TARGET_PANE" "hello" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
     assert "tell --force worker→observer: allowed" 0 "$rc"
     rm -f "$TMP_OUT" "$TMP_ERR"
 
     # 8) Operator-source (no ORCH_PANE_ID) unrestricted
     TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
     unset ORCH_PANE_ID
-    ORCH_TELL_MAX_WAIT=5 "$TELL" "$TARGET_PANE" "hello" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
+    ORCH_TELL_MAX_WAIT=5 "$ORCH" tell "$TARGET_PANE" "hello" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
     assert "tell operator→observer: allowed (no ORCH_PANE_ID)" 0 "$rc"
     rm -f "$TMP_OUT" "$TMP_ERR"
 
@@ -256,7 +235,7 @@ echo "=== orch-peek role surface (NATS discovery fixtures) ==="
 # --all surfaces both as rows even though the panes don't exist in tmux
 # (they'll show bucket=dead which is fine for the count check).
 set_agents "%777 observer /tmp" "%778 worker /tmp"
-PEEK_JSON=$("$PEEK" --all --json 2>/dev/null || echo "[]")
+PEEK_JSON=$("$ORCH" peek --all --json 2>/dev/null || echo "[]")
 OBSERVER_ROW_COUNT=$(printf '%s' "$PEEK_JSON" | jq '[.[] | select(.role=="observer")] | length' 2>/dev/null || echo 0)
 echo "  peek --all --json yielded observer=$OBSERVER_ROW_COUNT rows from stub bus"
 assert "peek --json: at least one observer row" 1 "$( [ "$OBSERVER_ROW_COUNT" -ge 1 ] && echo 1 || echo 0 )"
@@ -270,7 +249,7 @@ assert "peek --json: at least one observer row" 1 "$( [ "$OBSERVER_ROW_COUNT" -g
 echo
 echo "=== orch-spawn ORCH_ROLE env propagation (structural) ==="
 
-# Verify orch-spawn no longer calls orch-register (which is now a no-op).
+# Verify orch-spawn does not call the retired orch-register binary.
 if grep -q 'orch-register' "$(command -v orch-spawn)"; then
     assert "orch-spawn: no orch-register call in source" "absent" "present"
 else

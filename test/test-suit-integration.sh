@@ -133,8 +133,8 @@ ask "$W1" "What is the secret word in this project's CLAUDE.md? Reply with one w
 RESP1d=$(tmux capture-pane -t "$W1" -p)
 contains "T1d — worker reads project's CLAUDE.md (cwd-inversion fix)" "trapezoid" "$RESP1d"
 
-# T1e: registry — was the worker auto-registered? (it shouldn't be, since we
-# didn't call orch-register; we'll see if we want to add this to the recipe)
+# T1e: registry — was the worker auto-registered? (legacy probe; the
+# shim now publishes directly to $SRV.INFO.agents at spawn time)
 [ -f ~/.cache/orch-registry/${W1}.json ] && reg=yes || reg=no
 echo "  observation T1e — registry entry auto-created: $reg (note: depends on Stop hook lazy-registration)"
 
