@@ -205,8 +205,11 @@ jobs:
     runs-on: ubuntu-latest
     # Hard gate on PRs that touch the shim, orch spawn path, or publish hooks.
     # Both docker bench and sesh bench must exit 0.
+    # Runs on pull_request AND merge_group so the required status check is
+    # satisfied in both contexts. A skipped job does NOT satisfy branch
+    # protection — see farley playbook common pitfalls.
     if: |
-      github.event_name == 'pull_request'
+      github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
       - uses: actions/checkout@v5
 
@@ -222,10 +225,18 @@ jobs:
       - name: check if adapter-relevant files changed
         id: filter
         run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
-          changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || true)
-          if printf '%s\n' "$changed" | grep -qE \
+          # pull_request: diff PR base..head. merge_group: diff merge_group base..head.
+          # Falls back to "relevant" so we never silently skip the gate when refs
+          # can't be resolved.
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.merge_group.base_sha }}"
+            HEAD="${{ github.event.merge_group.head_sha }}"
+          fi
+          changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || echo "FALLBACK")
+          if [[ "$changed" == "FALLBACK" ]] || printf '%s\n' "$changed" | grep -qE \
               '^(cmd/orch-agent-shim/|cmd/orch/|internal/adapter/|internal/tmuxctl/|hooks/)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
@@ -251,11 +262,10 @@ jobs:
     runs-on: ubuntu-latest
     # Run on PRs that touch the bridge, shim, orch spawn, or hook scripts.
     # Soft warning only — latency varies on shared runners; never a hard gate.
+    # Also runs on merge_group events so the required status check context
+    # is satisfied if the merge queue is ever enabled (per farley playbook).
     if: |
-      github.event_name == 'pull_request' && (
-        contains(github.event.pull_request.title, '[bench]') ||
-        true
-      )
+      github.event_name == 'pull_request' || github.event_name == 'merge_group'
     permissions:
       contents: read
       pull-requests: write
@@ -274,10 +284,16 @@ jobs:
       - name: check if bench-relevant files changed
         id: filter
         run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
-          changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || true)
-          if printf '%s\n' "$changed" | grep -qE \
+          # pull_request: diff PR base..head. merge_group: diff merge_group base..head.
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.merge_group.base_sha }}"
+            HEAD="${{ github.event.merge_group.head_sha }}"
+          fi
+          changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || echo "FALLBACK")
+          if [[ "$changed" == "FALLBACK" ]] || printf '%s\n' "$changed" | grep -qE \
               '^(cmd/orch-agent-shim/|cmd/orch/|internal/adapter/|internal/tmuxctl/|hooks/)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
@@ -313,7 +329,9 @@ jobs:
           fi
 
       - name: comment bench diff on PR
-        if: steps.filter.outputs.relevant == 'true' && steps.bench.outcome != 'skipped'
+        # Only comments on pull_request events — merge_group events have no
+        # PR issue number context, so skip the comment step there.
+        if: steps.filter.outputs.relevant == 'true' && steps.bench.outcome != 'skipped' && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
