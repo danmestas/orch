@@ -75,9 +75,17 @@ func snapshotOnce(ctx context.Context, nc *nats.Conn) ([]registry.Worker, error)
 // jsonWorker), with optional fields treated as empty when absent. This
 // is the test seam that replaces the per-PATH stub `orch-registry`
 // binary the bash integration tests used to install.
+//
+// A missing fixture file is not an error — tests sometimes set the env
+// var early and write the fixture lazily on the first set_agents call.
+// Return an empty worker list in that case so callers can still resolve
+// "no match" errors with their own (more useful) messages.
 func loadFixtureWorkers(path string) ([]registry.Worker, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("read fixture %s: %w", path, err)
 	}
 	var rows []struct {

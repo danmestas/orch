@@ -30,6 +30,13 @@ import (
 var spyPaneRE = regexp.MustCompile(`^%[0-9]+$`)
 
 func runSpy(args []string) error {
+	// Re-order argv so flags that appear after the positional target
+	// (e.g. `orch spy operator --mission-file FOO`) still parse — Go's
+	// flag package stops at the first non-flag, but bin/orch-spy allowed
+	// flags anywhere. Walk args once, separate into flag tokens (and
+	// their values) vs positional tokens, then concatenate flags first.
+	args = reorderSpyArgs(args)
+
 	fs := flag.NewFlagSet("spy", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var (
@@ -62,7 +69,18 @@ func runSpy(args []string) error {
 	target := rest[0]
 	missionParts := rest[1:]
 
+	// Validate target shape before doing the registry lookup. bin/orch-spy
+	// accepted only "operator" / "op" / "%<digits>" — anything else got
+	// a clear "target must be 'operator' or %pane_id" error rather than
+	// the generic registry miss. Preserve that UX.
+	if target != "operator" && target != "op" && !spyPaneRE.MatchString(target) {
+		fmt.Fprintf(os.Stderr, "orch spy: target must be 'operator' or %%<pane_id> (got: %s)\n", target)
+		return &exitError{code: 1}
+	}
+
 	// Mission resolution: --mission-file > stdin (single "-") > positional words.
+	// Done BEFORE the registry snapshot so a missing mission file fails fast
+	// with the path-specific error, even when the registry is empty.
 	var mission string
 	switch {
 	case *missionFile != "":
@@ -270,4 +288,48 @@ func stopDirPath() string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".cache", "orch-stop")
+}
+
+// spyFlagsWithValue lists the spy flags that take a value (consume the
+// next argv token). Anything not in this set is treated as a bool flag
+// (no value to consume) by reorderSpyArgs.
+var spyFlagsWithValue = map[string]bool{
+	"--mission-file": true,
+	"--nats":         true,
+}
+
+// reorderSpyArgs walks the argv once and groups flag tokens at the
+// front, positional tokens at the back. bin/orch-spy used a while-loop
+// with `case $1 in --flag) ... ;; *) ARGS+=("$1") ;; esac` to allow
+// flags anywhere in argv. Go's flag package stops parsing at the first
+// non-flag, so we replicate the bash UX by moving flags forward.
+//
+// Inputs like `["--dry-run-brief", "operator", "--mission-file", "M"]`
+// become `["--dry-run-brief", "--mission-file", "M", "operator"]`.
+func reorderSpyArgs(args []string) []string {
+	var flags, positional []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			// Conventional argv terminator — everything after is positional.
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if len(a) > 0 && a[0] == '-' && a != "-" {
+			flags = append(flags, a)
+			// If this flag takes a value, consume the next token too.
+			// --flag=value form already carries the value in-line.
+			base := a
+			if eq := strings.IndexByte(a, '='); eq >= 0 {
+				base = a[:eq]
+			}
+			if spyFlagsWithValue[base] && !strings.ContainsRune(a, '=') && i+1 < len(args) {
+				i++
+				flags = append(flags, args[i])
+			}
+			continue
+		}
+		positional = append(positional, a)
+	}
+	return append(flags, positional...)
 }
