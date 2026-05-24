@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.3 (2026-05-24)
+
+Install fix #2 for the npm-distributed Go binaries: v0.2.2 published to
+npm but the post-publish smoke step still failed because the five
+vendor-first bash shims (`bin/orch`, `orch-subtree`, `orch-workflow`,
+`orch-registry`, `orch-goal-stop-account-daemon`) computed their script
+location from `$(dirname "${BASH_SOURCE[0]}")` — which doesn't follow
+symlinks. When npm installs these as symlinks under `<prefix>/bin/`, the
+`vendor/` lookup resolved to `<prefix>/vendor/` instead of the package's
+real location at `lib/node_modules/@agent-ops/orch/vendor/`.
+
+Fixed by resolving symlinks before computing `script_dir`:
+
+```bash
+script_path="${BASH_SOURCE[0]}"
+while [ -L "$script_path" ]; do
+    link=$(readlink "$script_path")
+    [[ "$link" = /* ]] && script_path="$link" || script_path="$(dirname "$script_path")/$link"
+done
+script_dir=$(cd "$(dirname "$script_path")" && pwd)
+```
+
+Applied to all five vendor-first shims so `npm install -g @agent-ops/orch`
+followed by `orch --help` now exec's the vendored Go binary correctly.
+
 ## 0.2.2 (2026-05-24)
 
 Release-pipeline fix: the v0.2.1 release attempt failed in goreleaser
