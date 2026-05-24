@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orch.io/schemas/worker-handle.v2.json",
+  "$ref": "#/$defs/WorkerHandleV2",
+  "$defs": {
+    "AbortBlock": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "keys": {
+          "type": "string",
+          "description": "Keystrokes for kind=tmux-send-keys (e.g. 'C-c'). Empty/ignored for other kinds."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "kind",
+        "target"
+      ]
+    },
+    "Agent": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "codex",
+        "pi",
+        "gemini",
+        "echo"
+      ]
+    },
+    "BusBlock": {
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "description": "NATS subject the worker reads prompts from. Empty when the backend did not wire a prompt subject."
+        },
+        "status": {
+          "type": "string",
+          "description": "NATS subject the worker publishes status events to. Empty when not wired."
+        },
+        "hb": {
+          "type": "string",
+          "description": "NATS subject the worker publishes heartbeats to. Empty when not wired."
+        },
+        "signal": {
+          "type": "string",
+          "description": "NATS subject the worker reads control signals from. Empty when not wired."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "WorkerHandleV2": {
+      "properties": {
+        "spec_version": {
+          "type": "string",
+          "enum": [
+            "v2"
+          ],
+          "description": "Wire contract version. Must be v2 for cmux/zmx executor values."
+        },
+        "name": {
+          "type": "string"
+        },
+        "agent": {
+          "$ref": "#/$defs/Agent"
+        },
+        "session": {
+          "type": "string",
+          "description": "Echoes SpawnSpec.Session (or the resolved fallback). Empty if unset on both sides."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "executor": {
+          "type": "string"
+        },
+        "pane_id": {
+          "type": "string",
+          "description": "Engine-native locator: tmux pane id"
+        },
+        "id": {
+          "type": "string",
+          "description": "Executor-generic worker id (DO id"
+        },
+        "bus": {
+          "$ref": "#/$defs/BusBlock",
+          "description": "Per-worker NATS subject map. Omit if the backend did not wire the bus."
+        },
+        "abort": {
+          "$ref": "#/$defs/AbortBlock",
+          "description": "Imperative cancellation verb. Omit when imperative abort is not supported by the backend."
+        },
+        "log_file": {
+          "type": "string",
+          "description": "Path to the shim's startup log. Diagnostic only; empty when not produced."
+        },
+        "pid": {
+          "type": "integer",
+          "description": "Worker process id when knowable. Best-effort; 0 when unknown."
+        },
+        "status": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable cause when status=failed; what we're waiting on when status=pending. Empty when status=ready."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "agent",
+        "created_at",
+        "executor",
+        "status"
+      ]
+    }
+  },
+  "title": "WorkerHandle v2"
+}

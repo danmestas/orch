@@ -1,6 +1,10 @@
 # Proposal 0002 — Typed Executor Contract (YAML SpawnSpec / WorkerHandle)
 
-**Status:** draft (design phase active; user wants to design + implement fully as a prerequisite to expanding execution targets)
+**Status:** implemented. v1 GA. v2 GA — adds `cmux` + `zmx` to the
+executor enum + matching discriminator blocks + `layout=none` for the
+zmx engine's no-in-pane-layout case. See
+[`docs/spawn-spec-versioning.md`](../spawn-spec-versioning.md) for the
+versioning policy and the v1 ↔ v2 acceptance contract.
 **Depends on:** none (in-repo deepening)
 **Blocks:** Proposal 0003 (executor backend extraction depends on this contract)
 

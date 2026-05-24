@@ -1,19 +1,24 @@
-// spawnspec-schema generates and writes the published JSON Schema for
-// SpawnSpec and WorkerHandle. The Go structs in internal/spawnspec are
-// canonical; this tool exists so non-Go consumers (TS, Python, IDE
-// plugins) can validate without hand-maintaining a parallel schema.
+// spawnspec-schema generates and writes the published JSON Schemas for
+// SpawnSpec and WorkerHandle, in every supported version. The Go
+// structs in internal/spawnspec are canonical; this tool exists so
+// non-Go consumers (TS, Python, IDE plugins) can validate without
+// hand-maintaining a parallel schema.
 //
 // Usage:
 //
 //	go run ./cmd/spawnspec-schema -out dist/schema
 //
-// Two files are written:
+// Four files are written:
 //
 //	<out>/spawn-spec.v1.json
 //	<out>/worker-handle.v1.json
+//	<out>/spawn-spec.v2.json
+//	<out>/worker-handle.v2.json
 //
 // The generator is idempotent; CI re-runs it and fails the diff if the
-// checked-in schema drifts from the Go structs.
+// checked-in schema drifts from the Go structs. v1 is frozen per the
+// SpawnSpec versioning policy (docs/spawn-spec-versioning.md); v2 is
+// the active wire format for cmux / zmx / layout=none.
 package main
 
 import (
@@ -33,25 +38,26 @@ func main() {
 		fail("mkdir %s: %v", *out, err)
 	}
 
-	specPath := filepath.Join(*out, "spawn-spec.v1.json")
-	specJSON, err := spawnspec.SpecSchema()
-	if err != nil {
-		fail("generate spawn-spec schema: %v", err)
+	type schemaJob struct {
+		path     string
+		generate func() ([]byte, error)
 	}
-	if err := os.WriteFile(specPath, specJSON, 0o644); err != nil {
-		fail("write %s: %v", specPath, err)
+	jobs := []schemaJob{
+		{filepath.Join(*out, "spawn-spec.v1.json"), spawnspec.SpecSchema},
+		{filepath.Join(*out, "worker-handle.v1.json"), spawnspec.HandleSchema},
+		{filepath.Join(*out, "spawn-spec.v2.json"), spawnspec.SpecSchemaV2},
+		{filepath.Join(*out, "worker-handle.v2.json"), spawnspec.HandleSchemaV2},
 	}
-	fmt.Printf("wrote %s (%d bytes)\n", specPath, len(specJSON))
-
-	handlePath := filepath.Join(*out, "worker-handle.v1.json")
-	handleJSON, err := spawnspec.HandleSchema()
-	if err != nil {
-		fail("generate worker-handle schema: %v", err)
+	for _, j := range jobs {
+		data, err := j.generate()
+		if err != nil {
+			fail("generate %s: %v", filepath.Base(j.path), err)
+		}
+		if err := os.WriteFile(j.path, data, 0o644); err != nil {
+			fail("write %s: %v", j.path, err)
+		}
+		fmt.Printf("wrote %s (%d bytes)\n", j.path, len(data))
 	}
-	if err := os.WriteFile(handlePath, handleJSON, 0o644); err != nil {
-		fail("write %s: %v", handlePath, err)
-	}
-	fmt.Printf("wrote %s (%d bytes)\n", handlePath, len(handleJSON))
 }
 
 func fail(format string, args ...any) {

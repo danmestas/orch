@@ -49,6 +49,7 @@ func getValidator() (*validator.Validate, error) {
 
 		v.RegisterStructValidation(spawnSpecStructLevel, SpawnSpec{})
 		v.RegisterStructValidation(outfitStructLevel, OutfitBlock{})
+		registerV2StructValidators(v)
 
 		validatorV = v
 	})
