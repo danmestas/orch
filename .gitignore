@@ -41,3 +41,12 @@ extensions/*/.bin/
 
 # Lazy-built CLI binaries (bin/orch-workflow → cmd/orch-workflow)
 /.bin/
+
+# Go binaries accidentally built into the repo root by `go build ./cmd/<name>/`
+# (the correct invocation is `go build -o .bin/<name> ./cmd/<name>`).
+/orch-goal-stop-account-daemon
+/orch-agent-shim
+/orch-registry
+/orch-workflow
+/orch-engines
+/orch-subtree
