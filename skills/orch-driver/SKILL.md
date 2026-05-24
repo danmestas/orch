@@ -206,7 +206,7 @@ Codex and gemini have no `--append-system-prompt` CLI flag, so we inject into th
 <!-- END orch-fleet-doctrine -->
 ```
 
-`install.sh` runs the injection idempotently (creates the file if absent, refreshes the block if present, appends the block if file exists without markers). Re-running installs refreshes content without disturbing the user's surrounding instructions.
+The npm postinstall (`scripts/postinstall.js`) runs the injection idempotently (creates the file if absent, refreshes the block if present, appends the block if file exists without markers). Re-running `npm install -g @agent-ops/orch` refreshes content without disturbing the user's surrounding instructions.
 
 To skip fleet awareness for a one-off worker, just omit the spawn flag (claude/pi) or set `ORCH_NO_FLEET=1` and have the spawn wrapper consult it (not currently wired, but trivial to add).
 

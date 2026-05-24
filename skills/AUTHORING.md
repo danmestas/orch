@@ -96,7 +96,7 @@ Two heuristics:
 Examples that are docs, not skills:
 - Synadia spec edges → already in `docs/orch-agent-shim.md`; expand there.
 - Sesh dialect vs Synadia → already in `docs/working-with-sesh.md`.
-- Tmux/orch-spawn implementation details → inline `bin/orch-spawn` comments.
+- Tmux/orch-spawn implementation details → inline `cmd/orch/spawn.go` + `cmd/orch/spawn_tmux.go` comments.
 
 ## PR-review checklist (for the skill-reviewer agent)
 
