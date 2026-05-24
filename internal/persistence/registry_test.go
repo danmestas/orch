@@ -14,20 +14,27 @@ func TestIsSupportedTmuxTmux(t *testing.T) {
 	}
 }
 
+func TestIsSupportedCmuxCmux(t *testing.T) {
+	if !persistence.IsSupported("cmux", "cmux") {
+		t.Errorf("IsSupported(cmux, cmux) = false, want true (the Phase B addition, issue #207)")
+	}
+}
+
 func TestIsSupportedRejectsCrossEngine(t *testing.T) {
 	for _, tc := range []struct {
 		p, l string
 	}{
-		{"tmux", "cmux"},
-		{"cmux", "tmux"},
+		{"tmux", "cmux"},      // rejected — cross-engine forwarder not built
+		{"cmux", "tmux"},      // same
 		{"tmux", "libghostty"},
-		{"cmux", "cmux"},      // not yet — Phase B target
 		{"none", "tmux"},      // nonsense, registry rejects
 		{"tmux", "none"},      // headless-noop deferred
 		{"", ""},              // empty
 		{"tmux", ""},          // partial empty
 		{"", "tmux"},          // partial empty
 		{"TMUX", "tmux"},      // case-sensitive
+		{"CMUX", "cmux"},      // case-sensitive
+		{"zmx", "zmx"},        // future engine, not landed yet
 	} {
 		if persistence.IsSupported(tc.p, tc.l) {
 			t.Errorf("IsSupported(%q, %q) = true, want false", tc.p, tc.l)

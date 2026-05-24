@@ -20,13 +20,16 @@ type Pair struct {
 // speculative entries; see the Ousterhout review on hypothetical
 // backends).
 //
-// Phase A registers only the today-default pair. Phase B will add
-// {cmux, cmux}. Cross-engine pairs (tmux+cmux, etc.) require explicit
-// forwarder code and stay rejected until that work lands.
+// Phase A registered the today-default pair. Phase B added
+// {cmux, cmux} as a sibling concrete engine (issue #207). Cross-engine
+// pairs (tmux+cmux, etc.) require explicit forwarder code and stay
+// rejected until that work lands.
 var supportedPairs = map[Pair]struct{}{
 	{Persistence: "tmux", Layout: "tmux"}: {},
+	{Persistence: "cmux", Layout: "cmux"}: {},
 	// Future additions land here, NOT as a free Cartesian product:
-	//   {Persistence: "cmux", Layout: "cmux"}: {},   // Phase B
+	//   {Persistence: "zmx",  Layout: "zmx"}:  {},   // when zmx lands
+	//   {Persistence: "tmux", Layout: "cmux"}: {},   // would need a forwarder
 }
 
 // SupportedPairs returns a slice copy of the registered compositions.
