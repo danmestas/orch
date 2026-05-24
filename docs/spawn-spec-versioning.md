@@ -7,7 +7,15 @@ versioned. Schema lives at `dist/schema/spawn-spec.v1.json` and
 
 ## Status
 
-`v1` is GA. The schema is frozen.
+- `v1` is GA. The schema is frozen.
+- `v2` is GA. It is additive over v1: adds `cmux` + `zmx` to the executor
+  enum (both for `SpawnSpec` and `WorkerHandle`), introduces the `CmuxBlock`
+  and `ZmxBlock` discriminator blocks, and widens the tmux block's `layout:`
+  enum to accept `none` (only valid paired with `executor: zmx` per the
+  Proposal 0008 composition table).
+- v1 and v2 are accepted indefinitely. orch-spawn's parser routes on the
+  document's `spec_version:` field; a document without `spec_version:`
+  defaults to v1 (back-compat).
 
 ## Stability contract
 
@@ -45,10 +53,23 @@ version.
   marshalled YAML/JSON shape.
 - Adding documentation, examples, or tests.
 
-## Reserved for v2
+## What landed in v2
 
-The following are explicitly out of scope for `v1` and will land together
-under `v2`:
+- New `executor` enum values: `cmux`, `zmx`. Mirrors the persistence-engine
+  registry (Proposal 0008 Phase B + Phase 2). v1 binaries reject these
+  values; v2 binaries accept them.
+- New discriminator blocks: `cmux:` (parallel to `tmux:`, surface-based
+  multiplexer), `zmx:` (sessions-only, no in-session subdivision).
+- Tmux block `layout:` enum gains `none`. Only valid paired with
+  `executor: zmx`; the validator rejects `tmux: { layout: none }` because
+  the marker "no in-pane layout" only makes sense for the zmx engine.
+- The published schemas are `dist/schema/spawn-spec.v2.json` and
+  `dist/schema/worker-handle.v2.json`. Both are added to the CI drift gate
+  alongside the v1 files.
+
+## Still reserved for a future version
+
+The following are explicitly out of scope for both `v1` and `v2`:
 
 - **Agent registry / plugin discovery** — opens the `agent:` enum. Rides
   on [Proposal 0003](./proposals/0003-extract-executor-backends.md) (executor
@@ -59,6 +80,9 @@ under `v2`:
 - **Archon-grammar extensions** for workflow compile — per-node `timeout`,
   `idle_timeout`, `trigger_rule`, and other node-level controls that
   generalise the single-spawn shape into a DAG.
+- **Dead-field cleanup** on `WorkerHandle.Abort` (AbortKind/Verb/Keys) —
+  deferred to a v3 bump or a non-version cleanup PR so v2 stays purely
+  additive.
 
 ## Migration policy when v2 arrives
 
@@ -74,6 +98,8 @@ under `v2`:
 ## Drift enforcement
 
 - A CI gate (issue #141a) regenerates `dist/schema/*.json` from the Go
-  types on every PR and fails if the working tree diverges. This keeps the
-  canonical Go structs and the published schema in lockstep.
+  types on every PR and fails if the working tree diverges. The gate
+  covers v1 (`spawn-spec.v1.json`, `worker-handle.v1.json`) and v2
+  (`spawn-spec.v2.json`, `worker-handle.v2.json`).
 - Schema regeneration is `go run ./cmd/spawnspec-schema -out dist/schema`.
+  The same command writes all four files (v1 + v2).

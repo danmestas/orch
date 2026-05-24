@@ -53,7 +53,12 @@ func TestSpawnSpec_RoundTrip(t *testing.T) {
 }
 
 func TestSpawnSpec_VersionMismatch(t *testing.T) {
-	yaml := []byte("spec_version: v2\nname: x\nagent: echo\ntmux:\n  headless: true\n")
+	// UnmarshalSpec is the v1-only entrypoint. Versions other than v1
+	// must be rejected so callers that only handle v1 don't silently
+	// downgrade a future-version document into a partial v1 read.
+	// Once v2 exists, the rejection must still apply to v1's UnmarshalSpec
+	// (the version-agnostic entrypoint is UnmarshalAnySpec).
+	yaml := []byte("spec_version: v99\nname: x\nagent: echo\ntmux:\n  headless: true\n")
 	_, err := UnmarshalSpec(yaml)
 	if err == nil {
 		t.Fatal("expected version-mismatch error, got nil")

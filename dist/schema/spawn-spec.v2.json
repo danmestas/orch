@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orch.io/schemas/spawn-spec.v2.json",
+  "$ref": "#/$defs/SpawnSpecV2",
+  "$defs": {
+    "Agent": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "codex",
+        "pi",
+        "gemini",
+        "echo"
+      ]
+    },
+    "CFDurableBlock": {
+      "properties": {
+        "do_namespace": {
+          "type": "string"
+        },
+        "do_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "do_namespace",
+        "do_id"
+      ]
+    },
+    "CFWorkerBlock": {
+      "properties": {
+        "script": {
+          "type": "string"
+        },
+        "wrangler_env": {
+          "type": "string",
+          "description": "Wrangler environment such as production or staging. Empty uses wrangler's default environment."
+        },
+        "abort_endpoint": {
+          "type": "string",
+          "description": "Worker route to POST for graceful shutdown. Empty disables imperative abort."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "script"
+      ]
+    },
+    "CmuxBlock": {
+      "properties": {
+        "headless": {
+          "type": "boolean",
+          "description": "Engine-rejected for cmux today (cmux has no headless session). Reserved for future use."
+        },
+        "verify": {
+          "type": "boolean",
+          "description": "Poll the new surface for an agent banner before declaring success. Defaults to false."
+        },
+        "position": {
+          "type": "string",
+          "description": "Split direction off the current surface (right|left|above|below). Defaults to right; mapped onto cmux's --direction internally."
+        },
+        "role": {
+          "type": "string",
+          "description": "Surface role tag (worker|observer). Empty defers to orch-spawn auto-detect."
+        },
+        "no_shim": {
+          "type": "boolean",
+          "description": "Disable the orch-agent-shim sidecar. Defaults to false (shim attached)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "OutfitBlock": {
+      "properties": {
+        "bundle": {
+          "type": "string",
+          "description": "Shorthand 'name/cut+accessory1+accessory2'. Mutually exclusive with name/cut/accessories."
+        },
+        "name": {
+          "type": "string",
+          "description": "Outfit name (explicit form). Mutually exclusive with bundle."
+        },
+        "cut": {
+          "type": "string",
+          "description": "Outfit cut (explicit form). Mutually exclusive with bundle."
+        },
+        "accessories": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Outfit accessories (explicit form). Empty list by default. Mutually exclusive with bundle."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "SpawnSpecV2": {
+      "properties": {
+        "spec_version": {
+          "type": "string",
+          "enum": [
+            "v2"
+          ],
+          "description": "Wire contract version. Must be v2 for cmux/zmx/layout=none."
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string",
+          "description": "Free-form operator notes. Not consumed by dispatcher or backends."
+        },
+        "agent": {
+          "$ref": "#/$defs/Agent"
+        },
+        "session": {
+          "type": "string",
+          "description": "Sesh session label and 5th subject token. Defaults to Name when omitted."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Worker working directory. Empty defers to dispatcher resolution (current dir / --project / sesh worker-cwd)."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Operator handle used in subject tokens and registry filters. Defaults to $USER."
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Arbitrary key/value metadata surfaced in $SRV.INFO. Empty by default; otherwise inert."
+        },
+        "outfit": {
+          "$ref": "#/$defs/OutfitBlock",
+          "description": "Suit-prepare bundle. Omit to skip outfit application."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env vars passed to the worker. Keys must match [A-Z_][A-Z0-9_]*. Empty by default."
+        },
+        "tmux": {
+          "$ref": "#/$defs/TmuxBlockV2",
+          "description": "Local tmux executor block. Set exactly one of tmux / cf-worker / cf-durable-object / cmux / zmx."
+        },
+        "cf-worker": {
+          "$ref": "#/$defs/CFWorkerBlock",
+          "description": "Cloudflare Worker executor block. Set exactly one of tmux / cf-worker / cf-durable-object / cmux / zmx."
+        },
+        "cf-durable-object": {
+          "$ref": "#/$defs/CFDurableBlock",
+          "description": "Cloudflare Durable Object executor block. Set exactly one of tmux / cf-worker / cf-durable-object / cmux / zmx."
+        },
+        "cmux": {
+          "$ref": "#/$defs/CmuxBlock",
+          "description": "cmux executor block (surface-based multiplexer). Set exactly one of tmux / cf-worker / cf-durable-object / cmux / zmx."
+        },
+        "zmx": {
+          "$ref": "#/$defs/ZmxBlock",
+          "description": "zmx executor block (sessions-only"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "agent"
+      ]
+    },
+    "TmuxBlockV2": {
+      "properties": {
+        "headless": {
+          "type": "boolean",
+          "description": "Detach into the orch-headless session instead of splitting the current pane. Defaults to false."
+        },
+        "verify": {
+          "type": "boolean",
+          "description": "Poll the new pane for an agent banner before declaring success. Defaults to false."
+        },
+        "layout": {
+          "type": "string",
+          "description": "Layout-orchestrator preset (default|grid|full|none). Empty defers to orch's default split behavior. 'none' is only valid paired with executor=zmx (Proposal 0008 composition table)."
+        },
+        "position": {
+          "type": "string",
+          "description": "Split direction off the current pane (right|left|above|below). Defaults to right."
+        },
+        "role": {
+          "type": "string",
+          "description": "Pane role tag (worker|observer). Empty defers to orch-spawn auto-detect."
+        },
+        "no_shim": {
+          "type": "boolean",
+          "description": "Disable the orch-agent-shim sidecar. Defaults to false (shim attached)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ZmxBlock": {
+      "properties": {
+        "session_name": {
+          "type": "string",
+          "description": "zmx session name. Empty defers to engine: derives the name from SpawnSpec.Name (slug)."
+        },
+        "headless": {
+          "type": "boolean",
+          "description": "Map to 'zmx run -d' (detached-by-design). Defaults to true on zmx (the engine treats every spawn as detached)."
+        },
+        "verify": {
+          "type": "boolean",
+          "description": "Poll zmx history for the agent's banner before declaring success. Defaults to false."
+        },
+        "role": {
+          "type": "string",
+          "description": "Session role tag (worker|observer). Empty defers to orch-spawn auto-detect."
+        },
+        "no_shim": {
+          "type": "boolean",
+          "description": "Disable the orch-agent-shim sidecar. Defaults to false (shim attached)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    }
+  },
+  "title": "SpawnSpec v2"
+}

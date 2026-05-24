@@ -52,6 +52,16 @@ func TestSchemaDrift(t *testing.T) {
 			generate: spawnspec.HandleSchema,
 			distRel:  "dist/schema/worker-handle.v1.json",
 		},
+		{
+			name:     "spawn-spec.v2.json",
+			generate: spawnspec.SpecSchemaV2,
+			distRel:  "dist/schema/spawn-spec.v2.json",
+		},
+		{
+			name:     "worker-handle.v2.json",
+			generate: spawnspec.HandleSchemaV2,
+			distRel:  "dist/schema/worker-handle.v2.json",
+		},
 	}
 
 	root := repoRoot(t)
