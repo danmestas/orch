@@ -21,14 +21,18 @@ type Pair struct {
 // backends).
 //
 // Phase A registered the today-default pair. Phase B added
-// {cmux, cmux} as a sibling concrete engine (issue #207). Cross-engine
-// pairs (tmux+cmux, etc.) require explicit forwarder code and stay
-// rejected until that work lands.
+// {cmux, cmux} as a sibling concrete engine (issue #207). Phase 2 of
+// the zmx work (Proposal 0008 Phase C) adds {zmx, none}: zmx is
+// sessions-only, so the layout axis is the no-op `none` surface
+// (operator manages display via their own emulator window or wraps
+// zmx inside another multiplexer). Cross-engine pairs
+// (tmux+cmux, zmx+tmux, etc.) require explicit forwarder code and
+// stay rejected until that work lands.
 var supportedPairs = map[Pair]struct{}{
 	{Persistence: "tmux", Layout: "tmux"}: {},
 	{Persistence: "cmux", Layout: "cmux"}: {},
+	{Persistence: "zmx", Layout: "none"}:  {},
 	// Future additions land here, NOT as a free Cartesian product:
-	//   {Persistence: "zmx",  Layout: "zmx"}:  {},   // when zmx lands
 	//   {Persistence: "tmux", Layout: "cmux"}: {},   // would need a forwarder
 }
 
