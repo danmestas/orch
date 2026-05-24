@@ -201,7 +201,7 @@ set -euo pipefail
 
 AGENT=${1:-}
 shift 2>/dev/null || true
-[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--worktree-from sha] [--slug name] [--instance-id name] [--force-slug] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--class active|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim] [--bridge synadia-plugin|shim-adapter] [--executor <name>]    env: [ORCH_SESH_BIN=<abs-path>] [ORCH_PROJECTS_ROOT=<dir>] [ORCH_VERIFY_TIMEOUT=<sec>] [ORCH_VERIFY_BACKOFF=1,2,4,8] [ORCH_HEADLESS_SESSION=<name>] [ORCH_WORKTREE_ROOT=<dir>] [ORCH_ALIASES_FILE=<path>]" >&2; exit 1; }
+[ -n "$AGENT" ] || { echo "usage: orch-spawn <agent> [--cwd p] [--sesh-session label] [--project n] [--worktree-from sha] [--slug name] [--instance-id name] [--force-slug] [--headless] [--no-fleet] [--quiet] [--role worker|observer] [--class active|observer] [--position right|left|above|below] [--verify] [--outfit X] [--cut Y] [--accessory A] [--no-shim] [--bridge synadia-plugin|shim-adapter] [--executor <name>] [--persistence <name>] [--layout <name>]    env: [ORCH_SESH_BIN=<abs-path>] [ORCH_PROJECTS_ROOT=<dir>] [ORCH_VERIFY_TIMEOUT=<sec>] [ORCH_VERIFY_BACKOFF=1,2,4,8] [ORCH_HEADLESS_SESSION=<name>] [ORCH_WORKTREE_ROOT=<dir>] [ORCH_ALIASES_FILE=<path>] [ORCH_ENGINES_BIN=<abs-path>]" >&2; exit 1; }
 
 CWD=""
 SESH_SESSION_FLAG=""
@@ -226,6 +226,13 @@ NO_GOAL_ACCESSORY=0
 NO_SHIM=0
 EXECUTOR="tmux"
 BRIDGE=""
+# Engine selection (Proposal 0008 / issue #180). Phase A: persistence
+# and layout are orthogonal axes that today's tmux bundles. The closed
+# composition table (in `orch-engines validate`) is the single source
+# of truth for which pairs are supported. Defaults match today's
+# behavior so legacy invocations are unchanged.
+PERSISTENCE="tmux"
+LAYOUT="tmux"
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -292,6 +299,27 @@ while [ $# -gt 0 ]; do
                     exit 1 ;;
             esac
             shift 2 ;;
+        --persistence)
+            PERSISTENCE=${2:-}
+            # Persistence engine name follows the same shape rule as
+            # --executor. Composition validity is checked separately
+            # (orch-engines validate) so this layer only enforces
+            # well-formed-ness.
+            case "$PERSISTENCE" in
+                ''|*[!a-z0-9-]*|[!a-z]*)
+                    echo "orch-spawn: --persistence must match [a-z][a-z0-9-]* (got: $PERSISTENCE)" >&2
+                    exit 1 ;;
+            esac
+            shift 2 ;;
+        --layout)
+            LAYOUT=${2:-}
+            # Layout engine name follows the same shape rule.
+            case "$LAYOUT" in
+                ''|*[!a-z0-9-]*|[!a-z]*)
+                    echo "orch-spawn: --layout must match [a-z][a-z0-9-]* (got: $LAYOUT)" >&2
+                    exit 1 ;;
+            esac
+            shift 2 ;;
         *) echo "orch-spawn: unknown flag: $1" >&2; exit 1 ;;
     esac
 done
@@ -303,6 +331,74 @@ done
 if [ -n "$CLASS_OVERRIDE" ] && [ "$CLASS_OVERRIDE" != "active" ] && [ "$CLASS_OVERRIDE" != "observer" ]; then
     printf 'orch-spawn: --class must be "active" or "observer", got %q\n' "$CLASS_OVERRIDE" >&2
     exit 2
+fi
+
+# Validate the (persistence, layout) composition against the closed
+# registry — Proposal 0008 / issue #180. Rejected pairs fail at
+# flag-parse, NOT at spawn time, so operators see the error before any
+# tmux/spawn work happens.
+#
+# The Go binary orch-engines owns the registry; we shell out so the
+# bash dispatcher doesn't duplicate the table (single source of truth).
+#
+# Discovery order:
+#   1. $ORCH_ENGINES_BIN   — operator override (mainly tests).
+#   2. orch-engines on PATH — production install.
+#   3. `go run ./cmd/orch-engines` from repo root — dev mode, no install
+#      needed.
+#
+# When NONE of the three resolve (extremely unusual), we accept the
+# default (tmux,tmux) pair without validation as a graceful fallback so
+# legacy invocations don't break on a fresh checkout. Any non-default
+# composition under that fallback bails — better to refuse a spawn
+# than to silently accept an unsupported pair.
+validate_composition() {
+    local p=$1 l=$2 engines_bin=""
+    if [ -n "${ORCH_ENGINES_BIN:-}" ] && [ -x "$ORCH_ENGINES_BIN" ]; then
+        engines_bin="$ORCH_ENGINES_BIN"
+    elif command -v orch-engines >/dev/null 2>&1; then
+        engines_bin=$(command -v orch-engines)
+    fi
+    if [ -n "$engines_bin" ]; then
+        if ! "$engines_bin" validate "$p" "$l"; then
+            return 1
+        fi
+        return 0
+    fi
+    # Dev fallback: go run from repo root. Slower (build per call) but
+    # works on a fresh checkout. We discover the repo root the same
+    # way as the executor resolution below — see _SELF / ORCH_REPO_ROOT
+    # block. Replicating just enough of that here to avoid a forward
+    # dep; the canonical resolution happens later when we run the
+    # spawn script.
+    local self=$0
+    local _i
+    for _i in 1 2 3 4 5; do
+        [ -L "$self" ] || break
+        local next
+        next=$(readlink "$self")
+        case "$next" in /*) self=$next ;; *) self="$(dirname "$self")/$next" ;; esac
+    done
+    # _i is a loop bound, not used inside the loop — shellcheck-clean.
+    : "$_i"
+    local repo_root
+    repo_root="$(cd "$(dirname "$self")/.." && pwd -P)"
+    if [ -f "$repo_root/cmd/orch-engines/main.go" ] && command -v go >/dev/null 2>&1; then
+        if ! (cd "$repo_root" && go run ./cmd/orch-engines validate "$p" "$l"); then
+            return 1
+        fi
+        return 0
+    fi
+    # Final fallback: only the default pair is accepted without
+    # validation. Any other pair is refused.
+    if [ "$p" = "tmux" ] && [ "$l" = "tmux" ]; then
+        return 0
+    fi
+    echo "orch-spawn: orch-engines binary not found and no go toolchain available; cannot validate composition (persistence=$p layout=$l). Install orch via install.sh or set ORCH_ENGINES_BIN." >&2
+    return 1
+}
+if ! validate_composition "$PERSISTENCE" "$LAYOUT"; then
+    exit 1
 fi
 
 # Resolve role: explicit --role wins; otherwise auto-detect from outfit/cut.
