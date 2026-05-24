@@ -27,7 +27,7 @@ its shim sibling.
 
 ```
             ┌─────────────────────────────────────────────────────────┐
-            │  caller (orch-tell v2 / Synadia SDK / nats req / ...)    │
+            │  caller (orch tell / Synadia SDK / nats req / ...)       │
             └─────────────────────────────────────────────────────────┘
                           │ $SRV.INFO.agents  + agents.prompt.cc.<owner>.pct<pane>
                           ▼

@@ -12,8 +12,11 @@ the bridge runs in-process (no sidecar) and the pane advertises on
 launches an [`orch-agent-shim`](docs/orch-agent-shim.md) sibling that registers
 the pane and bridges prompts at `agents.prompt.<token>.<owner>.<pane>`.
 Pass `--bridge=shim-adapter` to opt claude back to the legacy shim path.
-`orch-tell` and `orch-ask` route through discovery; operator UX is unchanged,
-the wire under it is standard.
+`orch tell` and `orch ask` route through discovery; operator UX is unchanged,
+the wire under it is standard. (Note: the bash CLIs `orch-tell` / `orch-peek`
+/ `orch-spy` / `orch-ask` were collapsed into the `orch <subcommand>` form
+in #189 — run `orch migrate-aliases` once after upgrading to surface
+rewrite hints for any shell config that still references the bash names.)
 
 ## Prerequisites
 

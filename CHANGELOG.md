@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+### feat(cmd/orch): collapse orch-tell / orch-peek / orch-spy / orch-ask into `orch <subcommand>` (#189 friction points 1 + 3)
+
+The four bash CLIs that used to live at `bin/orch-tell`, `bin/orch-peek`,
+`bin/orch-spy`, and `bin/orch-ask` (≈ 950 LoC) have been collapsed into
+a single Go binary under `cmd/orch/` whose subcommands import the
+existing `internal/registry` package directly. The `bin/orch` entrypoint
+is now a thin lazy-build shim around that binary, matching the
+`bin/orch-workflow` pattern.
+
+User-visible CLI shape after upgrade:
+
+| Was                | Now                            |
+|--------------------|--------------------------------|
+| `orch-tell …`      | `orch tell …`                  |
+| `orch-ask …`       | `orch ask …`                   |
+| `orch-peek …`      | `orch peek …`                  |
+| `orch-spy …`       | `orch spy …`                   |
+| `orch-claim-operator` | (deleted; `export ORCH_ROLE=operator`) |
+| `orch-register`    | (deleted; the shim auto-registers) |
+
+To migrate shell aliases / dotfiles, run:
+
+```bash
+orch migrate-aliases
+```
+
+That new subcommand scans `~/.bashrc`, `~/.zshrc`, `~/.bash_aliases`,
+`~/.zprofile`, `~/.profile`, `~/.config/fish/config.fish`,
+`~/.config/orch-aliases`, and (if invoked inside a git repo) the repo
+itself for references to the retired CLIs, and prints sed-style rewrite
+suggestions. It never auto-writes.
+
+A new `internal/synadia` package centralises the protocol constants
+(`AdapterMissingExitCode = 2`, `TerminatorByte = 0x00`, the §9
+`Nats-Service-Error-Code` → exit-code mapping) and the `IsTerminator`
+predicate that were previously embedded as magic numbers across the
+bash scripts and the goal-stop-account daemon. The daemon imports them
+now; future protocol bumps touch one file.
+
+#### Breaking
+
+- `bin/orch-tell`, `bin/orch-peek`, `bin/orch-spy`, `bin/orch-ask`:
+  deleted. Hard cut — no compatibility shim. Use `orch tell` etc.
+- `bin/orch-claim-operator`, `bin/orch-register`: deleted (they had
+  been no-op deprecation stubs for several releases).
+- `package.json` `bin` manifest drops the six retired entries.
+
 ### feat(extensions): claudecode-subagent-panel bridge — surface orch panes in Claude Code's subagent panel (#93)
 
 A new top-level `extensions/` plane lands alongside executors and adapters.

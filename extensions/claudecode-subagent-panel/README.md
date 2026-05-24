@@ -85,7 +85,7 @@ orch-spawn pi     --pane new
 
 Open Claude Code in the same workspace, look at the subagent panel — three
 entries should appear, each labelled with its harness type. Send each one a
-prompt via `orch-tell <alias> "<text>"`; the corresponding JSONL grows as
+prompt via `orch tell <alias> "<text>"`; the corresponding JSONL grows as
 chunks arrive.
 
 ## Architecture

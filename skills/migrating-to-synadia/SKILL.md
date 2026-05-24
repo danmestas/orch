@@ -37,12 +37,13 @@ The five operator-facing primitives and their Synadia-native replacements.
 
 | Legacy primitive | What it did | Replacement | Notes |
 |---|---|---|---|
-| `orch-tell %NNN "hello"` | Injected prompt via tmux `send-keys` | `orch-tell %NNN "hello"` (now publishes to `agents.prompt.cc.<owner>.pct<N>` via the shim) | The CLI name is unchanged — internals switched to bus publish. Caller MUST read the subject off the endpoint record (§4.3), not construct it from the pane id. |
+| `orch-tell %NNN "hello"` | Injected prompt via tmux `send-keys` | `orch tell %NNN "hello"` (now publishes to `agents.prompt.cc.<owner>.pct<N>` via the shim; the bash bin/orch-tell was collapsed into a Go subcommand in #189) | Caller MUST read the subject off the endpoint record (§4.3), not construct it from the pane id. |
 | `orch-listen [--stream]` | `fswatch` loop over `~/.cache/orch-stop/*.event` marker files | `nats sub 'agents.>' --raw` (wrap in Monitor for push-notifications) | Subscribe to `agents.events.>` for typed chunks, `agents.hb.>` for heartbeats. Subject namespacing: `<plugin>.<harness>.<owner>.pct<N>`. |
-| `orch-peek [pane...]` | Read `~/.cache/orch-registry/<pane>.json` | `nats req '$SRV.INFO.agents'` (CLI wrapper: `orch-peek`) | Returns all live shim instances; filter by `metadata.pane_id` for a single worker. `nats micro info agents` is the human-readable alias. |
+| `orch-peek [pane...]` | Read `~/.cache/orch-registry/<pane>.json` | `orch peek` (Go subcommand post-#189) — `nats req '$SRV.INFO.agents'` underneath | Returns all live shim instances; filter by `metadata.pane_id` for a single worker. `nats micro info agents` is the human-readable alias. |
 | `orch-subscribe <peer>` | Worker-side fswatch daemon that injected `[peer event]` prompts | Subscribe directly to the bus from the worker's wrap shell (recipe in `orch-driver`). No first-class CLI replacement. |
 | `orch-current-jsonl` | Read sidecar mapping `~/.orch/sessions/<pane>.json` written by the SessionStart hook | Read `metadata.transcript_path` from `$SRV.INFO.agents` — the shim's claudecode adapter advertises it. |
-| `orch-register <pane> ...` | Wrote `~/.cache/orch-registry/<pane>.json` | No-op stub (shim auto-registers on `$SRV.INFO.agents`). The stub remains so legacy callers don't error. |
+| `orch-register <pane> ...` | Wrote `~/.cache/orch-registry/<pane>.json` | Deleted in #189 — the shim auto-registers on `$SRV.INFO.agents` at spawn time. Run `orch migrate-aliases` to surface any shell config that still references it. |
+| `orch-claim-operator` | Wrote `~/.cache/orch-operator.json` | Deleted in #189 — export `ORCH_ROLE=operator` in your shell instead; the shim publishes `metadata.role=="operator"` on `$SRV.INFO.agents`. Run `orch migrate-aliases` to surface stale references. |
 
 **Subjects quick-reference** (shim v1, §2.3 channel-plugin layout, `cc` token for claude-code):
 
@@ -101,7 +102,7 @@ nats sub 'agents.hb.>'   # fires every 15s per live pane
 ### Spy on a session
 
 ```sh
-orch-spy operator "audit operator session for the last hour"
+orch spy operator "audit operator session for the last hour"
 # spy pane is auto-registered on the bus; its own heartbeats appear on
 # agents.hb.cc.<owner>.pct<spy-N>; observable by any NATS subscriber.
 ```

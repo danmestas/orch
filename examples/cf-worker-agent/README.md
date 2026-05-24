@@ -125,7 +125,7 @@ The `$SRV.INFO.agents` response lists all registered microservices. Look for:
 
 ## Step 5 — Send a prompt
 
-Because `orch-tell`'s Synadia integration is planned for a future PR (see
+Because `orch tell`'s Synadia integration is planned for a future PR (see
 [orch#59](https://github.com/danmestas/orch/issues/59)), use raw `nats req`
 to talk to the worker directly:
 
