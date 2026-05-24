@@ -1,6 +1,6 @@
 {
   "name": "@agent-ops/orch",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Lightweight, extensible substrate for autonomous long-running multi-agent coordination on tmux.",
   "license": "Apache-2.0",
   "author": "Daniel Mestas",

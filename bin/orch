@@ -16,7 +16,19 @@
 # Same vendor-first pattern as bin/orch-subtree / bin/orch-workflow.
 set -euo pipefail
 
-script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# Resolve symlinks (npm installs bin entries as symlinks under <prefix>/bin/).
+# Without this, vendor/ lookups resolve relative to the symlink's directory
+# instead of the package's actual installed-location under lib/node_modules.
+script_path="${BASH_SOURCE[0]}"
+while [ -L "$script_path" ]; do
+    link=$(readlink "$script_path")
+    if [[ "$link" = /* ]]; then
+        script_path="$link"
+    else
+        script_path="$(dirname "$script_path")/$link"
+    fi
+done
+script_dir=$(cd "$(dirname "$script_path")" && pwd)
 pkg_root=$(cd "$script_dir/.." && pwd)
 
 # 1. Prefer the vendored binary from the GH Release.
