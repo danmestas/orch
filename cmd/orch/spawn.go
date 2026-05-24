@@ -8,6 +8,15 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/danmestas/orch/internal/persistence"
+
+	// Engine packages register themselves via init(). Blank imports
+	// activate the tmux + cmux backends so persistence.Get(name) can
+	// resolve them. Phase 2 adds:
+	//   _ "github.com/danmestas/orch/internal/persistence/zmx"
+	_ "github.com/danmestas/orch/internal/persistence/cmux"
+	_ "github.com/danmestas/orch/internal/persistence/tmux"
 )
 
 // runSpawn is `orch spawn`. Replaces bin/orch-spawn (~418 lines bash) +
@@ -21,8 +30,10 @@ import (
 // previous bash → bash env-var bridge is gone; the executors/ directory
 // is gone with it.
 //
-// No Executor abstraction: per the 2026-05-23 design call, defer until
-// WASM/CF lands a second backend.
+// Persistence-engine dispatch is via internal/persistence's registry
+// (Phase 1 of the zmx work, Rule-of-Three trigger). No Executor
+// abstraction yet — per the 2026-05-23 design call, that seam stays
+// deferred until WASM/CF lands a second backend.
 func runSpawn(args []string) error {
 	opts, err := parseSpawnArgs(args)
 	if err != nil {
@@ -91,27 +102,39 @@ func runSpawn(args []string) error {
 		return err
 	}
 
-	// Spawn the pane and run readiness verification. Dispatch by
-	// persistence engine; the composition table already validated the
-	// (persistence, layout) pair at flag-parse, so we don't re-check it
-	// here. No Engine interface: the switch IS the seam (Rule-of-Three —
-	// extract when a third engine, e.g. zmx, lands).
-	var (
-		paneID  string
-		spawnRC int
-	)
-	switch opts.Persistence {
-	case "tmux":
-		paneID, spawnRC, err = opts.spawnPane()
-	case "cmux":
-		paneID, spawnRC, err = opts.spawnPaneCmux()
-	default:
-		// validateComposition should have rejected this. Belt-and-suspenders
-		// so a future composition table edit can't silently fall through.
-		return fmt.Errorf("orch spawn: no spawn implementation for persistence=%q (composition table allowed it but dispatch did not; this is a bug)", opts.Persistence)
+	// Dispatch to the persistence engine. Phase 1 of the zmx work
+	// (Proposal 0008's Rule-of-Three trigger) replaced the inline
+	// switch with a registry lookup: engines self-register from their
+	// package init(), and persistence.Get resolves them by name.
+	// validateComposition already approved the (persistence, layout)
+	// pair, so an unknown engine name here is a registry/composition
+	// table desync — a bug, not user error.
+	//
+	// WrapFunc is lazy so each engine can run its own flag-rejection
+	// preflight (e.g. cmux rejects --headless, tmux doesn't) before
+	// any agent-shape errors surface — preserves pre-extraction
+	// error-priority order.
+	engine, err := persistence.Get(opts.Persistence)
+	if err != nil {
+		return fmt.Errorf("orch spawn: no spawn implementation for persistence=%q (composition table allowed it but dispatch did not; this is a bug): %w", opts.Persistence, err)
 	}
+	res, err := engine.Start(persistence.StartSpec{
+		Slug:     opts.Slug,
+		WrapFunc: opts.buildWrap,
+		Agent:    opts.Agent,
+		Position: opts.Position,
+		Headless: opts.Headless,
+		Verify:   opts.Verify,
+	})
 	if err != nil {
 		return err
+	}
+	var (
+		paneID  string
+		spawnRC = res.RC
+	)
+	if res.Handle != nil {
+		paneID = res.Handle.Locator()
 	}
 
 	// Pre-pane failure (unknown agent caught before split). PANE empty,
