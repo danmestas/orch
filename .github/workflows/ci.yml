@@ -200,62 +200,26 @@ jobs:
           cat /tmp/orch-ci-real.log
           test "$(cat /tmp/orch-ci-real.rc)" = "0"
 
-  adapter-contract:
-    name: adapter contract bench (T9/T10/T11)
-    runs-on: ubuntu-latest
-    # Hard gate on PRs that touch the shim, orch spawn path, or publish hooks.
-    # Both docker bench and sesh bench must exit 0.
-    if: |
-      github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-
-      - name: check if adapter-relevant files changed
-        id: filter
-        run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
-          changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || true)
-          if printf '%s\n' "$changed" | grep -qE \
-              '^(cmd/orch-agent-shim/|cmd/orch/|internal/adapter/|internal/tmuxctl/|hooks/)'; then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "relevant=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Set up Docker Buildx
-        if: steps.filter.outputs.relevant == 'true'
-        uses: docker/setup-buildx-action@v3
-
-      - name: run docker bench with MOCK_USE_SHIM=1 (T1–T11)
-        if: steps.filter.outputs.relevant == 'true'
-        run: |
-          MOCK_USE_SHIM=1 bash test/docker/run-tests.sh --with-shim
-
-      - name: run sesh bench
-        if: steps.filter.outputs.relevant == 'true'
-        run: |
-          bash test/docker-sesh/run-tests.sh
+  # NOTE: `adapter-contract` (T9/T10/T11 docker + sesh benches) was removed in
+  # the farley pass. Both benches build images from `internal/shim/` and
+  # `internal/adapter/`, which were extracted to `synadia-agent-shim` (orch#140,
+  # merged today). The job had been silently green since the extraction because
+  # the path-filter's git-diff was failing under `fetch-depth: 1` and the
+  # `|| true` fallback set `relevant=false`, skipping the bench entirely. The
+  # farley pass exposed it by removing the silent-skip. Adapter contract tests
+  # now belong in the sister repo; `test/docker/`, `test/docker-sesh/`, and
+  # their inside-container scripts still reference the extracted dirs and are
+  # tracked for a separate cleanup PR.
 
   bench:
     name: latency benchmark (soft gate)
     runs-on: ubuntu-latest
     # Run on PRs that touch the bridge, shim, orch spawn, or hook scripts.
     # Soft warning only — latency varies on shared runners; never a hard gate.
+    # Also runs on merge_group events so the required status check context
+    # is satisfied if the merge queue is ever enabled (per farley playbook).
     if: |
-      github.event_name == 'pull_request' && (
-        contains(github.event.pull_request.title, '[bench]') ||
-        true
-      )
+      github.event_name == 'pull_request' || github.event_name == 'merge_group'
     permissions:
       contents: read
       pull-requests: write
@@ -274,10 +238,16 @@ jobs:
       - name: check if bench-relevant files changed
         id: filter
         run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
-          changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || true)
-          if printf '%s\n' "$changed" | grep -qE \
+          # pull_request: diff PR base..head. merge_group: diff merge_group base..head.
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.merge_group.base_sha }}"
+            HEAD="${{ github.event.merge_group.head_sha }}"
+          fi
+          changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || echo "FALLBACK")
+          if [[ "$changed" == "FALLBACK" ]] || printf '%s\n' "$changed" | grep -qE \
               '^(cmd/orch-agent-shim/|cmd/orch/|internal/adapter/|internal/tmuxctl/|hooks/)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
@@ -313,7 +283,9 @@ jobs:
           fi
 
       - name: comment bench diff on PR
-        if: steps.filter.outputs.relevant == 'true' && steps.bench.outcome != 'skipped'
+        # Only comments on pull_request events — merge_group events have no
+        # PR issue number context, so skip the comment step there.
+        if: steps.filter.outputs.relevant == 'true' && steps.bench.outcome != 'skipped' && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
