@@ -11,67 +11,17 @@ import (
 	"github.com/danmestas/orch/internal/tmuxctl"
 )
 
-// spawnPane is the tmux-executor leg of orch spawn. Returns:
-//   - paneID: the new pane id ("%64"), empty when the spawn failed
-//     before tmux produced one (unknown agent caught pre-split).
-//   - spawnRC: the exit code to honor; non-zero when --verify failed.
-//   - err: a non-recoverable error (tmux missing, suit failed, etc.).
+// Engine-side concerns (split-window / new-session, verify polling)
+// live in internal/persistence/tmux. This file now holds only the
+// caller-side helpers that are engine-independent:
 //
-// Mirrors executors/tmux/spawn.sh end-to-end: WRAP construction,
-// split-window vs new-session, verify loop, pre-verify pane id emit.
-func (o *spawnOpts) spawnPane() (string, int, error) {
-	wrap, err := o.buildWrap()
-	if err != nil {
-		return "", 1, err
-	}
-
-	var paneID string
-	if o.Headless {
-		paneID, err = launchHeadless(o.Agent, wrap)
-	} else {
-		paneID, err = launchSplit(o.Position, wrap)
-	}
-	if err != nil {
-		return "", 1, err
-	}
-
-	if !o.Verify {
-		return paneID, 0, nil
-	}
-
-	timeout := tmuxctl.EnvVerifyTimeout()
-	backoff, err := tmuxctl.EnvVerifyBackoff()
-	if err != nil {
-		return paneID, 1, err
-	}
-	res := tmuxctl.Verify(tmuxctl.VerifyOpts{
-		PaneID:  paneID,
-		Agent:   o.Agent,
-		Timeout: timeout,
-		Backoff: backoff,
-		Tmux:    &tmuxctl.RealTmux{},
-	})
-	totalAttempts := len(backoff)
-	switch res.State {
-	case tmuxctl.StateReady:
-		fmt.Fprintf(os.Stderr, "orch spawn: agent ready in pane %s (attempt %d/%d, %ds)\n",
-			paneID, res.Attempts, totalAttempts, int(res.Elapsed.Seconds()))
-		return paneID, 0, nil
-	case tmuxctl.StateDied:
-		fmt.Fprintf(os.Stderr, "orch spawn: agent failed to start in %s (pane died, attempt %d/%d)\n",
-			paneID, res.Attempts, totalAttempts)
-		return paneID, 1, nil
-	case tmuxctl.StateMissingBinary:
-		fmt.Fprintf(os.Stderr, "orch spawn: agent failed to start in %s (%s binary missing — install the harness CLI; verify failed after %d attempts)\n",
-			paneID, o.Agent, res.Attempts)
-		return paneID, 1, nil
-	default:
-		fmt.Fprintf(os.Stderr, "orch spawn: agent failed to start in %s (verify failed after %d attempts, timeout after %ds; set ORCH_VERIFY_TIMEOUT or ORCH_VERIFY_BACKOFF, or pass --no-verify to skip)\n",
-			paneID, res.Attempts, int(res.Elapsed.Seconds()))
-		return paneID, 1, nil
-	}
-}
-
+//   - buildWrap / claudeWrap / piWrap / codexWrap / geminiWrap — per-agent
+//     command string assembly
+//   - labelSlug / readAliasEntry / writeAliasEntry — slug → pane alias
+//     bookkeeping (tmux-specific in practice but reachable by name from
+//     any engine; future zmx may want its own keying)
+//   - maybeLaunchShim — orch-agent-shim launch alongside the pane
+//
 // buildWrap composes the per-agent WRAP command string the tmux pane
 // will run. Mirrors executors/tmux/spawn.sh lines 51-149.
 func (o *spawnOpts) buildWrap() (string, error) {
@@ -226,62 +176,6 @@ func writeMergedPrompt(merged, bundle string, noFleet bool) {
 			f.Write(fleetData)
 		}
 	}
-}
-
-// launchHeadless creates / appends to the orch-headless tmux session
-// and returns the new pane id.
-func launchHeadless(agent, wrap string) (string, error) {
-	session := os.Getenv("ORCH_HEADLESS_SESSION")
-	if session == "" {
-		session = "orch-headless"
-	}
-	// Probe for the session.
-	hasErr := exec.Command("tmux", "has-session", "-t", session).Run()
-	if hasErr == nil {
-		out, err := exec.Command("tmux", "new-window", "-d", "-t", session+":", "-n", agent, "-P", "-F", "#{pane_id}", wrap).Output()
-		if err != nil {
-			return "", fmt.Errorf("orch spawn: tmux new-window: %w", err)
-		}
-		return strings.TrimSpace(string(out)), nil
-	}
-	out, err := exec.Command("tmux", "new-session", "-d", "-s", session, "-n", agent, "-P", "-F", "#{pane_id}", wrap).Output()
-	if err != nil {
-		return "", fmt.Errorf("orch spawn: tmux new-session: %w", err)
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-// launchSplit splits the current pane according to position and returns
-// the new pane id.
-func launchSplit(position, wrap string) (string, error) {
-	cur := os.Getenv("TMUX_PANE")
-	if cur == "" {
-		out, err := exec.Command("tmux", "display", "-p", "#{pane_id}").Output()
-		if err != nil {
-			return "", fmt.Errorf("orch spawn: tmux display: %w", err)
-		}
-		cur = strings.TrimSpace(string(out))
-	}
-	var splitArgs []string
-	switch position {
-	case "right":
-		splitArgs = []string{"-h"}
-	case "left":
-		splitArgs = []string{"-h", "-b"}
-	case "above":
-		splitArgs = []string{"-v", "-b"}
-	case "below":
-		splitArgs = []string{"-v"}
-	default:
-		splitArgs = []string{"-h"}
-	}
-	args := append([]string{"split-window", "-d"}, splitArgs...)
-	args = append(args, "-P", "-F", "#{pane_id}", "-t", cur, wrap)
-	out, err := exec.Command("tmux", args...).Output()
-	if err != nil {
-		return "", fmt.Errorf("orch spawn: tmux split-window: %w", err)
-	}
-	return strings.TrimSpace(string(out)), nil
 }
 
 // labelSlug applies the three layers of slug labeling: pane title,

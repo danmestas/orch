@@ -8,6 +8,12 @@ import (
 	"github.com/danmestas/orch/internal/persistence"
 )
 
+// Phase 1 of the zmx work moved cmux engine internals
+// (cmuxDirection, parseCmuxSurface, sendWrap, spawnPaneCmux) into
+// internal/persistence/cmux. The tests for those internals moved with
+// the code; what remains here are the cmd/orch-side assertions that
+// still need to live next to the parse/dispatch path.
+
 func TestParseSpawnArgsAcceptsCmuxComposition(t *testing.T) {
 	o, err := parseSpawnArgs([]string{"claude", "--persistence", "cmux", "--layout", "cmux"})
 	if err != nil {
@@ -47,93 +53,6 @@ func TestRegistryRejectsCmuxCmuxMix(t *testing.T) {
 	}
 	if !errors.Is(err, persistence.ErrUnsupportedComposition) {
 		t.Errorf("RequirePair err = %v, want errors.Is ErrUnsupportedComposition", err)
-	}
-}
-
-func TestCmuxDirectionMapping(t *testing.T) {
-	cases := map[string]string{
-		"right":   "right",
-		"left":    "left",
-		"above":   "up",
-		"below":   "down",
-		"":        "right", // default fallback
-		"unknown": "right",
-	}
-	for in, want := range cases {
-		if got := cmuxDirection(in); got != want {
-			t.Errorf("cmuxDirection(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-func TestParseCmuxSurfaceHappyPath(t *testing.T) {
-	out := "OK surface:30 pane:25 workspace:2\n"
-	got, err := parseCmuxSurface(out)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if got != "surface:30" {
-		t.Errorf("got %q, want surface:30", got)
-	}
-}
-
-func TestParseCmuxSurfaceTolerantOrdering(t *testing.T) {
-	// cmux is not contractually committed to a token order; the
-	// extractor walks all whitespace-separated tokens looking for the
-	// surface prefix.
-	out := "pane:25 surface:30 workspace:2"
-	got, err := parseCmuxSurface(out)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if got != "surface:30" {
-		t.Errorf("got %q, want surface:30", got)
-	}
-}
-
-func TestParseCmuxSurfaceRejectsEmpty(t *testing.T) {
-	if _, err := parseCmuxSurface(""); err == nil {
-		t.Error("empty stdout should produce an error")
-	}
-	if _, err := parseCmuxSurface("   \n"); err == nil {
-		t.Error("whitespace-only stdout should produce an error")
-	}
-}
-
-func TestParseCmuxSurfaceRejectsMissingToken(t *testing.T) {
-	// cmux replied OK but didn't emit a surface token — e.g. browser
-	// pane variant. We don't want to silently mis-target a later send.
-	if _, err := parseCmuxSurface("OK pane:25 workspace:2"); err == nil {
-		t.Error("output without surface token should produce an error")
-	}
-}
-
-func TestParseCmuxSurfaceRejectsBarePrefix(t *testing.T) {
-	if _, err := parseCmuxSurface("OK surface: pane:25"); err == nil {
-		t.Error("surface: with no id should produce an error")
-	}
-}
-
-func TestCmuxSendWrapRejectsEmptySurface(t *testing.T) {
-	if err := cmuxSendWrap("", "echo hi"); err == nil {
-		t.Error("empty surface should produce an error before exec")
-	}
-}
-
-// SpawnPaneCmux gates --headless because cmux has no headless-session
-// equivalent. This must be a clean operator-facing error, not a panic
-// downstream.
-func TestSpawnPaneCmuxRejectsHeadless(t *testing.T) {
-	o := &spawnOpts{Agent: "claude", Cwd: "/tmp", Headless: true, Position: "right"}
-	_, rc, err := o.spawnPaneCmux()
-	if err == nil {
-		t.Fatal("--headless with cmux should error")
-	}
-	if rc != 1 {
-		t.Errorf("rc=%d want 1", rc)
-	}
-	if !strings.Contains(err.Error(), "--headless is not supported with --persistence=cmux") {
-		t.Errorf("error missing operator-facing guidance: %v", err)
 	}
 }
 
