@@ -12,11 +12,12 @@ import (
 	"github.com/danmestas/orch/internal/persistence"
 
 	// Engine packages register themselves via init(). Blank imports
-	// activate the tmux + cmux backends so persistence.Get(name) can
-	// resolve them. Phase 2 adds:
-	//   _ "github.com/danmestas/orch/internal/persistence/zmx"
+	// activate the tmux + cmux + zmx backends so persistence.Get(name)
+	// can resolve them. zmx joined the lineup in Phase 2 of the
+	// pluggable-persistence work (Proposal 0008 Phase C).
 	_ "github.com/danmestas/orch/internal/persistence/cmux"
 	_ "github.com/danmestas/orch/internal/persistence/tmux"
+	_ "github.com/danmestas/orch/internal/persistence/zmx"
 )
 
 // runSpawn is `orch spawn`. Replaces bin/orch-spawn (~418 lines bash) +

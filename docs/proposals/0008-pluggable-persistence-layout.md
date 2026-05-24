@@ -1,6 +1,6 @@
 # Proposal 0008 — Decouple persistence engine + layout engine from comms (tmux → pluggable)
 
-**Status:** Phase A + Phase B landed; interfaces deferred to Rule-of-Three. See [§ Status](#status).
+**Status:** Phase A + Phase B + Phase C (zmx) landed; layout-engine extraction deferred. See [§ Status](#status).
 **Depends on:** Proposal 0009 / issue #181 (stable slug as worker identity — landed as `aa68ba3`).
 **Blocks:** future zmx / libghostty / headless-noop engines.
 
@@ -15,7 +15,9 @@
 
 - **2026-05-23 — Phase A landed, then re-shaped.** The original Phase A PR (#203 / commit 98ea932) introduced `internal/instance`, `internal/persistence`, `internal/layout` interface packages plus separate tmux impl packages — interfaces shaped against one concrete consumer. Per the 2026-05-23 Ousterhout-call follow-up, PR #189C / #206 (`feat(orch): inline orch-spawn + executors into Go`) dropped the interface packages and inlined the tmux spawn path directly into `cmd/orch/spawn_tmux.go`. The surviving Phase-A surface is `internal/persistence/registry.go` — the closed composition table — and `cmd/orch-engines` (the `validate` / `list` probe binary). One engine in the codebase → no abstraction earned yet (Ousterhout: deep modules from real composition, not hypotheticals).
 - **2026-05-24 — Phase B landed (issue #207 / this proposal's cmux delivery).** `cmd/orch/spawn_cmux.go` mirrors `spawn_tmux.go`'s inline shape — `cmux new-pane` + `cmux send` instead of `tmux split-window`. Composition table grows `{cmux, cmux}`. `cmd/orch/spawn.go` switches on `opts.Persistence` (no `Engine` interface) to pick the concrete spawn function. `validateComposition` still gates the pair at flag-parse via the `internal/persistence` registry, so `--persistence=tmux --layout=cmux` (and the reverse) reject cleanly before any spawn work. Verify (`--verify`) is not yet implemented for cmux — operators get a clear error rather than a silent skip.
-- **Deferred — interface extraction.** Earns its keep when a third concrete engine lands. zmx (a Zig session-persistence tool at `~/references/zmx`) is the named candidate. zmx is sessions-only, with no native pane-splits, so when it arrives the layout-engine concept must accommodate "single-pane / no layout" — that's the discovery moment to commit to the `Engine` / `Handle` / `LayoutEngine` shape across the three impls, instead of guessing at it now.
+- **2026-05-24 — Phase 1 of the zmx work landed (#209).** Rule-of-Three trigger: with cmux's arrival a second concrete engine existed, and the Phase A interface scaffolding (dropped in #206) had to come back to host a third. `internal/persistence/engine.go` extracts the `Engine` interface (Name/Start/Attach/List) plus `StartSpec` / `StartResult`. tmux + cmux move into `internal/persistence/{tmux,cmux}/` and self-register via `init()`. `cmd/orch/spawn.go` dispatches via `persistence.Get(opts.Persistence).Start(spec)` — the in-tree `switch` is gone. `instance.Handle` (ID/Locator/Wait/Kill) gives callers an engine-agnostic view of a spawned worker.
+- **2026-05-24 — Phase C (zmx, Phase 2 of the zmx work) landed.** `internal/persistence/zmx/` joins as the third concrete `Engine`. Composition table grows `{zmx, none}`: zmx is sessions-only (1 session = 1 PTY, no panes/splits/tabs), so the layout axis pairs with the no-op `none` surface (operator manages display via their own emulator window or wraps zmx inside another multiplexer). zmx CLI surface: `zmx run <name> -d sh -c <wrap>` (headless or attached — orch always spawns detached and lets the operator open their own `zmx attach`); `zmx history <name>` (used by `--verify`); `zmx list --short` (for collision detection and `Handle.Wait` polling); `zmx kill <name> --force` (idempotent). `--position` is rejected explicitly (no in-session layout); `--headless` is silently accepted (zmx is detached-by-design from orch's perspective); `--verify` polls `zmx history` for the agent's readiness markers and earns its keep over tmuxctl's capture-pane indirection (cheaper scrollback read). Cross-engine pairs (`{zmx, tmux}`, `{zmx, cmux}`, `{tmux, none}`, `{cmux, none}`) reject at flag-parse with the standard `ErrUnsupportedComposition` diagnostic. `cmd/orch/spawn_zmx.go` is intentionally absent: Phase 1 centralized dispatch through `persistence.Get`, so the engine's blank import in `spawn.go` is the only adapter wiring needed — the engine is a plain package consumer of `internal/persistence`.
+- **Deferred — `LayoutEngine` interface extraction.** Open question now answered partially: zmx forced `layout=none` into the registry, which means the layout axis already has two distinct shapes (tmux/cmux's split-engine vocabulary and zmx's no-layout). A separate `LayoutEngine` interface still hasn't earned entry — `labelSlug` (the only layout-shaped operation today) is locator-agnostic and lives in `cmd/orch/spawn_tmux.go` for both tmux and cmux paths. When a real layout-only engine arrives (libghostty's panes-without-persistence shape is the candidate) the `LayoutEngine` extraction becomes profitable.
 - **Deferred — Phase C (shim wire-format change).** Today's shim accepts both `%64`-style and `surface:30`-style locators because it passes the string through unchanged; a future `--watch-handle <type>:<id>` makes that explicit. Out of scope here.
 - **Deferred — Phase D (interface extraction).** Re-evaluated when zmx or another third engine arrives. See Implementation slicing below.
 
@@ -105,10 +107,13 @@ Per the Ousterhout review: a free Cartesian product over (persistence × layout)
 |---|---|---|---|
 | tmux | tmux | yes | today's default; landed Phase A |
 | cmux | cmux | yes | unified cmux deployment; landed Phase B (issue #207) |
+| zmx  | none | yes | sessions-only; landed Phase C (zmx Phase 2). Operator manages display layer |
 | tmux | cmux | no | rejected — cross-engine attach requires a forwarder we're not building |
 | cmux | tmux | no | same |
-| zmx  | zmx  | future | sessions-only — earns entry when a real consumer pulls it in |
-| any  | none | future | true-headless mode; deferred until a real CI consumer pulls it in |
+| zmx  | tmux | no | same — zmx has no layout vocabulary to forward into tmux's |
+| zmx  | cmux | no | same |
+| tmux | none | no | true-headless tmux not paired; `--headless` already covers detached spawns into the orch-headless session |
+| cmux | none | no | not paired; no concrete consumer asking for it |
 | none | any  | no | nonsense — layout needs a PTY source |
 
 Cross-engine combinations require explicit support code in each pair; rejected by default until that work is done. `cmd/orch spawn`'s flag-parse layer calls `validateComposition`, which either invokes `orch-engines validate <p> <l>` (when the binary is on PATH or under `$ORCH_ENGINES_BIN`) or falls back to the in-tree `go run ./cmd/orch-engines`. Non-zero exit terminates the spawn before any pane / surface work runs.
@@ -160,8 +165,10 @@ Closeable when:
 
 - [x] Phase A merged: closed composition registry + `orch-engines` probe binary; flag-parse rejects invalid combos. (Interface scaffolding subsequently dropped in #189C / #206 — see Status.)
 - [x] Phase B merged (issue #207): cmux engine lands inline; composition table grows `{cmux, cmux}`; mixed pairs reject; `orch spawn --persistence cmux --layout cmux` spawns a worker in a cmux pane.
-- [ ] Phase D — interface extraction — re-evaluated when zmx (or another third engine) earns entry to the registry.
-- [ ] Migration guide for operators (when to use which engine; defaults).
+- [x] zmx Phase 1 merged (#209): `persistence.Engine` interface extracted, tmux + cmux move into per-engine packages, dispatch goes through `persistence.Get`.
+- [x] zmx Phase 2 / Phase C merged: zmx engine lands as the third concrete `Engine`; composition table grows `{zmx, none}`; cross-engine pairs reject; `orch spawn --persistence zmx --layout none` spawns a worker in a zmx session.
+- [x] Migration guide for operators (when to use which engine; defaults) — `docs/persistence-engines.md`.
+- [ ] `LayoutEngine` interface extraction — deferred until a layout-only engine (e.g. libghostty's panes-without-persistence) earns entry.
 
 ## Open questions
 

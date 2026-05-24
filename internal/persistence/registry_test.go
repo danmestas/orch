@@ -20,6 +20,12 @@ func TestIsSupportedCmuxCmux(t *testing.T) {
 	}
 }
 
+func TestIsSupportedZmxNone(t *testing.T) {
+	if !persistence.IsSupported("zmx", "none") {
+		t.Errorf("IsSupported(zmx, none) = false, want true (zmx Phase 2 addition; zmx is sessions-only, layout=none is the no-op surface)")
+	}
+}
+
 func TestIsSupportedRejectsCrossEngine(t *testing.T) {
 	for _, tc := range []struct {
 		p, l string
@@ -28,13 +34,16 @@ func TestIsSupportedRejectsCrossEngine(t *testing.T) {
 		{"cmux", "tmux"},      // same
 		{"tmux", "libghostty"},
 		{"none", "tmux"},      // nonsense, registry rejects
-		{"tmux", "none"},      // headless-noop deferred
+		{"tmux", "none"},      // headless-noop deferred for tmux
+		{"cmux", "none"},      // same — cmux+none not paired
+		{"zmx", "tmux"},       // cross-engine — zmx is sessions-only, no layout forwarder
+		{"zmx", "cmux"},       // same
+		{"zmx", "zmx"},        // not registered — zmx pairs with `none`, not itself
 		{"", ""},              // empty
 		{"tmux", ""},          // partial empty
 		{"", "tmux"},          // partial empty
 		{"TMUX", "tmux"},      // case-sensitive
 		{"CMUX", "cmux"},      // case-sensitive
-		{"zmx", "zmx"},        // future engine, not landed yet
 	} {
 		if persistence.IsSupported(tc.p, tc.l) {
 			t.Errorf("IsSupported(%q, %q) = true, want false", tc.p, tc.l)
