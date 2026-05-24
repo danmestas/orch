@@ -8,7 +8,6 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/danmestas/orch/internal/registry"
-	"github.com/danmestas/orch/internal/registry/sources"
 )
 
 // NATSLiveRegistry implements LiveRegistry by querying $SRV.INFO.agents
@@ -46,7 +45,7 @@ func (r *NATSLiveRegistry) AliveByName(ctx context.Context) (map[string]struct{}
 	if r == nil || r.NC == nil {
 		return nil, fmt.Errorf("subtree live registry: no NATS connection")
 	}
-	src := sources.New(r.NC, sources.NATSOptions{
+	src := registry.NewNATSReader(r.NC, registry.NATSOptions{
 		DiscoveryTimeout: r.DiscoveryTimeout,
 		MaxDiscoveryWait: r.MaxDiscoveryWait,
 	})
@@ -91,7 +90,7 @@ func (r *NATSLiveRegistry) AgentsSnapshot(ctx context.Context) (*AgentsResult, e
 	if r == nil || r.NC == nil {
 		return nil, fmt.Errorf("subtree live registry: no NATS connection")
 	}
-	src := sources.New(r.NC, sources.NATSOptions{
+	src := registry.NewNATSReader(r.NC, registry.NATSOptions{
 		DiscoveryTimeout: r.DiscoveryTimeout,
 		MaxDiscoveryWait: r.MaxDiscoveryWait,
 	})

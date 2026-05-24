@@ -38,7 +38,6 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/danmestas/orch/internal/registry"
-	"github.com/danmestas/orch/internal/registry/sources"
 	"github.com/danmestas/synadia-agent-shim/shim"
 )
 
@@ -115,12 +114,12 @@ func commonFlags(fs *flag.FlagSet, args []string) (*nats.Conn, registry.Readers,
 	if err != nil {
 		return nil, registry.Readers{}, 0, func() {}, fmt.Errorf("connect %s: %w", url, err)
 	}
-	natsSrc := sources.New(nc, sources.NATSOptions{})
+	natsSrc := registry.NewNATSReader(nc, registry.NATSOptions{})
 	readers := registry.Readers{
 		Agents:     natsSrc,
 		Heartbeats: natsSrc,
-		Aliases:    sources.NewAliasFile(*aliasPath),
-		Operator:   sources.NewOperatorFile(*operatorPth),
+		Aliases:    registry.NewAliasReader(*aliasPath),
+		Operator:   registry.NewOperatorReader(*operatorPth),
 	}
 	cleanup := func() { nc.Close() }
 	return nc, readers, *hbWindow, cleanup, nil
@@ -229,7 +228,7 @@ func cmdServe(args []string) error {
 
 	// Spin up the NATSSource heartbeat subscription so Live's snapshots
 	// carry live HB data.
-	if hbReader, ok := readers.Heartbeats.(*sources.NATSSource); ok {
+	if hbReader, ok := readers.Heartbeats.(*registry.NATSReader); ok {
 		go func() { _ = hbReader.Run(ctx) }()
 	}
 

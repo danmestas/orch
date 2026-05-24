@@ -1,4 +1,4 @@
-package sources
+package registry
 
 import (
 	"context"
@@ -11,26 +11,31 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
-
-	"github.com/danmestas/orch/internal/registry"
 )
 
-// NATSSource reads agent metadata via $SRV.INFO.agents and tracks live
-// heartbeats via agents.hb.> when started.
+// NATSReader is the live bus-side data fetcher. It satisfies AgentReader by
+// querying $SRV.INFO.agents and HeartbeatReader by tracking agents.hb.>
+// when started.
+//
+// ADR-0003 makes $SRV.INFO.agents the single source of truth; this reader
+// is the implementation of that. Aliases and operator-role overlays are
+// not "sources" in the same sense — they're operator-side enrichments
+// applied during Snapshot, surfaced via the AliasReader / OperatorReader
+// interfaces for test injection.
 //
 // One-shot (no Run): call Agents() to query $SRV.INFO once.
 // Live (Run): also subscribes to agents.hb.> and maintains a heartbeat
 // table queryable via Heartbeats().
-type NATSSource struct {
-	nc                *nats.Conn
-	discoveryTimeout  time.Duration
-	maxDiscoveryWait  time.Duration
+type NATSReader struct {
+	nc               *nats.Conn
+	discoveryTimeout time.Duration
+	maxDiscoveryWait time.Duration
 
 	mu sync.RWMutex
 	hb map[string]time.Time // pane_id → last-seen
 }
 
-// NATSOptions configures the NATS source. Zero values pick sensible
+// NATSOptions configures the NATS reader. Zero values pick sensible
 // defaults (2s per-reply, 3s overall ceiling, no idle cap).
 type NATSOptions struct {
 	// DiscoveryTimeout is the per-reply timeout for $SRV.INFO.agents.
@@ -50,16 +55,16 @@ const (
 	subjHeartbeats = "agents.hb.>"
 )
 
-// New constructs a NATSSource on the given connection. The connection's
-// lifecycle is the caller's responsibility.
-func New(nc *nats.Conn, opts NATSOptions) *NATSSource {
+// NewNATSReader constructs a NATSReader on the given connection. The
+// connection's lifecycle is the caller's responsibility.
+func NewNATSReader(nc *nats.Conn, opts NATSOptions) *NATSReader {
 	if opts.DiscoveryTimeout <= 0 {
 		opts.DiscoveryTimeout = defaultDiscoveryTimeout
 	}
 	if opts.MaxDiscoveryWait <= 0 {
 		opts.MaxDiscoveryWait = defaultMaxDiscoveryWait
 	}
-	return &NATSSource{
+	return &NATSReader{
 		nc:               nc,
 		discoveryTimeout: opts.DiscoveryTimeout,
 		maxDiscoveryWait: opts.MaxDiscoveryWait,
@@ -75,9 +80,9 @@ func New(nc *nats.Conn, opts NATSOptions) *NATSSource {
 // agents replying within the discovery window) returns an empty slice
 // and a nil error — callers treat "no agents" as a normal operational
 // state.
-func (s *NATSSource) Agents(ctx context.Context) ([]registry.AgentInfo, error) {
+func (s *NATSReader) Agents(ctx context.Context) ([]AgentInfo, error) {
 	if s.nc == nil {
-		return nil, errors.New("nats source: no connection")
+		return nil, errors.New("nats reader: no connection")
 	}
 
 	inbox := nats.NewInbox()
@@ -92,7 +97,7 @@ func (s *NATSSource) Agents(ctx context.Context) ([]registry.AgentInfo, error) {
 	}
 
 	deadline := time.Now().Add(s.maxDiscoveryWait)
-	var out []registry.AgentInfo
+	var out []AgentInfo
 	for {
 		// Cap per-iteration wait at the smaller of DiscoveryTimeout and
 		// time-left-in-MaxDiscoveryWait so the overall ceiling is honoured.
@@ -130,7 +135,7 @@ func (s *NATSSource) Agents(ctx context.Context) ([]registry.AgentInfo, error) {
 
 // Heartbeats returns a snapshot of the most-recent heartbeat per pane.
 // Returns an empty map (not error) when Run has not been called yet.
-func (s *NATSSource) Heartbeats(ctx context.Context) (map[string]time.Time, error) {
+func (s *NATSReader) Heartbeats(ctx context.Context) (map[string]time.Time, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make(map[string]time.Time, len(s.hb))
@@ -140,9 +145,9 @@ func (s *NATSSource) Heartbeats(ctx context.Context) (map[string]time.Time, erro
 
 // Run subscribes to agents.hb.> and updates the heartbeat table until ctx
 // is cancelled. Blocking — call in a goroutine.
-func (s *NATSSource) Run(ctx context.Context) error {
+func (s *NATSReader) Run(ctx context.Context) error {
 	if s.nc == nil {
-		return errors.New("nats source: no connection")
+		return errors.New("nats reader: no connection")
 	}
 	sub, err := s.nc.Subscribe(subjHeartbeats, s.onHeartbeat)
 	if err != nil {
@@ -154,7 +159,7 @@ func (s *NATSSource) Run(ctx context.Context) error {
 
 // onHeartbeat updates the per-pane LastHB. The heartbeat body carries
 // the full agent metadata (per §8.3); we read pane_id from there.
-func (s *NATSSource) onHeartbeat(msg *nats.Msg) {
+func (s *NATSReader) onHeartbeat(msg *nats.Msg) {
 	pane := paneFromHeartbeat(msg)
 	if pane == "" {
 		return
@@ -200,7 +205,7 @@ func paneFromHeartbeat(msg *nats.Msg) string {
 //	  "metadata": { "pane_id":"%64", "role":"worker", ... },
 //	  "endpoints": [ { "name":"prompt", "subject":"agents.prompt..." }, ... ]
 //	}
-func parseAgentInfo(data []byte) (registry.AgentInfo, error) {
+func parseAgentInfo(data []byte) (AgentInfo, error) {
 	var raw struct {
 		ID        string            `json:"id"`
 		Metadata  map[string]string `json:"metadata"`
@@ -210,16 +215,16 @@ func parseAgentInfo(data []byte) (registry.AgentInfo, error) {
 		} `json:"endpoints"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return registry.AgentInfo{}, err
+		return AgentInfo{}, err
 	}
-	eps := make([]registry.EndpointInfo, 0, len(raw.Endpoints))
+	eps := make([]EndpointInfo, 0, len(raw.Endpoints))
 	for _, e := range raw.Endpoints {
-		eps = append(eps, registry.EndpointInfo{Name: e.Name, Subject: e.Subject})
+		eps = append(eps, EndpointInfo{Name: e.Name, Subject: e.Subject})
 	}
 	if raw.Metadata == nil {
 		raw.Metadata = map[string]string{}
 	}
-	return registry.AgentInfo{
+	return AgentInfo{
 		InstanceID: raw.ID,
 		Metadata:   raw.Metadata,
 		Endpoints:  eps,

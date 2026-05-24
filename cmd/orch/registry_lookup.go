@@ -10,7 +10,6 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/danmestas/orch/internal/registry"
-	"github.com/danmestas/orch/internal/registry/sources"
 	"github.com/danmestas/synadia-agent-shim/shim"
 )
 
@@ -54,12 +53,12 @@ func snapshotOnce(ctx context.Context, nc *nats.Conn) ([]registry.Worker, error)
 	if path := os.Getenv("ORCH_REGISTRY_FIXTURE_FILE"); path != "" {
 		return loadFixtureWorkers(path)
 	}
-	src := sources.New(nc, sources.NATSOptions{})
+	src := registry.NewNATSReader(nc, registry.NATSOptions{})
 	readers := registry.Readers{
 		Agents:     src,
 		Heartbeats: src,
-		Aliases:    sources.NewAliasFile(""),
-		Operator:   sources.NewOperatorFile(""),
+		Aliases:    registry.NewAliasReader(""),
+		Operator:   registry.NewOperatorReader(""),
 	}
 	ctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 	defer cancel()

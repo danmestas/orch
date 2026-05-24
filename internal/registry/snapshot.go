@@ -6,10 +6,17 @@ import (
 	"time"
 )
 
-// Readers bundles the four source interfaces the registry consumes.
-// All fields are optional — a nil reader contributes its identity element
-// (empty slice / empty map / empty string) so the snapshot degrades
-// gracefully when a source is unavailable.
+// Readers bundles the four data fetchers the registry consults.
+//
+// Per ADR-0003 only Agents is the source of truth; Heartbeats, Aliases,
+// and Operator are overlays applied during the join. All fields are
+// optional — a nil reader contributes its identity element (empty
+// slice / empty map / empty string) so Snapshot degrades gracefully
+// when a reader is unavailable.
+//
+// In production code, callers build this with NewNATSReader (which
+// satisfies both AgentReader and HeartbeatReader), NewAliasReader, and
+// NewOperatorReader. Tests inject fakes for deterministic data.
 type Readers struct {
 	Agents     AgentReader
 	Heartbeats HeartbeatReader
@@ -18,9 +25,8 @@ type Readers struct {
 }
 
 // AgentReader / HeartbeatReader / AliasReader / OperatorReader are the
-// source contracts the snapshot consumes. They are re-declared here (not
-// imported from sources/) so internal/registry has no dependency on its
-// own subpackage — keeps the package graph one-way.
+// fetcher contracts Snapshot consumes. They exist so tests can mock the
+// readers without dialing NATS or writing files.
 type AgentReader interface {
 	Agents(ctx context.Context) ([]AgentInfo, error)
 }

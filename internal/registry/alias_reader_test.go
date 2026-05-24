@@ -1,4 +1,4 @@
-package sources
+package registry
 
 import (
 	"context"
@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-func TestAliasFile_MissingFileReturnsEmpty(t *testing.T) {
-	a := NewAliasFile(filepath.Join(t.TempDir(), "nope"))
+func TestAliasReader_MissingFileReturnsEmpty(t *testing.T) {
+	a := NewAliasReader(filepath.Join(t.TempDir(), "nope"))
 	m, err := a.Aliases(context.Background())
 	if err != nil {
 		t.Fatalf("missing file should not error: %v", err)
@@ -18,7 +18,7 @@ func TestAliasFile_MissingFileReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestAliasFile_ParsesWellFormedEntries(t *testing.T) {
+func TestAliasReader_ParsesWellFormedEntries(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "orch-aliases")
 	if err := os.WriteFile(path, []byte(`
@@ -31,7 +31,7 @@ verifier=%99
 `), 0o644); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
-	a := NewAliasFile(path)
+	a := NewAliasReader(path)
 	m, err := a.Aliases(context.Background())
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -47,13 +47,13 @@ verifier=%99
 	}
 }
 
-func TestAliasFile_MalformedLinesSurfaceErrorButKeepValidEntries(t *testing.T) {
+func TestAliasReader_MalformedLinesSurfaceErrorButKeepValidEntries(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "orch-aliases")
 	if err := os.WriteFile(path, []byte("good=%64\nbroken-line-no-equals\nalso-good=%99\n"), 0o644); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
-	a := NewAliasFile(path)
+	a := NewAliasReader(path)
 	m, err := a.Aliases(context.Background())
 	if err == nil {
 		t.Errorf("malformed line should surface error")

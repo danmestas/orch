@@ -170,9 +170,9 @@ func TestParseAgentInfo_SurfacesInstanceIDInMetadata(t *testing.T) {
 	// parseAgentInfo unchanged. This is the contract orch's join code
 	// relies on for promoting slug → Worker.InstanceID.
 	//
-	// (parseAgentInfo lives in internal/registry/sources/. We test the
-	// projection here at the Join boundary because the metadata map is
-	// the public surface — sources/nats_test.go covers the parse itself.)
+	// (parseAgentInfo lives in nats_reader.go in this package. We test
+	// the projection here at the Join boundary because the metadata map
+	// is the public surface — nats_reader_test.go covers the parse itself.)
 	a := AgentInfo{
 		Metadata: map[string]string{
 			"pane_id":     "%64",

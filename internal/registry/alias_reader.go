@@ -1,4 +1,4 @@
-package sources
+package registry
 
 import (
 	"bufio"
@@ -11,14 +11,18 @@ import (
 	"strings"
 )
 
-// AliasFile is the AliasReader backed by ~/.config/orch-aliases (or the
-// path overriden in the constructor).
+// AliasReaderFile is the AliasReader backed by ~/.config/orch-aliases (or
+// the path overridden in the constructor).
 //
 // Format: one entry per line, "name=%pane_id". Lines starting with "#"
 // and blank lines are ignored. Whitespace around "=" is tolerated.
 //
 // File absent is NOT an error — operators may run without aliases.
-type AliasFile struct {
+//
+// Per ADR-0003 the alias file is not a separate source of truth; it is
+// an operator-side overlay applied to the agent record during Snapshot.
+// The reader is exposed so tests can inject deterministic alias maps.
+type AliasReaderFile struct {
 	Path string
 }
 
@@ -31,20 +35,20 @@ func DefaultAliasPath() string {
 	return filepath.Join(home, ".config", "orch-aliases")
 }
 
-// NewAliasFile constructs an AliasFile reader. Empty path resolves via
+// NewAliasReader constructs an AliasReaderFile. Empty path resolves via
 // DefaultAliasPath.
-func NewAliasFile(path string) *AliasFile {
+func NewAliasReader(path string) *AliasReaderFile {
 	if path == "" {
 		path = DefaultAliasPath()
 	}
-	return &AliasFile{Path: path}
+	return &AliasReaderFile{Path: path}
 }
 
 // Aliases parses the alias file. Returns an empty map (not an error) when
 // the file is absent. Malformed lines are skipped with a stderr-style
 // error wrap returned alongside whatever did parse — callers usually
 // ignore the error and use the partial map.
-func (a *AliasFile) Aliases(ctx context.Context) (map[string]string, error) {
+func (a *AliasReaderFile) Aliases(ctx context.Context) (map[string]string, error) {
 	out := map[string]string{}
 	f, err := os.Open(a.Path)
 	if err != nil {

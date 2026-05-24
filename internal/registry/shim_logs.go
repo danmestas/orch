@@ -1,4 +1,4 @@
-package sources
+package registry
 
 import (
 	"context"
@@ -10,15 +10,17 @@ import (
 )
 
 // ShimLogs scans ~/.cache/orch-shim/<pct-pane>.log for diagnostic context.
-// This is a low-priority source: the join doesn't depend on it for
-// correctness, but the file's presence + mtime is useful when a worker
-// looks dead on the bus and an operator needs to know if the shim ever
-// started.
 //
-// The current registry consumes nothing from shim logs (the proposal
-// lists this as "optional, ad-hoc diagnostic fields"). The reader is in
-// place so future Worker fields (e.g. LastShimRestart) can flow without
-// reshaping the source interface set.
+// This is a recovery / diagnostic helper, NOT a source of truth.
+// Snapshot does not consume it: ADR-0003 makes $SRV.INFO.agents the
+// single source of truth and a worker absent from the bus is not in the
+// registry. The shim-log path is useful when an operator needs to know
+// whether a shim ever started (presence + mtime) for a pane that looks
+// dead on the bus.
+//
+// Kept in the registry package so future Worker fields (e.g.
+// LastShimRestart) can flow through Snapshot without reshaping a public
+// reader interface.
 type ShimLogs struct {
 	Dir string
 }
@@ -33,7 +35,7 @@ func DefaultShimLogDir() string {
 	return filepath.Join(home, ".cache", "orch-shim")
 }
 
-// NewShimLogs constructs a ShimLogs reader. Empty dir resolves via
+// NewShimLogs constructs a ShimLogs helper. Empty dir resolves via
 // DefaultShimLogDir.
 func NewShimLogs(dir string) *ShimLogs {
 	if dir == "" {
