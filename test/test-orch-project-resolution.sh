@@ -59,11 +59,11 @@ mkdir -p "$SANDBOX/projects/another"
 export ORCH_PROJECTS_ROOT="$SANDBOX/projects"
 
 # Build a stub PATH with NO zoxide installed (simulating a user without zoxide).
-# Copy orch-spawn + its sibling binaries it depends on (orch-register,
-# tmux, jq, suit-prepare can be missing — we only test --project resolution).
+# Copy orch-spawn + its sibling binaries it depends on (tmux, jq;
+# suit-prepare can be missing — we only test --project resolution).
 NOZX_BIN="$SANDBOX/nozx-bin"
 mkdir -p "$NOZX_BIN"
-for b in orch-spawn orch-register tmux jq fswatch; do
+for b in orch-spawn tmux jq fswatch; do
     src=$(command -v "$b" 2>/dev/null) || continue
     ln -sf "$src" "$NOZX_BIN/$b"
 done
@@ -79,7 +79,7 @@ cat > "$FAKE_ZOXIDE_BIN/zoxide" <<'EOT'
 exit 1
 EOT
 chmod +x "$FAKE_ZOXIDE_BIN/zoxide"
-for b in orch-spawn orch-register tmux jq fswatch; do
+for b in orch-spawn tmux jq fswatch; do
     src=$(command -v "$b" 2>/dev/null) || continue
     ln -sf "$src" "$FAKE_ZOXIDE_BIN/$b"
 done

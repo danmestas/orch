@@ -35,7 +35,7 @@ skip() {
 
 # ---------- Test 1: orch-* bins on PATH ----------
 log "=== T1: orch-* binaries on PATH ==="
-for bin in orch orch-spawn orch-tell orch-ask orch-peek orch-claim-operator orch-version; do
+for bin in orch orch-spawn orch-version; do
     if command -v "$bin" >/dev/null 2>&1; then
         assert "$bin on PATH" "found" "found"
     else

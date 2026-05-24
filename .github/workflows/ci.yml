@@ -182,7 +182,6 @@ jobs:
           cd "$ORCH_ROOT"
           export PATH="$PWD/bin:$PATH"
           declare -a tests=(
-            test/test-orch-claim-operator.sh
             test/test-orch-peek.sh
             test/test-orch-subscribe-real.sh
             test/test-suit-integration.sh

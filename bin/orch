@@ -1,43 +1,52 @@
 #!/usr/bin/env bash
-# orch — subcommand dispatcher.
+# orch — top-level subcommand dispatcher.
 #
-# Lets the operator type 'orch up' / 'orch down' rather than 'orch-up' /
-# 'orch-down'. Forwards any `orch <subcommand> [args...]` to the
-# corresponding `orch-<subcommand>` binary.
+# Issue #189 friction points 1 + 3: this is a lazy-build shim around the
+# Go binary at cmd/orch/. Built-in Go subcommands (tell / ask / peek /
+# spy / migrate-aliases) are handled in-process; unknown subcommands are
+# forwarded to a sibling `orch-<sub>` binary on PATH (preserves the
+# legacy dispatch model for orch up / orch down / orch spawn / etc.).
 #
-# 'orch' with no args, '--help', or 'help' prints this dispatcher's help.
+# Same lazy-build pattern as bin/orch-workflow.
 set -euo pipefail
 
-if [ $# -eq 0 ] || [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "help" ]; then
-    cat <<'EOT'
-orch — lightweight, extensible substrate for autonomous long-running
-multi-agent coordination on tmux.
+# Locate the package root. Walk up from this script's location until we
+# find a go.mod file.
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+pkg_root="$script_dir"
+while [ ! -f "$pkg_root/go.mod" ]; do
+    parent=$(dirname "$pkg_root")
+    if [ "$parent" = "$pkg_root" ]; then
+        echo "orch: cannot find go.mod above $script_dir" >&2
+        exit 1
+    fi
+    pkg_root="$parent"
+done
 
-Usage:
-  orch <subcommand> [args...]
-  orch up         complete the install on this machine (verifies deps,
-                  symlinks hooks/skills, merges hooks into settings.json)
-  orch down       tear down install state on this machine (preserves the
-                  npm package itself — use `npm uninstall -g @agent-ops/orch`
-                  for that)
-  orch version    binary version + drift report
+src_dir="$pkg_root/cmd/orch"
+build_dir="$pkg_root/.bin"
+built="$build_dir/orch"
 
-Operators rarely need to invoke other orch-* binaries by hand. The
-orch-driver skill (loaded into Claude Code) calls them on your behalf.
-
-Run 'orch <subcommand> --help' for subcommand details.
-EOT
-    exit 0
+needs_build=0
+if [ ! -x "$built" ]; then
+    needs_build=1
+else
+    # Rebuild if any .go file under cmd/orch, internal/registry, or
+    # internal/synadia is newer than the cached binary.
+    if find "$src_dir" "$pkg_root/internal/registry" "$pkg_root/internal/synadia" \
+        -name '*.go' -newer "$built" -print -quit 2>/dev/null | grep -q .; then
+        needs_build=1
+    fi
 fi
 
-cmd=$1; shift
-target="orch-$cmd"
-
-if ! command -v "$target" >/dev/null 2>&1; then
-    echo "orch: unknown subcommand '$cmd'" >&2
-    echo "       (looked for binary named '$target' on PATH; not found)" >&2
-    echo "       run 'orch --help' for available subcommands" >&2
-    exit 1
+if [ "$needs_build" -eq 1 ]; then
+    if ! command -v go >/dev/null 2>&1; then
+        echo "orch: 'go' not on PATH; cannot build $src_dir" >&2
+        exit 1
+    fi
+    mkdir -p "$build_dir"
+    (cd "$pkg_root" && go build -o "$built" ./cmd/orch) \
+        || { echo "orch: build failed" >&2; exit 1; }
 fi
 
-exec "$target" "$@"
+exec "$built" "$@"

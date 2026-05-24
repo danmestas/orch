@@ -86,7 +86,7 @@ orch-spawn claude --project <project> --outfit <outfit> --cut <cut> [--accessory
 After spawn returns the pane id:
 
 ```sh
-orch-tell <pane> "<initial brief — what you want the worker to do>"
+orch tell <pane> "<initial brief — what you want the worker to do>"
 # For push-notifications on agent events, subscribe to the Synadia bus:
 nats sub --raw 'agents.>' &
 ```

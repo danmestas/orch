@@ -20,7 +20,7 @@ tmux capture-pane -t "$PANE" -pS -4000 > "$BEFORE"
 LAST_LINE=$(tac "$BEFORE" | grep -m1 -v '^[[:space:]]*$' || true)
 
 T_SEND_NS=$(now_ns)
-orch-tell "$PANE" "$PROMPT"
+orch tell "$PANE" "$PROMPT"
 
 case "$METHOD" in
     shim)

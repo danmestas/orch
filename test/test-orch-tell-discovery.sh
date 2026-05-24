@@ -34,7 +34,11 @@ command -v nats-server >/dev/null 2>&1 \
 command -v orch-agent-shim >/dev/null 2>&1 \
     || { echo "SKIP: orch-agent-shim not on PATH (go build ./cmd/orch-agent-shim)"; exit 77; }
 
-ORCH_TELL="$ROOT/bin/orch-tell"
+ORCH_BIN="$ROOT/bin/orch"
+# orch-tell (the bash CLI) was collapsed into `orch tell` (a Go subcommand)
+# in #189. ORCH_TELL is shell-expanded unquoted at call sites so the two
+# words land in argv as separate tokens.
+ORCH_TELL="$ORCH_BIN tell"
 
 fail() { echo "FAIL: $*" >&2; [ -f "${SHIM_LOG:-/dev/null}" ] && cat "$SHIM_LOG" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
@@ -105,7 +109,7 @@ nats --server="$NATS_URL" sub --count=1 "$PROMPT_SUBJECT" > "$RECV_LOG" 2>&1 &
 SUB_PID=$!
 sleep 0.2   # brief settle for the subscriber to attach
 
-ORCH_TELL_DISCOVERY_TIMEOUT=2s "$ORCH_TELL" "$PANE" "hello from test" \
+ORCH_TELL_DISCOVERY_TIMEOUT=2s $ORCH_TELL "$PANE" "hello from test" \
     || fail "orch-tell discovery path returned non-zero"
 
 # Wait for subscriber to capture the message (up to 3 s).
@@ -121,7 +125,7 @@ kill "$SUB_PID" 2>/dev/null || true
 # ── assert: discovery no-match → actionable error ────────────────────────────
 BAD_PANE="%0001"
 ERR_OUT="$TMPDIR_OWN/err.txt"
-if "$ORCH_TELL" "$BAD_PANE" "should fail" >"$TMPDIR_OWN/out.txt" 2>"$ERR_OUT"; then
+if $ORCH_TELL "$BAD_PANE" "should fail" >"$TMPDIR_OWN/out.txt" 2>"$ERR_OUT"; then
     fail "orch-tell should have exited non-zero for unregistered pane"
 fi
 grep -q "not registered on the bus\|orch-tell:" "$ERR_OUT" \
@@ -134,7 +138,7 @@ pass "orch-tell no-match: actionable error emitted"
 # something (the terminator means collect returns immediately).
 COLLECT_OUT="$TMPDIR_OWN/collect.out"
 COLLECT_ERR="$TMPDIR_OWN/collect.err"
-"$ORCH_TELL" --collect --timeout 3 "$PANE" "collect test" \
+$ORCH_TELL --collect --timeout 3 "$PANE" "collect test" \
     > "$COLLECT_OUT" 2>"$COLLECT_ERR" || rc=$?
 rc=${rc:-0}
 # rc==0 (clean terminator) or any non-5xx code is acceptable here since the

@@ -10,7 +10,7 @@
 #   - nats-server (brew install nats-server)
 #   - nats CLI (brew install nats-io/nats-tools/nats)
 #   - orch-agent-shim on PATH (built via go build ./cmd/orch-agent-shim)
-#   - orch-spawn, orch-register on PATH
+#   - orch-spawn on PATH
 #
 # Usage:
 #   bash test/test-orch-spawn-shim.sh
@@ -33,7 +33,6 @@ require() { command -v "$1" >/dev/null 2>&1 || { echo "SKIP: $1 not on PATH"; ex
 require tmux
 require nats
 require orch-spawn
-require orch-register
 command -v nats-server >/dev/null 2>&1 || { echo "SKIP: nats-server not on PATH (brew install nats-server)"; exit 77; }
 command -v orch-agent-shim >/dev/null 2>&1 || { echo "SKIP: orch-agent-shim not on PATH (go build ./cmd/orch-agent-shim)"; exit 77; }
 

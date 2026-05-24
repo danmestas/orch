@@ -109,7 +109,7 @@ orch-interrupt <pane_id|alias> --redirect "<text>" # interrupt + redirect
 ```
 
 See `bin/orch-interrupt`. Resolves pane → 3-tuple via `$SRV.INFO.agents`
-(same path `orch-tell` uses), then publishes the verb subject. For
+(same path `orch tell` uses), then publishes the verb subject. For
 redirect, mints an `_INBOX.orch-redirect.*` reply subject and prints it
 so operators can `nats sub` to observe the new turn's chunks.
 

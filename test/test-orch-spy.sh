@@ -48,8 +48,12 @@ assert_contains() {
     fi
 }
 
-SPY=$(command -v orch-spy)
-[ -x "$SPY" ] || { echo "orch-spy not on PATH"; exit 2; }
+ORCH=$(command -v orch)
+[ -x "$ORCH" ] || { echo "orch not on PATH"; exit 2; }
+# `orch spy` is a subcommand of the orch Go binary post-#189. Existing
+# call sites use $SPY as a single shell word, so we expand it unquoted
+# (the test harness owns the value, so word-splitting is safe).
+SPY="$ORCH spy"
 
 SANDBOX=$(mktemp -d)
 export ORCH_SEND_LOG="$SANDBOX/send.log"
@@ -203,19 +207,45 @@ chmod +x "$NATS_STUB_DIR/orch-registry"
 export PATH="$NATS_STUB_DIR:$PATH"
 export NATS_URL="nats://stub.invalid:4222"
 
+# Post-#189 fixture-injection seam for the new `orch` Go binary. See the
+# matching block in test-orch-observer-role.sh.
+ORCH_REGISTRY_FIXTURE_FILE="$SANDBOX/orch-registry-fixture.json"
+export ORCH_REGISTRY_FIXTURE_FILE
+
 # Helper: rewrite the fixture file from one or more "pane role cwd" tuples.
 # Each tuple is a single string; whitespace-split into 3 fields.
 # Usage: set_agents "%900 worker /tmp" "%901 operator /home/me"
 set_agents() {
     : > "$NATS_STUB_FIXTURES"
     local entry pane role cwd
+    local rows_json="[]"
     for entry in "$@"; do
         # shellcheck disable=SC2086  # word splitting is intentional here
         set -- $entry
         pane=$1; role=$2; cwd=$3
         jq -nc --arg p "$pane" --arg r "$role" --arg c "$cwd" --arg a "claude" \
             '{pane_id:$p, role:$r, cwd:$c, agent:$a}' >> "$NATS_STUB_FIXTURES"
+        rows_json=$(jq -nc --argjson prev "$rows_json" --arg p "$pane" --arg r "$role" --arg c "$cwd" --arg a "claude" '
+            $prev + [{
+                pane_id: $p,
+                instance_id: "stub-inst",
+                name: ($p | sub("^%"; "pct")),
+                role: $r,
+                outfit: "",
+                agent: $a,
+                cwd: $c,
+                owner: "stub",
+                session: "",
+                alive: true,
+                subjects: {
+                    prompt: ("agents.prompt.stub.fake." + ($p | sub("^%"; "pct"))),
+                    status: "",
+                    hb: ""
+                },
+                metadata: {pane_id: $p, role: $r, cwd: $c, agent: $a}
+            }]')
     done
+    printf '%s\n' "$rows_json" > "$ORCH_REGISTRY_FIXTURE_FILE"
 }
 
 echo "=== suit precheck (skip via ORCH_SPY_SKIP_PRECHECK=1, exercised via PATH) ==="
@@ -223,13 +253,13 @@ echo "=== suit precheck (skip via ORCH_SPY_SKIP_PRECHECK=1, exercised via PATH) 
 # Verify the precheck triggers when suit is not on PATH AND
 # ORCH_SPY_SKIP_PRECHECK is not set. Build a minimal PATH without suit.
 mkdir -p "$SANDBOX/no-suit-bin"
-for b in jq tmux orch-spawn orch-tell nats orch-registry; do
+for b in jq tmux orch orch-spawn nats orch-registry; do
     src=$(command -v "$b" 2>/dev/null) || continue
     ln -sf "$src" "$SANDBOX/no-suit-bin/$b"
 done
 TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
 ORCH_SPY_SKIP_PRECHECK= PATH="$SANDBOX/no-suit-bin:/usr/bin:/bin" \
-    "$SPY" operator "test" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
+    $SPY operator "test" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
 assert "precheck: rc=1 when suit absent" 1 "$rc"
 assert "precheck: stdout empty" "" "$(cat "$TMP_OUT")"
 assert_contains "precheck: stderr names suit dependency" "suit not on PATH" "$(cat "$TMP_ERR")"
@@ -241,7 +271,7 @@ echo "=== fast error-path tests ==="
 
 # 1) missing args → usage on stderr, rc=1
 TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
-"$SPY" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
+$SPY >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
 assert "no args: rc=1" 1 "$rc"
 assert "no args: stdout empty" "" "$(cat "$TMP_OUT")"
 assert_contains "no args: stderr names target requirement" "target required" "$(cat "$TMP_ERR")"
@@ -249,14 +279,14 @@ rm -f "$TMP_OUT" "$TMP_ERR"
 
 # 2) missing mission → rc=1
 TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
-"$SPY" operator >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
+$SPY operator >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
 assert "operator-no-mission: rc=1" 1 "$rc"
 assert_contains "operator-no-mission: stderr names mission" "mission text required" "$(cat "$TMP_ERR")"
 rm -f "$TMP_OUT" "$TMP_ERR"
 
 # 3) invalid target → rc=1 with helpful error
 TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
-"$SPY" bogus "audit something" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
+$SPY bogus "audit something" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
 assert "invalid-target: rc=1" 1 "$rc"
 assert_contains "invalid-target: stderr names operator/pane convention" "operator" "$(cat "$TMP_ERR")"
 rm -f "$TMP_OUT" "$TMP_ERR"
@@ -264,21 +294,21 @@ rm -f "$TMP_OUT" "$TMP_ERR"
 # 4) target=operator with no operator agent on the bus → rc=1
 set_agents  # empty fixture
 TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
-"$SPY" operator "audit me" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
+$SPY operator "audit me" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
 assert "operator-no-agent: rc=1" 1 "$rc"
 assert_contains "operator-no-agent: stderr points to ORCH_ROLE=operator" "ORCH_ROLE=operator" "$(cat "$TMP_ERR")"
 rm -f "$TMP_OUT" "$TMP_ERR"
 
 # 5) target=%bogus pane (not registered on the bus) → rc=1
 TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
-"$SPY" %999 "audit something" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
+$SPY %999 "audit something" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
 assert "unknown-pane: rc=1" 1 "$rc"
 assert_contains "unknown-pane: stderr names orch registry" "orch registry" "$(cat "$TMP_ERR")"
 rm -f "$TMP_OUT" "$TMP_ERR"
 
 # 6) --quiet on error path → both streams empty
 TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
-"$SPY" --quiet operator "audit me" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
+$SPY --quiet operator "audit me" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
 assert "quiet-error: rc=1" 1 "$rc"
 assert "quiet-error: stdout empty" "" "$(cat "$TMP_OUT")"
 assert "quiet-error: stderr empty" "" "$(cat "$TMP_ERR")"
@@ -286,7 +316,7 @@ rm -f "$TMP_OUT" "$TMP_ERR"
 
 # 7) --mission-file with missing path → rc=1
 TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
-"$SPY" operator --mission-file /no/such/file >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
+$SPY operator --mission-file /no/such/file >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
 assert "missing-mission-file: rc=1" 1 "$rc"
 assert_contains "missing-mission-file: stderr cites path" "/no/such/file" "$(cat "$TMP_ERR")"
 rm -f "$TMP_OUT" "$TMP_ERR"
@@ -330,7 +360,7 @@ MOCK
     # 8) Happy path: spy resolves operator agent, mock-spawns, sends brief.
     TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
     PATH="$MOCK_BIN:$PATH" ORCH_TELL_MAX_WAIT=10 \
-        "$SPY" operator "audit my session for skill-trigger gaps" \
+        $SPY operator "audit my session for skill-trigger gaps" \
         >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
     assert "happy-path operator: rc=0" 0 "$rc"
     [ "$rc" != 0 ] && echo "    (stderr: $(head -3 "$TMP_ERR"))"
@@ -343,7 +373,7 @@ MOCK
 
     # 10) Brief content via --dry-run-brief (deterministic — no capture-pane
     # rendering quirks). Verify all required envelope fields appear.
-    BRIEF_OUT=$("$SPY" --dry-run-brief operator "audit my session for skill-trigger gaps" 2>/dev/null)
+    BRIEF_OUT=$($SPY --dry-run-brief operator "audit my session for skill-trigger gaps" 2>/dev/null)
     assert_contains "brief: target_pane_id field" "target_pane_id:" "$BRIEF_OUT"
     assert_contains "brief: target_transcript_jsonl field" "target_transcript_jsonl:" "$BRIEF_OUT"
     assert_contains "brief: target_cwd field" "target_cwd:" "$BRIEF_OUT"
@@ -384,7 +414,7 @@ MOCK
 
         TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
         PATH="$MOCK_BIN:$PATH" ORCH_TELL_MAX_WAIT=10 \
-            "$SPY" %900 "audit %900's behavior" \
+            $SPY %900 "audit %900's behavior" \
             >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
         assert "happy-path %worker: rc=0" 0 "$rc"
         [ "$rc" != 0 ] && echo "    (stderr: $(head -3 "$TMP_ERR"))"
@@ -392,7 +422,7 @@ MOCK
         rm -f "$TMP_OUT" "$TMP_ERR"
 
         # Brief content for %worker target via dry-run.
-        BRIEF_W=$("$SPY" --dry-run-brief %900 "audit %900" 2>/dev/null)
+        BRIEF_W=$($SPY --dry-run-brief %900 "audit %900" 2>/dev/null)
         assert_contains "brief %worker: target_pane_id=%900" "target_pane_id:          %900" "$BRIEF_W"
         assert_contains "brief %worker: target_kind=worker" "target_kind:             worker" "$BRIEF_W"
         assert_contains "brief %worker: target_cwd resolved" "target_cwd:              $WORKER_CWD" "$BRIEF_W"
@@ -401,12 +431,12 @@ MOCK
     # 12) Mission via stdin (single dash) — verify via dry-run.
     # Reset to operator-only fixture.
     set_agents "$MOCK_PANE operator $OP_CWD"
-    BRIEF_S=$(echo "mission from stdin" | "$SPY" --dry-run-brief operator - 2>/dev/null)
+    BRIEF_S=$(echo "mission from stdin" | $SPY --dry-run-brief operator - 2>/dev/null)
     assert_contains "mission via stdin (-): text in brief" "mission from stdin" "$BRIEF_S"
 
     # 13) Mission via --mission-file — verify via dry-run.
     MFILE=$(mktemp); echo "mission from file" > "$MFILE"
-    BRIEF_F=$("$SPY" --dry-run-brief operator --mission-file "$MFILE" 2>/dev/null)
+    BRIEF_F=$($SPY --dry-run-brief operator --mission-file "$MFILE" 2>/dev/null)
     assert_contains "mission via --mission-file: text in brief" "mission from file" "$BRIEF_F"
     rm -f "$MFILE"
 
