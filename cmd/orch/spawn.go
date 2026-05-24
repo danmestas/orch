@@ -91,8 +91,25 @@ func runSpawn(args []string) error {
 		return err
 	}
 
-	// Spawn the pane and run readiness verification.
-	paneID, spawnRC, err := opts.spawnPane()
+	// Spawn the pane and run readiness verification. Dispatch by
+	// persistence engine; the composition table already validated the
+	// (persistence, layout) pair at flag-parse, so we don't re-check it
+	// here. No Engine interface: the switch IS the seam (Rule-of-Three —
+	// extract when a third engine, e.g. zmx, lands).
+	var (
+		paneID  string
+		spawnRC int
+	)
+	switch opts.Persistence {
+	case "tmux":
+		paneID, spawnRC, err = opts.spawnPane()
+	case "cmux":
+		paneID, spawnRC, err = opts.spawnPaneCmux()
+	default:
+		// validateComposition should have rejected this. Belt-and-suspenders
+		// so a future composition table edit can't silently fall through.
+		return fmt.Errorf("orch spawn: no spawn implementation for persistence=%q (composition table allowed it but dispatch did not; this is a bug)", opts.Persistence)
+	}
 	if err != nil {
 		return err
 	}
