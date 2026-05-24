@@ -65,3 +65,6 @@ extensions/*/.bin/
 /orch-workflow
 /orch-engines
 /orch-subtree
+
+# goreleaser scratch output dir (configured in .goreleaser.yaml dist: field)
+/.goreleaser-dist/
