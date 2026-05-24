@@ -158,7 +158,7 @@ NATS_URL=$(cat ~/.sesh/hub.nats.url) \
          --dangerously-load-development-channels 'plugin:nats-channel@synadia-plugins'
 ```
 
-The `--dangerously-load-development-channels` flag is REQUIRED — without it, the plugin's MCP server runs but channel push (NATS → claude turn) is dormant.
+The `--dangerously-load-development-channels` flag is REQUIRED — without it, the plugin's MCP server runs but channel push (NATS → claude turn) is dormant. The flag is hidden from `claude --help` (verified against 2.1.126) but is still accepted; don't search the help output for it.
 
 ### Verified end-to-end
 
