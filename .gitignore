@@ -42,6 +42,21 @@ extensions/*/.bin/
 # Lazy-built CLI binaries (bin/orch-workflow → cmd/orch-workflow)
 /.bin/
 
+# Vendored binaries fetched by scripts/postinstall.js for npm-installed
+# users. Never committed; generated at install time.
+/vendor/
+
+# goreleaser build outputs. dist/schema/*.json is committed (spawnspec
+# wire format reference) — keep that, ignore everything else goreleaser
+# drops here.
+/dist/orch_*
+/dist/orch-*
+/dist/artifacts.json
+/dist/metadata.json
+/dist/config.yaml
+/dist/CHANGELOG.md
+/dist/checksums.txt
+
 # Go binaries accidentally built into the repo root by `go build ./cmd/<name>/`
 # (the correct invocation is `go build -o .bin/<name> ./cmd/<name>`).
 /orch-goal-stop-account-daemon

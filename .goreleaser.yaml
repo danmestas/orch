@@ -1,0 +1,152 @@
+# .goreleaser.yaml — multi-platform Go binary builds for the orch npm package.
+#
+# Why this exists: bin/orch-subtree and bin/orch-workflow are bash shims that
+# lazy-build Go binaries on first invocation. That works on a dev checkout
+# (Go source is sitting right there alongside go.mod) but breaks for users
+# installed via `npm install -g @agent-ops/orch` because the npm tarball
+# does not ship Go source. Goreleaser builds the binaries once per release
+# and uploads them as GitHub Release assets; scripts/postinstall.js
+# downloads the right platform archive at npm install time and unpacks it
+# into vendor/. The shims then exec the vendored binary.
+#
+# Mirrors the synadia-agent-shim layout — same archive naming, same per-OS
+# per-arch matrix, same fetch-from-GH-Release postinstall pattern.
+
+version: 2
+
+project_name: orch
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: orch
+    main: ./cmd/orch
+    binary: orch
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.CommitDate}}
+
+  - id: orch-subtree
+    main: ./cmd/orch-subtree
+    binary: orch-subtree
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.CommitDate}}
+
+  - id: orch-workflow
+    main: ./cmd/orch-workflow
+    binary: orch-workflow
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.CommitDate}}
+
+  - id: orch-registry
+    main: ./cmd/orch-registry
+    binary: orch-registry
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.CommitDate}}
+
+  - id: orch-goal-stop-account-daemon
+    main: ./cmd/orch-goal-stop-account-daemon
+    binary: orch-goal-stop-account-daemon
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.CommitDate}}
+
+  - id: orch-cc-subagent-bridge
+    main: ./extensions/claudecode-subagent-panel/cmd/orch-cc-subagent-bridge
+    binary: orch-cc-subagent-bridge
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.CommitDate}}
+
+archives:
+  - id: orch
+    # One archive per OS/arch containing all Go binaries. scripts/postinstall.js
+    # extracts the whole archive into vendor/ in one shot — no per-binary URL.
+    ids:
+      - orch
+      - orch-subtree
+      - orch-workflow
+      - orch-registry
+      - orch-goal-stop-account-daemon
+      - orch-cc-subagent-bridge
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: danmestas
+    name: orch
+  draft: false
+  prerelease: auto
+  header: |
+    ## orch {{ .Tag }}
+
+    Lightweight, extensible substrate for autonomous long-running
+    multi-agent coordination on tmux.
+
+    npm-distributed via `@agent-ops/orch` — the postinstall fetches the
+    right platform archive from this release and unpacks the Go binaries
+    into `vendor/` inside the installed package. The bash shims
+    (`orch-subtree`, `orch-workflow`, ...) exec the vendored binaries
+    instead of lazy-building from source.

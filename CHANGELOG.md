@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.2.1 (2026-05-24)
+
+Install fix for v0.2.0: `npm install -g @agent-ops/orch` succeeded but
+the lazy-build bash shims (`orch`, `orch-subtree`, `orch-workflow`, the
+`orch-cc-subagent-bridge` extension) failed at first invocation with
+`cannot find go.mod above /opt/hostedtoolcache/node/.../bin` because the
+npm tarball does not ship Go source. `orch --help` was the first symptom
+because `bin/orch` itself is a lazy-build shim around `cmd/orch/` (the
+consolidated tell/ask/peek/spy/spawn binary from #189).
+
+Fix mirrors the synadia-agent-shim pattern: goreleaser builds platform
+binaries on tag, uploads them to the GitHub Release, and the postinstall
+fetches the right archive for the user's OS/arch and unpacks into
+`vendor/`. The bash shims now exec the vendored binary on installed
+machines, falling back to lazy-build only on dev checkouts where
+`go.mod` is reachable.
+
+- **`.goreleaser.yaml`** — multi-platform Go builds for darwin + linux ×
+  amd64 + arm64. One archive per OS/arch
+  (`orch_${version}_${os}_${arch}.tar.gz`) bundling all six Go
+  binaries: `orch`, `orch-subtree`, `orch-workflow`, `orch-registry`,
+  `orch-goal-stop-account-daemon`, `orch-cc-subagent-bridge`.
+- **`scripts/postinstall.js`** — fetches the platform archive from
+  `github.com/danmestas/orch/releases/download/v${version}/...` and
+  extracts the binaries into `vendor/`. Skips when
+  `ORCH_SKIP_DOWNLOAD=1` (CI / offline / vendored installs) or when the
+  vendored binaries already match the package version (idempotent
+  re-installs). Symlink farm + fleet doctrine injection unchanged.
+- **`bin/orch`, `bin/orch-subtree`, `bin/orch-workflow`** — vendor-first
+  resolution. Lazy-build is now the fallback for dev checkouts only;
+  the error message points the operator at
+  `npm install -g @agent-ops/orch` when neither path is available.
+- **`bin/orch-registry`, `bin/orch-goal-stop-account-daemon`** — new
+  shims with the same vendor-first pattern, so npm-installed users get
+  them on PATH (previously only present after `install.sh` lazy-built
+  `orch-registry` directly into `~/.local/bin`).
+- **`bin/orch-up`** — extension launch loop checks `vendor/<basename>`
+  unconditionally (not gated on the cmd source dir being present), so
+  installed users without Go source still resolve
+  `orch-cc-subagent-bridge`.
+- **`.github/workflows/release.yml`** — adds a `goreleaser` job that
+  runs before `publish`; `publish` depends on `goreleaser`. New smoke
+  step validates the full install path: install the just-published
+  package, exec each vendored binary, fail loudly if any binary falls
+  through to the `cannot find go.mod` error.
+- **`package.json`** — version bump to `0.2.1`; new bin entries for
+  `orch-subtree`, `orch-workflow`, `orch-registry`,
+  `orch-goal-stop-account-daemon`. `files` manifest no longer ships
+  `cmd/`, `internal/`, `go.mod`, `go.sum` — installed users get
+  pre-built binaries via the postinstall fetch.
+
+The tag push is operator action — push `v0.2.1` after this PR merges.
+
 ## 0.2.0 (2026-05-24)
 
 First minor release after the v0.1.x bash era. Highlights:

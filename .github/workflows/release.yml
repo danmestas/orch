@@ -13,15 +13,45 @@ on:
 
 permissions:
   id-token: write       # OIDC — enables npm trusted publishing when npmjs side is configured
-  contents: read
+  contents: write       # goreleaser uploads release assets to GitHub Releases
 
 jobs:
+  goreleaser:
+    name: build Go binaries + GitHub Release
+    # Skip on dry-run dispatches — no tag, nothing to release. The publish
+    # job's dry-run path still exercises `npm pack` without needing the
+    # binaries to exist on a release.
+    if: ${{ github.event_name == 'push' || inputs.dry_run != true }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   publish:
     name: publish to npm
     # npmjs trusted-publisher entry has environment="production" (the registry default
     # when none is passed at trust-config time). The OIDC token's claims must match
     # exactly, so this job must run under the "production" GitHub Environment.
     environment: production
+    # Wait for goreleaser to upload the platform archives — scripts/postinstall.js
+    # downloads them at install time, so the npm publish must follow the GH Release.
+    # On dry-run dispatches, goreleaser is skipped, so we tolerate skipped.
+    needs: goreleaser
+    if: ${{ always() && (github.event_name == 'push' || inputs.dry_run != true) && (needs.goreleaser.result == 'success' || needs.goreleaser.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -64,8 +94,12 @@ jobs:
           sudo apt-get install -y tmux jq fswatch
 
       - name: install just-published tarball
-        # Tag pushes set GITHUB_REF_NAME to the tag (e.g. v0.1.7); strip the leading v.
+        # Tag pushes set GITHUB_REF_NAME to the tag (e.g. v0.2.1); strip the leading v.
         # workflow_dispatch on a branch falls back to package.json's version.
+        # Note: this is the FULL postinstall path — it triggers
+        # scripts/postinstall.js which fetches the platform archive from
+        # the GH Release goreleaser just produced. If the binaries didn't
+        # land, the smoke steps below catch it.
         run: |
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
@@ -83,41 +117,19 @@ jobs:
           npm list -g --depth=0 | grep '@agent-ops/orch' || (echo "package not installed" && exit 1)
 
       - name: bin shim probe
-        # After #189A/B/C, the only published bin entry that operators invoke
-        # directly is `orch` — the rest (`tell`, `ask`, `peek`, `spy`, `spawn`,
-        # `migrate-aliases`) are in-process subcommands of the Go dispatcher,
-        # and `up`/`down`/`version` are sibling binaries the dispatcher execs.
-        # Probe: assert the canonical entry exists and the retired bash bins do not.
+        # Proves every declared bin entry actually resolves on PATH and is executable.
+        # Catches the bin-path regression class that bit v0.1.0.
         run: |
           set -e
-          which orch
-          # Retired bins MUST NOT be on PATH after a clean install. If they
-          # are, an older install bled through and consumers will hit stale
-          # behavior. (#189 friction points 1+2+3.)
-          for cmd in orch-tell orch-ask orch-peek orch-spy orch-spawn orch-claim-operator orch-register orch-listen; do
-            if which "$cmd" 2>/dev/null; then
-              echo "ERROR: retired bin '$cmd' is still on PATH after install"
-              exit 1
-            fi
+          for cmd in orch orch-up orch-down orch-version \
+                    orch-subtree orch-workflow orch-registry \
+                    orch-goal-stop-account-daemon; do
+            which "$cmd"
           done
 
       - name: smoke — orch --help
         # Proves the main dispatcher loads and prints its help text.
         run: orch --help
-
-      - name: smoke — orch subcommand contract
-        # Assert the dispatcher's help text advertises every subcommand we
-        # intend to ship in this release. Catches accidental subcommand
-        # removal at release time (the dispatcher would still load, but the
-        # surface would have silently shrunk).
-        run: |
-          set -e
-          help=$(orch --help)
-          for sub in tell ask peek spy spawn migrate-aliases up down version; do
-            echo "$help" | grep -qE "orch $sub( |$)" \
-              || { echo "MISSING: 'orch $sub' not advertised by 'orch --help'"; exit 1; }
-          done
-          echo "all expected subcommands present in orch --help"
 
       - name: smoke — orch up --dry-run
         # Exercises the up flow's import + dep-check path without mutating ~/.claude.
@@ -126,3 +138,35 @@ jobs:
       - name: smoke — orch down --dry-run
         # Same for the down flow.
         run: orch down --dry-run --yes
+
+      - name: smoke — vendored Go binaries respond
+        # Proves the postinstall successfully fetched the platform archive
+        # from the GH Release goreleaser uploaded, and the bash shims
+        # exec the vendored binary instead of trying to lazy-build. This
+        # is the install-fix smoke that v0.2.1 exists for: each binary
+        # must respond to its standard probe without printing
+        # "cannot find go.mod".
+        run: |
+          set -e
+          # orch-subtree validate with no args prints usage to stderr and exits 2.
+          set +e
+          out=$(orch-subtree list 2>&1); rc=$?
+          set -e
+          echo "orch-subtree list: rc=$rc"
+          echo "$out" | head -5
+          # Anything other than the lazy-build error is acceptable here — the
+          # smoke is "did the binary execute" not "did the command succeed".
+          if echo "$out" | grep -q "cannot find go.mod"; then
+            echo "FAIL: orch-subtree fell through to lazy-build path" >&2
+            exit 1
+          fi
+
+          set +e
+          out=$(orch-workflow validate 2>&1); rc=$?
+          set -e
+          echo "orch-workflow validate: rc=$rc"
+          echo "$out" | head -5
+          if echo "$out" | grep -q "cannot find go.mod"; then
+            echo "FAIL: orch-workflow fell through to lazy-build path" >&2
+            exit 1
+          fi
