@@ -54,7 +54,7 @@ func WithAliasesFile(path string) Option {
 
 // New constructs a tmux layout engine. The alias file path is resolved
 // at construction time so concurrent spawns can't see it change mid-
-// flight. Resolution order matches internal/registry/sources.DefaultAliasPath
+// flight. Resolution order matches internal/registry.DefaultAliasPath
 // — operator-set ORCH_ALIASES_FILE wins, then $XDG_CONFIG_HOME/orch-aliases,
 // then $HOME/.config/orch-aliases.
 func New(opts ...Option) *Engine {

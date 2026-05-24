@@ -1,15 +1,26 @@
-// Package registry joins the operator-side state sources that today are
-// queried separately by orch-peek, orch-tell, orch-ask, and orch-spy:
+// Package registry is the operator-side worker registry.
 //
-//	NATS $SRV.INFO.agents        live agent metadata (one reply per shim)
-//	agents.hb.>                  per-shim heartbeats
-//	~/.config/orch-aliases       operator-maintained alias → pane_id map
-//	~/.cache/orch-operator.json  operator-pane claim (optional)
-//	~/.cache/orch-shim/*.log     per-shim startup logs (diagnostic only)
+// Per ADR-0003, $SRV.INFO.agents on NATS is the single source of truth
+// for which agents are alive and what they advertise. Everything else
+// the registry consults — the operator's alias file, the legacy
+// operator-claim file, the per-shim heartbeat stream — is an overlay
+// applied during Snapshot, not a sibling source:
 //
-// Consumers ask the registry one question — Snapshot, Lookup, Watch — and
-// get a joined view. The registry is the JOIN; sources of truth stay where
-// they are.
+//	NATS $SRV.INFO.agents        single source of truth (per ADR-0003)
+//	agents.hb.>                  liveness overlay (heartbeat freshness)
+//	~/.config/orch-aliases       display-name overlay (operator override)
+//	~/.cache/orch-operator.json  legacy operator-role overlay (back-compat)
+//	~/.cache/orch-shim/*.log     diagnostic-only, not consumed by Snapshot
+//
+// Consumers ask the registry one question — Snapshot, Lookup, Watch —
+// and get a joined view. The registry is the JOIN; the source of truth
+// stays on the bus.
+//
+// The four reader interfaces (AgentReader, HeartbeatReader, AliasReader,
+// OperatorReader) are seam points for testing — they let tests inject
+// deterministic data without standing up a NATS server or fixturing
+// files on disk. In production, NewNATSReader, NewAliasReader, and
+// NewOperatorReader produce the concrete implementations.
 //
 // See docs/proposals/0005-operator-registry-consolidation.md.
 package registry

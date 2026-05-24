@@ -1,4 +1,4 @@
-package sources
+package registry
 
 import (
 	"context"
@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 )
 
-// OperatorFile is the OperatorReader backed by ~/.cache/orch-operator.json
-// (or the path passed at construction).
+// OperatorReaderFile is the OperatorReader backed by
+// ~/.cache/orch-operator.json (or the path passed at construction).
 //
 // File shape (best-effort — only PaneID is required):
 //
@@ -24,7 +24,12 @@ import (
 // File absent is NOT an error: many operator sessions never write this
 // marker because the shim's metadata.role="operator" already covers the
 // case. The marker exists for legacy / pre-shim sessions.
-type OperatorFile struct {
+//
+// Per ADR-0003 the operator role is a field on the agent record (set via
+// metadata.role); this file is a legacy overlay applied during Snapshot
+// to preserve backwards compatibility. The reader is exposed so tests
+// can inject deterministic operator-pane values.
+type OperatorReaderFile struct {
 	Path string
 }
 
@@ -38,19 +43,19 @@ func DefaultOperatorPath() string {
 	return filepath.Join(home, ".cache", "orch-operator.json")
 }
 
-// NewOperatorFile constructs an OperatorFile reader. Empty path resolves
+// NewOperatorReader constructs an OperatorReaderFile. Empty path resolves
 // via DefaultOperatorPath.
-func NewOperatorFile(path string) *OperatorFile {
+func NewOperatorReader(path string) *OperatorReaderFile {
 	if path == "" {
 		path = DefaultOperatorPath()
 	}
-	return &OperatorFile{Path: path}
+	return &OperatorReaderFile{Path: path}
 }
 
 // OperatorPane returns the operator's pane id, or "" when no marker is
 // present. Read errors that are NOT "file missing" surface as actual
 // errors so a corrupt cache file is visible.
-func (o *OperatorFile) OperatorPane(ctx context.Context) (string, error) {
+func (o *OperatorReaderFile) OperatorPane(ctx context.Context) (string, error) {
 	b, err := os.ReadFile(o.Path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {

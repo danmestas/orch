@@ -1,4 +1,4 @@
-package sources
+package registry
 
 import (
 	"context"
@@ -20,10 +20,10 @@ func TestShimLogs_MissingDirReturnsEmpty(t *testing.T) {
 
 func TestShimLogs_ListsPctLogsOnly(t *testing.T) {
 	dir := t.TempDir()
-	mustCreate(t, filepath.Join(dir, "pct64.log"))
-	mustCreate(t, filepath.Join(dir, "pct99.log"))
-	mustCreate(t, filepath.Join(dir, "stray.txt"))    // ignored (not pct prefix)
-	mustCreate(t, filepath.Join(dir, "pct64.notlog")) // ignored (not .log suffix)
+	mustCreateShimLog(t, filepath.Join(dir, "pct64.log"))
+	mustCreateShimLog(t, filepath.Join(dir, "pct99.log"))
+	mustCreateShimLog(t, filepath.Join(dir, "stray.txt"))    // ignored (not pct prefix)
+	mustCreateShimLog(t, filepath.Join(dir, "pct64.notlog")) // ignored (not .log suffix)
 
 	l := NewShimLogs(dir)
 	out, err := l.List(context.Background())
@@ -44,7 +44,7 @@ func TestShimLogs_LogPathReturnsEmptyWhenAbsent(t *testing.T) {
 
 func TestShimLogs_LogPathPctEncoding(t *testing.T) {
 	dir := t.TempDir()
-	mustCreate(t, filepath.Join(dir, "pct64.log"))
+	mustCreateShimLog(t, filepath.Join(dir, "pct64.log"))
 	l := NewShimLogs(dir)
 	p := l.LogPath("%64")
 	want := filepath.Join(dir, "pct64.log")
@@ -53,7 +53,7 @@ func TestShimLogs_LogPathPctEncoding(t *testing.T) {
 	}
 }
 
-func mustCreate(t *testing.T, p string) {
+func mustCreateShimLog(t *testing.T, p string) {
 	t.Helper()
 	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 		t.Fatalf("create %s: %v", p, err)

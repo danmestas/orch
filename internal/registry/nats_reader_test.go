@@ -1,4 +1,4 @@
-package sources
+package registry
 
 import (
 	"testing"
@@ -6,7 +6,7 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// parseAgentInfo is the deterministic / pure part of the NATS source.
+// parseAgentInfo is the deterministic / pure part of the NATS reader.
 // Live discovery + heartbeat subscription tests live in the bench
 // (test/docker-sesh/) — they need a real NATS server.
 
