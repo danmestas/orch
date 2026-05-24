@@ -29,12 +29,15 @@ import (
 //     is not yet supported on cmux and returns 1 with a clear error).
 //   - err: a non-recoverable error (cmux missing, unknown agent, etc.).
 func (o *spawnOpts) spawnPaneCmux() (string, int, error) {
-	if _, err := exec.LookPath("cmux"); err != nil {
-		return "", 1, fmt.Errorf("orch spawn: cmux not on PATH — install cmux from https://cmux.app or add /Applications/cmux.app/Contents/Resources/bin to PATH")
-	}
-
+	// Flag-level validation first — these don't need cmux to be
+	// installed and should give the same diagnostic regardless of
+	// environment.
 	if o.Headless {
 		return "", 1, fmt.Errorf("orch spawn: --headless is not supported with --persistence=cmux (cmux has no headless-session concept; rerun without --headless or use --persistence=tmux)")
+	}
+
+	if _, err := exec.LookPath("cmux"); err != nil {
+		return "", 1, fmt.Errorf("orch spawn: cmux not on PATH — install cmux from https://cmux.app or add /Applications/cmux.app/Contents/Resources/bin to PATH")
 	}
 
 	wrap, err := o.buildWrap()

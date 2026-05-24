@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### feat(orch spawn): cmux persistence engine — Proposal 0008 Phase B (#207)
+
+`orch spawn --persistence cmux --layout cmux <agent>` now spawns a
+worker into a cmux pane via cmux's CLI (`cmux new-pane` + `cmux send`),
+in addition to the default tmux path.
+
+The cmux engine mirrors `cmd/orch/spawn_tmux.go`'s shape inline in
+`cmd/orch/spawn_cmux.go` — no `Engine`/`Handle`/`LayoutEngine`
+interfaces yet (Rule of Three: extract when a third engine, e.g. zmx,
+lands). `cmd/orch/spawn.go` switches on `--persistence` to pick the
+concrete spawn function.
+
+Composition table (`internal/persistence/registry.go`) grows
+`{cmux, cmux}` alongside `{tmux, tmux}`. Cross-engine pairs
+(`{tmux, cmux}`, `{cmux, tmux}`) continue to reject at flag-parse with
+a clear diagnostic.
+
+Deliberately deferred (return clean operator errors, not silent
+fall-through):
+
+- `--verify` on cmux — `internal/tmuxctl.Verify` is tmux-specific.
+- `--headless` on cmux — cmux has no headless-session concept.
+
+The shim wire format (`--pane <locator>`) is unchanged; the shim
+treats the locator as an opaque string, so cmux's `surface:30`-style
+refs flow through.
+
 ### feat(orch spawn): inline orch-spawn + executors/ into Go (#189 friction point 2)
 
 `bin/orch-spawn` (~1000 LoC bash) and `executors/tmux/spawn.sh` (~316
