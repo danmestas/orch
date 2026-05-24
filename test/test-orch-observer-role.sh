@@ -184,16 +184,46 @@ chmod +x "$NATS_STUB_DIR/orch-registry"
 export PATH="$NATS_STUB_DIR:$PATH"
 export NATS_URL="nats://stub.invalid:4222"
 
+# Post-#189 fixture-injection seam: the new `orch` Go binary reads its
+# worker list from ORCH_REGISTRY_FIXTURE_FILE (JSON array, same shape as
+# `orch-registry snapshot`) when that env var is set — no NATS dial.
+# The legacy nats / orch-registry per-PATH stubs above remain for any
+# other test scripts that still shell out to them.
+ORCH_REGISTRY_FIXTURE_FILE="$SANDBOX/orch-registry-fixture.json"
+export ORCH_REGISTRY_FIXTURE_FILE
+
 set_agents() {
     : > "$NATS_STUB_FIXTURES"
     local entry pane role cwd
+    # New: also build the Go-binary fixture as a JSON array.
+    local rows_json="[]"
     for entry in "$@"; do
         # shellcheck disable=SC2086
         set -- $entry
         pane=$1; role=$2; cwd=$3
         jq -nc --arg p "$pane" --arg r "$role" --arg c "$cwd" --arg a "claude" \
             '{pane_id:$p, role:$r, cwd:$c, agent:$a}' >> "$NATS_STUB_FIXTURES"
+        rows_json=$(jq -nc --argjson prev "$rows_json" --arg p "$pane" --arg r "$role" --arg c "$cwd" --arg a "claude" '
+            $prev + [{
+                pane_id: $p,
+                instance_id: "stub-inst",
+                name: ($p | sub("^%"; "pct")),
+                role: $r,
+                outfit: "",
+                agent: $a,
+                cwd: $c,
+                owner: "stub",
+                session: "",
+                alive: true,
+                subjects: {
+                    prompt: ("agents.prompt.stub.fake." + ($p | sub("^%"; "pct"))),
+                    status: "",
+                    hb: ""
+                },
+                metadata: {pane_id: $p, role: $r, cwd: $c, agent: $a}
+            }]')
     done
+    printf '%s\n' "$rows_json" > "$ORCH_REGISTRY_FIXTURE_FILE"
 }
 
 TARGET_PANE=$(tmux split-window -d -h -P -F '#{pane_id}' 'while true; do sleep 60; done' 2>/dev/null) || {

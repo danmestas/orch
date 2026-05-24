@@ -107,7 +107,9 @@ func runSpy(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer nc.Close()
+	if nc != nil {
+		defer nc.Close()
+	}
 	workers, err := snapshotOnce(context.Background(), nc)
 	if err != nil {
 		return fmt.Errorf("registry snapshot: %w", err)

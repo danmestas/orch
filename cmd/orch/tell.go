@@ -71,7 +71,9 @@ func runTell(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer nc.Close()
+	if nc != nil {
+		defer nc.Close()
+	}
 
 	workers, err := snapshotOnce(context.Background(), nc)
 	if err != nil {
@@ -98,7 +100,23 @@ func runTell(args []string) error {
 	}
 
 	if *collect {
+		if nc == nil {
+			// Fixture mode (ORCH_REGISTRY_FIXTURE_FILE set) cannot
+			// stream chunks — there is no NATS connection. Tell the
+			// caller the test path bypasses --collect.
+			return &exitError{code: 1, msg: "--collect requires a live NATS connection; ORCH_REGISTRY_FIXTURE_FILE skips that path"}
+		}
 		return tellCollect(nc, worker.Subjects.Prompt, prompt, time.Duration(inactivity)*time.Second)
+	}
+
+	// Fixture mode: no NATS connection, but the guard and lookup
+	// produced a worker. The bash-era tests exercised exactly this
+	// shape (publish path silent on a stub bus), so treat the publish
+	// as a no-op success. writeSendLog still runs — that's the side
+	// effect tests assert on.
+	if nc == nil {
+		writeSendLog(worker.PaneID, prompt)
+		return nil
 	}
 
 	if err := nc.Publish(worker.Subjects.Prompt, []byte(prompt)); err != nil {
