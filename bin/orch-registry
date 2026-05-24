@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# orch-registry — operator registry consolidation (proposal 0005).
+#
+# Resolves alias / pane id targets in one shot for orch-tell / orch-peek /
+# orch-ask / orch-spy. Now ships as a vendored Go binary built by
+# goreleaser; npm-installed users get it under vendor/, and the bin/
+# shim execs it. Dev checkouts fall back to lazy-build.
+#
+# Resolution order:
+#   1. vendor/orch-registry (shipped by `npm install -g @agent-ops/orch` via
+#      scripts/postinstall.js — fetched from the matching GitHub Release).
+#   2. .bin/orch-registry (lazy-built from cmd/orch-registry on a dev
+#      checkout where go.mod is in this repo tree).
+set -euo pipefail
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+pkg_root=$(cd "$script_dir/.." && pwd)
+
+# 1. Prefer the vendored binary from the GH Release.
+vendored="$pkg_root/vendor/orch-registry"
+if [ -x "$vendored" ]; then
+    exec "$vendored" "$@"
+fi
+
+# 2. Fallback: dev-checkout lazy-build. Walk up from this script looking for
+#    go.mod; if we find it (and `go` is on PATH), build into .bin and exec.
+build_root="$script_dir"
+while [ ! -f "$build_root/go.mod" ]; do
+    parent=$(dirname "$build_root")
+    if [ "$parent" = "$build_root" ]; then
+        echo "orch-registry: no vendored binary at $vendored and no go.mod above $script_dir" >&2
+        echo "               re-run \`npm install -g @agent-ops/orch\` (or unset ORCH_SKIP_DOWNLOAD if you set it)" >&2
+        exit 1
+    fi
+    build_root="$parent"
+done
+
+src_dir="$build_root/cmd/orch-registry"
+build_dir="$build_root/.bin"
+built="$build_dir/orch-registry"
+
+needs_build=0
+if [ ! -x "$built" ]; then
+    needs_build=1
+else
+    if find "$src_dir" "$build_root/internal" -name '*.go' -newer "$built" -print -quit 2>/dev/null | grep -q .; then
+        needs_build=1
+    fi
+fi
+
+if [ "$needs_build" -eq 1 ]; then
+    if ! command -v go >/dev/null 2>&1; then
+        echo "orch-registry: no vendored binary and 'go' not on PATH; cannot build $src_dir" >&2
+        exit 1
+    fi
+    mkdir -p "$build_dir"
+    (cd "$build_root" && go build -o "$built" ./cmd/orch-registry) \
+        || { echo "orch-registry: build failed" >&2; exit 1; }
+fi
+
+exec "$built" "$@"

@@ -1,30 +1,45 @@
 #!/usr/bin/env bash
 # orch — top-level subcommand dispatcher.
 #
-# Issue #189 friction points 1 + 3: this is a lazy-build shim around the
+# Issue #189 friction points 1 + 3: this is a vendor-first shim around the
 # Go binary at cmd/orch/. Built-in Go subcommands (tell / ask / peek /
-# spy / migrate-aliases) are handled in-process; unknown subcommands are
-# forwarded to a sibling `orch-<sub>` binary on PATH (preserves the
-# legacy dispatch model for orch up / orch down / orch spawn / etc.).
+# spy / spawn / migrate-aliases) are handled in-process; unknown
+# subcommands are forwarded to a sibling `orch-<sub>` binary on PATH
+# (preserves the legacy dispatch model for orch up / orch down / etc.).
 #
-# Same lazy-build pattern as bin/orch-workflow.
+# Resolution order:
+#   1. vendor/orch (shipped by `npm install -g @agent-ops/orch` via
+#      scripts/postinstall.js — fetched from the matching GitHub Release).
+#   2. .bin/orch (lazy-built from cmd/orch on a dev checkout where go.mod
+#      is in this repo tree).
+#
+# Same vendor-first pattern as bin/orch-subtree / bin/orch-workflow.
 set -euo pipefail
 
-# Locate the package root. Walk up from this script's location until we
-# find a go.mod file.
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-pkg_root="$script_dir"
-while [ ! -f "$pkg_root/go.mod" ]; do
-    parent=$(dirname "$pkg_root")
-    if [ "$parent" = "$pkg_root" ]; then
-        echo "orch: cannot find go.mod above $script_dir" >&2
+pkg_root=$(cd "$script_dir/.." && pwd)
+
+# 1. Prefer the vendored binary from the GH Release.
+vendored="$pkg_root/vendor/orch"
+if [ -x "$vendored" ]; then
+    exec "$vendored" "$@"
+fi
+
+# 2. Fallback: dev-checkout lazy-build. Walk up from this script looking for
+#    go.mod; if we find it (and `go` is on PATH), build into .bin and exec.
+build_root="$script_dir"
+while [ ! -f "$build_root/go.mod" ]; do
+    parent=$(dirname "$build_root")
+    if [ "$parent" = "$build_root" ]; then
+        echo "orch: no vendored binary at $vendored and no go.mod above $script_dir" >&2
+        echo "      re-run \`npm install -g @agent-ops/orch\` (or unset ORCH_SKIP_DOWNLOAD if you set it)" >&2
         exit 1
     fi
-    pkg_root="$parent"
+    build_root="$parent"
 done
 
-src_dir="$pkg_root/cmd/orch"
-build_dir="$pkg_root/.bin"
+src_dir="$build_root/cmd/orch"
+build_dir="$build_root/.bin"
 built="$build_dir/orch"
 
 needs_build=0
@@ -33,7 +48,7 @@ if [ ! -x "$built" ]; then
 else
     # Rebuild if any .go file under cmd/orch, internal/registry, or
     # internal/synadia is newer than the cached binary.
-    if find "$src_dir" "$pkg_root/internal/registry" "$pkg_root/internal/synadia" \
+    if find "$src_dir" "$build_root/internal/registry" "$build_root/internal/synadia" \
         -name '*.go' -newer "$built" -print -quit 2>/dev/null | grep -q .; then
         needs_build=1
     fi
@@ -41,11 +56,11 @@ fi
 
 if [ "$needs_build" -eq 1 ]; then
     if ! command -v go >/dev/null 2>&1; then
-        echo "orch: 'go' not on PATH; cannot build $src_dir" >&2
+        echo "orch: no vendored binary and 'go' not on PATH; cannot build $src_dir" >&2
         exit 1
     fi
     mkdir -p "$build_dir"
-    (cd "$pkg_root" && go build -o "$built" ./cmd/orch) \
+    (cd "$build_root" && go build -o "$built" ./cmd/orch) \
         || { echo "orch: build failed" >&2; exit 1; }
 fi
 

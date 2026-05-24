@@ -202,12 +202,20 @@ if [ -d "$EXTENSIONS_DIR" ]; then
         fi
 
         bin_path="$ext_dir/$binary"
-        # For Go binaries, the manifest points at a source dir; build the
-        # binary lazily into the same dir. Operators on installed npm
-        # packages will get a prebuilt binary checked in, but in repo
-        # development we `go build` on first run.
-        if [ -d "$bin_path" ] && [ -f "$bin_path/main.go" ]; then
-            built="$ext_dir/.bin/$(basename "$bin_path")"
+        # For Go binaries, the manifest points at a source dir. Resolution:
+        #   1. vendor/<basename> from goreleaser archive (npm-installed users).
+        #   2. .bin/<basename> lazy-built from source (dev checkout — Go
+        #      source is present).
+        #
+        # Check vendor first unconditionally — npm-installed users have no
+        # cmd/ source dir at all (it's stripped from the tarball), so a
+        # "needs source dir + main.go" gate would skip them.
+        base=$(basename "$bin_path")
+        vendored="$PKG_ROOT/vendor/$base"
+        if [ -x "$vendored" ]; then
+            bin_path="$vendored"
+        elif [ -d "$bin_path" ] && [ -f "$bin_path/main.go" ]; then
+            built="$ext_dir/.bin/$base"
             needs_build=0
             if [ ! -x "$built" ] || [ "$bin_path/main.go" -nt "$built" ]; then
                 needs_build=1
@@ -220,7 +228,7 @@ if [ -d "$EXTENSIONS_DIR" ]; then
             fi
             if [ $needs_build -eq 1 ]; then
                 if ! command -v go >/dev/null 2>&1; then
-                    warn "  $name: 'go' not on PATH; cannot build $bin_path — skipping"
+                    warn "  $name: no vendored binary at $vendored and 'go' not on PATH; cannot build $bin_path — skipping"
                     continue
                 fi
                 mkdir -p "$ext_dir/.bin"
