@@ -83,17 +83,41 @@ jobs:
           npm list -g --depth=0 | grep '@agent-ops/orch' || (echo "package not installed" && exit 1)
 
       - name: bin shim probe
-        # Proves every declared bin entry actually resolves on PATH and is executable.
-        # Catches the bin-path regression class that bit v0.1.0.
+        # After #189A/B/C, the only published bin entry that operators invoke
+        # directly is `orch` — the rest (`tell`, `ask`, `peek`, `spy`, `spawn`,
+        # `migrate-aliases`) are in-process subcommands of the Go dispatcher,
+        # and `up`/`down`/`version` are sibling binaries the dispatcher execs.
+        # Probe: assert the canonical entry exists and the retired bash bins do not.
         run: |
           set -e
-          for cmd in orch orch-up orch-down orch-spawn orch-ask orch-tell orch-peek orch-listen; do
-            which "$cmd"
+          which orch
+          # Retired bins MUST NOT be on PATH after a clean install. If they
+          # are, an older install bled through and consumers will hit stale
+          # behavior. (#189 friction points 1+2+3.)
+          for cmd in orch-tell orch-ask orch-peek orch-spy orch-spawn orch-claim-operator orch-register orch-listen; do
+            if which "$cmd" 2>/dev/null; then
+              echo "ERROR: retired bin '$cmd' is still on PATH after install"
+              exit 1
+            fi
           done
 
       - name: smoke — orch --help
         # Proves the main dispatcher loads and prints its help text.
         run: orch --help
+
+      - name: smoke — orch subcommand contract
+        # Assert the dispatcher's help text advertises every subcommand we
+        # intend to ship in this release. Catches accidental subcommand
+        # removal at release time (the dispatcher would still load, but the
+        # surface would have silently shrunk).
+        run: |
+          set -e
+          help=$(orch --help)
+          for sub in tell ask peek spy spawn migrate-aliases up down version; do
+            echo "$help" | grep -qE "orch $sub( |$)" \
+              || { echo "MISSING: 'orch $sub' not advertised by 'orch --help'"; exit 1; }
+          done
+          echo "all expected subcommands present in orch --help"
 
       - name: smoke — orch up --dry-run
         # Exercises the up flow's import + dep-check path without mutating ~/.claude.
