@@ -147,6 +147,8 @@ The shim's claude-code adapter (JSONL transcript tailing + `tmux send-keys` for 
 - Heartbeats at 5s cadence with full envelope (`Sesh-Envelope`, `Sesh-Role`, `Sesh-Attempt`, traceparent)
 - v0.4.0 of the Synadia SDK (vs our shim's 0.3.0); supports attachments
 
+> **Flag note (verified 2026-05-24, claude 2.1.150):** `--dangerously-load-development-channels` is hidden from `claude --help` output but is still accepted by the parser. `orch-spawn claude` passes it internally (`cmd/orch/spawn_tmux.go:87`); you only need it manually when launching claude outside `orch-spawn`. Don't search the help output for it.
+
 ### Setup (one-time, per machine)
 
 Inside any claude-code session:
