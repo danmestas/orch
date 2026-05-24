@@ -200,62 +200,16 @@ jobs:
           cat /tmp/orch-ci-real.log
           test "$(cat /tmp/orch-ci-real.rc)" = "0"
 
-  adapter-contract:
-    name: adapter contract bench (T9/T10/T11)
-    runs-on: ubuntu-latest
-    # Hard gate on PRs that touch the shim, orch spawn path, or publish hooks.
-    # Both docker bench and sesh bench must exit 0.
-    # Runs on pull_request AND merge_group so the required status check is
-    # satisfied in both contexts. A skipped job does NOT satisfy branch
-    # protection — see farley playbook common pitfalls.
-    if: |
-      github.event_name == 'pull_request' || github.event_name == 'merge_group'
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-
-      - name: check if adapter-relevant files changed
-        id: filter
-        run: |
-          # pull_request: diff PR base..head. merge_group: diff merge_group base..head.
-          # Falls back to "relevant" so we never silently skip the gate when refs
-          # can't be resolved.
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-            HEAD="${{ github.event.pull_request.head.sha }}"
-          else
-            BASE="${{ github.event.merge_group.base_sha }}"
-            HEAD="${{ github.event.merge_group.head_sha }}"
-          fi
-          changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || echo "FALLBACK")
-          if [[ "$changed" == "FALLBACK" ]] || printf '%s\n' "$changed" | grep -qE \
-              '^(cmd/orch-agent-shim/|cmd/orch/|internal/adapter/|internal/tmuxctl/|hooks/)'; then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "relevant=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Set up Docker Buildx
-        if: steps.filter.outputs.relevant == 'true'
-        uses: docker/setup-buildx-action@v3
-
-      - name: run docker bench with MOCK_USE_SHIM=1 (T1–T11)
-        if: steps.filter.outputs.relevant == 'true'
-        run: |
-          MOCK_USE_SHIM=1 bash test/docker/run-tests.sh --with-shim
-
-      - name: run sesh bench
-        if: steps.filter.outputs.relevant == 'true'
-        run: |
-          bash test/docker-sesh/run-tests.sh
+  # NOTE: `adapter-contract` (T9/T10/T11 docker + sesh benches) was removed in
+  # the farley pass. Both benches build images from `internal/shim/` and
+  # `internal/adapter/`, which were extracted to `synadia-agent-shim` (orch#140,
+  # merged today). The job had been silently green since the extraction because
+  # the path-filter's git-diff was failing under `fetch-depth: 1` and the
+  # `|| true` fallback set `relevant=false`, skipping the bench entirely. The
+  # farley pass exposed it by removing the silent-skip. Adapter contract tests
+  # now belong in the sister repo; `test/docker/`, `test/docker-sesh/`, and
+  # their inside-container scripts still reference the extracted dirs and are
+  # tracked for a separate cleanup PR.
 
   bench:
     name: latency benchmark (soft gate)
