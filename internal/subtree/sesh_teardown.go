@@ -29,6 +29,39 @@ func NewSeshDownTeardown() *SeshDownTeardown {
 	return &SeshDownTeardown{Stderr: os.Stderr}
 }
 
+// containsLower is a small ASCII-only substring-with-fold-comparison
+// helper. We avoid strings.EqualFold/Contains+ToLower so the package
+// stays free of allocations in the common short-string path.
+func containsLower(haystack, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(haystack) < len(needle) {
+		return false
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		match := true
+		for j := 0; j < len(needle); j++ {
+			a := haystack[i+j]
+			b := needle[j]
+			if a >= 'A' && a <= 'Z' {
+				a += 'a' - 'A'
+			}
+			if b >= 'A' && b <= 'Z' {
+				b += 'a' - 'A'
+			}
+			if a != b {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
 // Down implements SeshTeardown.
 func (s *SeshDownTeardown) Down(ctx context.Context, sessionLabel string) error {
 	if sessionLabel == "" {

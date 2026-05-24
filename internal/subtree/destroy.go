@@ -17,16 +17,23 @@ type WorkerKiller interface {
 }
 
 // WorkerHandleRef is a minimal projection of spawnspec.WorkerHandle
-// carrying just the fields destroy needs (abort verb + target). Keeps
-// the Killer interface tight and lets tests substitute fakes without
-// constructing full handles.
+// carrying just the fields destroy needs. Keeps the Killer interface
+// tight and lets tests substitute fakes without constructing full
+// handles.
+//
+// AbortKind/AbortVerb/AbortKeys are retained for round-trip fidelity
+// against the cached handle, but the post-#210 killer dispatches the
+// graceful-shutdown step through the engine's instance.Handle (which
+// owns the engine-native interrupt verb) rather than re-deriving it
+// from these strings. Future cleanup may drop them entirely once the
+// cache schema is rev'd.
 type WorkerHandleRef struct {
-	Executor   string
-	PaneID     string
-	ID         string
-	AbortKind  string
-	AbortVerb  string
-	AbortKeys  string
+	Executor  string
+	PaneID    string
+	ID        string
+	AbortKind string
+	AbortVerb string
+	AbortKeys string
 }
 
 // SeshTeardown is the optional phase that brings down a sesh hub the

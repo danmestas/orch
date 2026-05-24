@@ -40,4 +40,16 @@ type Handle interface {
 	// Kill terminates the worker pane. Best-effort: tries graceful first,
 	// then forceful. Idempotent on the engine's tolerance.
 	Kill() error
+
+	// GracefulShutdown sends an engine-native interrupt (Ctrl-C
+	// equivalent) so the worker process can flush + exit cleanly before
+	// the caller resorts to Kill. Best-effort: implementations swallow
+	// "target already gone" errors so the caller can sequence
+	// GracefulShutdown → wait → Kill without branching on partial
+	// failure. Honors ctx cancellation for engines whose interrupt verb
+	// blocks.
+	//
+	// Idempotent: safe to call multiple times, and safe to call on a
+	// pane that's already exited.
+	GracefulShutdown(ctx context.Context) error
 }

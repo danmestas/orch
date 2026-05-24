@@ -77,3 +77,18 @@ func (h *Handle) Kill() error {
 	_ = exec.Command("tmux", "kill-pane", "-t", h.paneID).Run()
 	return nil
 }
+
+// GracefulShutdown sends Ctrl-C to the pane via `tmux send-keys -t
+// <pane> C-c` so the agent can flush + exit before kill-pane reclaims
+// the slot. Best-effort: a missing pane (already exited) is not an
+// error — the post-condition (worker received SIGINT or is already
+// gone) is satisfied either way.
+func (h *Handle) GracefulShutdown(ctx context.Context) error {
+	if h.paneID == "" {
+		return fmt.Errorf("tmux.Handle.GracefulShutdown: empty pane id")
+	}
+	// Best-effort; swallow exec error. send-keys on a missing pane
+	// exits non-zero, and that's fine — Kill will follow.
+	_ = exec.CommandContext(ctx, "tmux", "send-keys", "-t", h.paneID, "C-c").Run()
+	return nil
+}

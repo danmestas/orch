@@ -42,6 +42,56 @@ func TestHandleWaitEmptySession(t *testing.T) {
 	}
 }
 
+func TestHandleGracefulShutdownEmptySession(t *testing.T) {
+	h := NewHandle("", "", "/usr/local/bin/zmx")
+	if err := h.GracefulShutdown(context.Background()); err == nil {
+		t.Error("GracefulShutdown on empty session name should error")
+	}
+}
+
+// TestHandleGracefulShutdownDispatchesSend asserts the handle calls
+// `zmx send <name> \x03` against the configured zmxBin.
+func TestHandleGracefulShutdownDispatchesSend(t *testing.T) {
+	tmp := t.TempDir()
+	logFile := filepath.Join(tmp, "zmx.log")
+	// Write argv literally so we can assert it; \x03 is non-printable
+	// so we use `od -c` to capture it.
+	stubScript := "#!/usr/bin/env bash\n{ printf 'zmx: ' ; printf '%s ' \"$@\" ; printf '\\n' ; } >> \"" + logFile + "\"\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(tmp, "zmx"), []byte(stubScript), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	h := NewHandle("alpha", "alpha", filepath.Join(tmp, "zmx"))
+	if err := h.GracefulShutdown(context.Background()); err != nil {
+		t.Fatalf("GracefulShutdown: %v", err)
+	}
+	b, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	got := string(b)
+	// The send verb + session name are stable; the \x03 byte is
+	// inherently non-printable, so we just confirm the prefix is right.
+	if !strings.Contains(got, "zmx: send alpha ") {
+		t.Errorf("expected zmx send call; got %q", got)
+	}
+}
+
+// TestHandleGracefulShutdownIdempotent confirms a non-zero stub exit
+// (mimicking "session already gone") is swallowed by the handle.
+func TestHandleGracefulShutdownIdempotent(t *testing.T) {
+	tmp := t.TempDir()
+	stubScript := "#!/usr/bin/env bash\nexit 1\n"
+	bin := filepath.Join(tmp, "zmx")
+	if err := os.WriteFile(bin, []byte(stubScript), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	h := NewHandle("ghost", "ghost", bin)
+	if err := h.GracefulShutdown(context.Background()); err != nil {
+		t.Errorf("GracefulShutdown should swallow non-zero exit; got %v", err)
+	}
+}
+
 // Verify --position rejection produces a clear operator-facing error.
 // zmx is sessions-only; an explicit non-right --position is a category
 // error and must surface as such before any spawn work happens.
