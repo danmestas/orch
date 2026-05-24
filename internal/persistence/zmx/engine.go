@@ -10,7 +10,7 @@
 //
 //	import _ "github.com/danmestas/orch/internal/persistence/zmx"
 //
-// zmx CLI surface used (see https://github.com/your-org/zmx README):
+// zmx CLI surface used (see https://zmx.sh for the upstream docs):
 //
 //   - zmx run <name> -d <cmd>     // headless detached spawn
 //   - zmx attach <name> -d <cmd>  // attach-or-create, detached
