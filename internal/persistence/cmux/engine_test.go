@@ -1,6 +1,9 @@
 package cmux
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -129,5 +132,37 @@ func TestHandleKillEmptySurface(t *testing.T) {
 	h := NewHandle("", "")
 	if err := h.Kill(); err == nil {
 		t.Error("Kill on empty surface should error")
+	}
+}
+
+func TestHandleGracefulShutdownEmptySurface(t *testing.T) {
+	h := NewHandle("", "")
+	if err := h.GracefulShutdown(context.Background()); err == nil {
+		t.Error("GracefulShutdown on empty surface should error")
+	}
+}
+
+// TestHandleGracefulShutdownDispatchesSendKey verifies the handle
+// calls `cmux send-key --surface <surf> ctrl+c` via PATH.
+func TestHandleGracefulShutdownDispatchesSendKey(t *testing.T) {
+	tmp := t.TempDir()
+	logFile := filepath.Join(tmp, "cmux.log")
+	stubScript := "#!/usr/bin/env bash\nprintf 'cmux: %s\\n' \"$*\" >> \"" + logFile + "\"\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(tmp, "cmux"), []byte(stubScript), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	h := NewHandle("worker-1", "surface:7")
+	if err := h.GracefulShutdown(context.Background()); err != nil {
+		t.Fatalf("GracefulShutdown: %v", err)
+	}
+	b, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	got := string(b)
+	if !strings.Contains(got, "send-key --surface surface:7 ctrl+c") {
+		t.Errorf("expected send-key argv; got %s", got)
 	}
 }

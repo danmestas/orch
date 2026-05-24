@@ -93,3 +93,22 @@ func (h *Handle) Kill() error {
 	_ = exec.Command(bin, "kill", h.sessionName, "--force").Run()
 	return nil
 }
+
+// GracefulShutdown sends Ctrl-C (0x03) to the session's PTY via `zmx
+// send <name> \x03` — the canonical recovery pattern documented in
+// `zmx --help`'s Run section ("send Ctrl+C to recover"). `zmx send` is
+// fire-and-forget raw-input; the session may already have exited, in
+// which case send exits non-zero and we swallow.
+func (h *Handle) GracefulShutdown(ctx context.Context) error {
+	if h.sessionName == "" {
+		return fmt.Errorf("zmx.Handle.GracefulShutdown: empty session name")
+	}
+	bin := h.zmxBin
+	if bin == "" {
+		bin = "zmx"
+	}
+	// "\x03" is the Ctrl-C byte; zmx send forwards raw bytes verbatim
+	// to the session PTY's stdin.
+	_ = exec.CommandContext(ctx, bin, "send", h.sessionName, "\x03").Run()
+	return nil
+}

@@ -43,3 +43,16 @@ func (h *Handle) Kill() error {
 	_ = exec.Command("cmux", "close-surface", "--surface", h.surface).Run()
 	return nil
 }
+
+// GracefulShutdown sends Ctrl-C to the surface via `cmux send-key
+// --surface <surface> ctrl+c`. cmux's send-key verb takes a symbolic
+// key name (not a raw byte), so ctrl+c is the correct spelling.
+// Best-effort: a closed surface yields a non-zero exit, which we
+// swallow.
+func (h *Handle) GracefulShutdown(ctx context.Context) error {
+	if h.surface == "" {
+		return fmt.Errorf("cmux.Handle.GracefulShutdown: empty surface")
+	}
+	_ = exec.CommandContext(ctx, "cmux", "send-key", "--surface", h.surface, "ctrl+c").Run()
+	return nil
+}

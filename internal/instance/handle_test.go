@@ -13,16 +13,18 @@ import (
 // a real engine. Useful as a placeholder when wiring future callers
 // (orch attach, orch kill).
 type mockHandle struct {
-	id      string
-	locator string
-	killed  bool
-	waitErr error
+	id          string
+	locator     string
+	killed      bool
+	interrupted bool
+	waitErr     error
 }
 
-func (m *mockHandle) ID() string                       { return m.id }
-func (m *mockHandle) Locator() string                  { return m.locator }
-func (m *mockHandle) Wait(ctx context.Context) error   { return m.waitErr }
-func (m *mockHandle) Kill() error                      { m.killed = true; return nil }
+func (m *mockHandle) ID() string                               { return m.id }
+func (m *mockHandle) Locator() string                          { return m.locator }
+func (m *mockHandle) Wait(ctx context.Context) error           { return m.waitErr }
+func (m *mockHandle) Kill() error                              { m.killed = true; return nil }
+func (m *mockHandle) GracefulShutdown(_ context.Context) error { m.interrupted = true; return nil }
 
 func TestHandleInterfaceCompliance(t *testing.T) {
 	// Compile-time: mockHandle satisfies instance.Handle.
@@ -38,6 +40,13 @@ func TestHandleInterfaceCompliance(t *testing.T) {
 	}
 	if !h.killed {
 		t.Error("Kill did not mark mock as killed")
+	}
+
+	if err := h.GracefulShutdown(context.Background()); err != nil {
+		t.Errorf("GracefulShutdown err: %v", err)
+	}
+	if !h.interrupted {
+		t.Error("GracefulShutdown did not mark mock as interrupted")
 	}
 }
 
