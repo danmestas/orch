@@ -1,10 +1,15 @@
 # Multi-executor agent workers
 
-**Status:** Partially implemented. The dispatcher in `bin/orch-spawn`
-ships hybrid discovery for executor backends; heavyweight backends are
-moving to sister repos (Proposal 0003 / issue #142). The rest of this
-document is the original architectural proposal and tracks the broader
-roadmap.
+**Status:** Deferred. As of #189 (friction 2), the dispatcher collapsed
+into Go (`cmd/orch/spawn.go` — `orch spawn`) with tmux as the only
+supported executor; the hybrid-discovery surface that this document
+describes was retired with bin/orch-spawn. A second executor (WASM /
+Cloudflare Worker / Durable Object) will return through a proper Go
+`Engine` interface when there's a concrete consumer to anchor it
+against. Until then, this document is the original architectural
+proposal and tracks the broader roadmap; the implementation snippets
+below describe the pre-#189 bash dispatcher and should be read as
+historical context, not current behavior.
 
 Orch today is an agent host: bash + tmux, with the `suit` outfit system
 for skill / MCP / hook configuration. Sesh (sister project) is a neutral

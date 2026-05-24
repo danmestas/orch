@@ -45,7 +45,7 @@ assert_contains() {
     fi
 }
 
-SPAWN=${ORCH_SPAWN_BIN:-$(command -v orch-spawn)}
+SPAWN=${ORCH_SPAWN_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/helpers/orch-spawn}
 [ -x "$SPAWN" ] || { echo "orch-spawn not on PATH (set ORCH_SPAWN_BIN to override)"; exit 2; }
 
 echo "Testing $SPAWN output contract..."
@@ -55,7 +55,7 @@ TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
 "$SPAWN" >"$TMP_OUT" 2>"$TMP_ERR" && rc=0 || rc=$?
 assert "missing-agent: exits non-zero" 1 "$rc"
 assert "missing-agent: stdout is empty" "" "$(cat "$TMP_OUT")"
-assert_contains "missing-agent: stderr has usage" "usage: orch-spawn" "$(cat "$TMP_ERR")"
+assert_contains "missing-agent: stderr has usage" "usage: orch spawn" "$(cat "$TMP_ERR")"
 assert_contains "missing-agent: stderr advertises --quiet" "--quiet" "$(cat "$TMP_ERR")"
 rm -f "$TMP_OUT" "$TMP_ERR"
 

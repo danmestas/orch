@@ -60,7 +60,7 @@ assert_contains() {
     fi
 }
 
-SPAWN=${ORCH_SPAWN_BIN:-$(command -v orch-spawn)}
+SPAWN=${ORCH_SPAWN_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/helpers/orch-spawn}
 [ -x "$SPAWN" ] || { echo "orch-spawn not on PATH (set ORCH_SPAWN_BIN to override)"; exit 2; }
 
 echo "Testing $SPAWN --worktree-from / --slug contract..."

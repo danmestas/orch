@@ -26,7 +26,8 @@ The sequence:
 
 ## Shim launch — the key detail
 
-From `bin/orch-spawn`:
+From `cmd/orch/spawn_tmux.go` (the Go subcommand that replaced
+`bin/orch-spawn` in #189 friction point 2):
 
 ```bash
 ORCH_OWNER="$SHIM_OWNER" \

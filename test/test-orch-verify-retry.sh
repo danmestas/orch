@@ -60,11 +60,8 @@ assert_contains() {
 }
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SPAWN="$REPO_ROOT/bin/orch-spawn"
+SPAWN=${ORCH_SPAWN_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/helpers/orch-spawn}
 [ -x "$SPAWN" ] || { echo "in-tree bin/orch-spawn not found at $SPAWN"; exit 2; }
-
-TMUX_SPAWN_SCRIPT="$REPO_ROOT/executors/tmux/spawn.sh"
-[ -f "$TMUX_SPAWN_SCRIPT" ] || { echo "in-tree executors/tmux/spawn.sh not found at $TMUX_SPAWN_SCRIPT"; exit 2; }
 
 SANDBOX=$(mktemp -d)
 export ORCH_REGISTRY_DIR="$SANDBOX/registry"
@@ -79,45 +76,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "=== config: default ORCH_VERIFY_BACKOFF is 1,2,4,8 ==="
-
-# 1) Verify the documented default literally lives in the script. A future
-# refactor that drifts the constant should trip this immediately.
-if grep -q 'ORCH_VERIFY_BACKOFF:-1,2,4,8' "$TMUX_SPAWN_SCRIPT"; then
-    default_backoff="1,2,4,8"
-else
-    default_backoff="missing-or-different"
-fi
-assert "config: default ORCH_VERIFY_BACKOFF=1,2,4,8" "1,2,4,8" "$default_backoff"
-
-# 2) The legacy ORCH_VERIFY_TIMEOUT default of 60s is still the wall-clock
-# ceiling. Backoff caps total time at TIMEOUT regardless of how many
-# attempts remain.
-if grep -q 'ORCH_VERIFY_TIMEOUT:-60' "$TMUX_SPAWN_SCRIPT"; then
-    timeout_default="60"
-else
-    timeout_default="missing-or-different"
-fi
-assert "config: default ORCH_VERIFY_TIMEOUT is still 60s" "60" "$timeout_default"
-
-# 3) The fail-fast cases must be present in the script — pane death and
-# missing-binary detection should both halt the loop without burning the
-# remaining backoff budget. These are grep-level shape checks; the
-# behavioural assertions follow below.
-if grep -q 'verify_state="died"' "$TMUX_SPAWN_SCRIPT"; then
-    has_died_branch="yes"
-else
-    has_died_branch="no"
-fi
-assert "config: fail-fast on pane death branch present" "yes" "$has_died_branch"
-
-if grep -q 'verify_state="missing-binary"' "$TMUX_SPAWN_SCRIPT"; then
-    has_missing_branch="yes"
-else
-    has_missing_branch="no"
-fi
-assert "config: fail-fast on missing-binary branch present" "yes" "$has_missing_branch"
-
+# Config drift gates (default backoff, default timeout, died /
+# missing-binary fail-fast branches) live in
+# internal/tmuxctl/tmuxctl_test.go now — TestDefaultBackoffMatchesBashContract,
+# TestParseTimeout, TestVerifyPaneDied, TestVerifyMissingBinary. They
+# run under `go test ./...` and assert the same defaults this bash
+# section used to source-grep for.
+echo "=== config drift gates covered by go test ./internal/tmuxctl ==="
 echo
 echo "=== rejection: non-numeric ORCH_VERIFY_BACKOFF errors before spawn ==="
 

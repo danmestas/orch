@@ -46,7 +46,7 @@ assert_contains() {
     fi
 }
 
-SPAWN=${ORCH_SPAWN_BIN:-$(command -v orch-spawn)}
+SPAWN=${ORCH_SPAWN_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/helpers/orch-spawn}
 [ -x "$SPAWN" ] || { echo "orch-spawn not on PATH"; exit 2; }
 
 SANDBOX=$(mktemp -d)

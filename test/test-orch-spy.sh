@@ -347,15 +347,25 @@ if [ -n "$MOCK_PANE" ]; then
     # Register the operator agent on the stub bus.
     set_agents "$MOCK_PANE operator $OP_CWD"
 
-    # Mock orch-spawn in PATH front.
+    # Mock the orch binary the spy command will exec for `orch spawn`.
+    # Post-#189 the orch-spawn bash entry is gone; spy resolves the orch
+    # binary via $ORCH_BIN (set below) → exec.LookPath("orch") → its own
+    # executable. We mock at the $ORCH_BIN seam so the test stays
+    # hermetic and the real cmd/orch isn't invoked.
     MOCK_BIN=$SANDBOX/bin
     mkdir -p "$MOCK_BIN"
-    cat > "$MOCK_BIN/orch-spawn" <<MOCK
+    cat > "$MOCK_BIN/orch" <<MOCK
 #!/usr/bin/env bash
-# Mock: ignore all args, echo the pre-spawned pane id (via env override).
+# Mock: only handles \`orch spawn\`. Ignores args, echoes the pre-spawned
+# pane id. Anything else exits 2 so misuse is obvious.
+if [ "\$1" != "spawn" ]; then
+    echo "mock orch: only spawn supported (got: \$1)" >&2
+    exit 2
+fi
 echo "$MOCK_PANE"
 MOCK
-    chmod +x "$MOCK_BIN/orch-spawn"
+    chmod +x "$MOCK_BIN/orch"
+    export ORCH_BIN="$MOCK_BIN/orch"
 
     # 8) Happy path: spy resolves operator agent, mock-spawns, sends brief.
     TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
@@ -406,11 +416,15 @@ MOCK
         set_agents "$MOCK_PANE operator $OP_CWD" "%900 worker $WORKER_CWD" "$REG_PANE worker $WORKER_CWD"
 
         # Update mock to return REG_PANE so orch-tell hits a different live pane.
-        cat > "$MOCK_BIN/orch-spawn" <<MOCK
+        cat > "$MOCK_BIN/orch" <<MOCK
 #!/usr/bin/env bash
+if [ "\$1" != "spawn" ]; then
+    echo "mock orch: only spawn supported (got: \$1)" >&2
+    exit 2
+fi
 echo "$REG_PANE"
 MOCK
-        chmod +x "$MOCK_BIN/orch-spawn"
+        chmod +x "$MOCK_BIN/orch"
 
         TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
         PATH="$MOCK_BIN:$PATH" ORCH_TELL_MAX_WAIT=10 \

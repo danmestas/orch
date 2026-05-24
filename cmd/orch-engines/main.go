@@ -6,7 +6,8 @@
 //	orch-engines validate <persistence> <layout>
 //	    Exits 0 when the composition is in the closed registry;
 //	    exits 1 with a diagnostic on stderr otherwise. Intended for
-//	    bash bin/orch-spawn to call at flag-parse time.
+//	    cmd/orch/spawn.go (the Go `orch spawn` subcommand) to call at
+//	    flag-parse time.
 //
 //	orch-engines list
 //	    Prints supported (persistence, layout) pairs, one per line,

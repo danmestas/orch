@@ -56,7 +56,7 @@ assert_contains() {
     fi
 }
 
-SPAWN=$(command -v orch-spawn)
+SPAWN=${ORCH_SPAWN_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/helpers/orch-spawn}
 [ -x "$SPAWN" ] || { echo "orch-spawn missing on PATH"; exit 2; }
 
 SANDBOX=$(mktemp -d)
@@ -182,35 +182,13 @@ echo
 echo "=== verify configuration: defaults and banner table ==="
 
 # 4) Per #36, the default verify ceiling rose from 30s to 60s. Verify
-# the script literally has that default so a future drift gets caught.
-# Resolve to the in-tree spawn script relative to this test, not whatever
-# command -v finds — a stale system install would silently invalidate
-# these config assertions while the integration tests above still ran
-# against the in-tree binary via PATH.
-#
-# Post-#78: the verify/banner logic moved from bin/orch-spawn into the
-# tmux executor (executors/tmux/spawn.sh). Grep that file — it now owns
-# those configs.
-TMUX_SPAWN_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/executors/tmux/spawn.sh"
-[ -f "$TMUX_SPAWN_SCRIPT" ] || { echo "in-tree executors/tmux/spawn.sh not found at $TMUX_SPAWN_SCRIPT"; exit 2; }
-if grep -q 'ORCH_VERIFY_TIMEOUT:-60' "$TMUX_SPAWN_SCRIPT"; then
-    timeout_default="60"
-else
-    timeout_default="missing-or-different"
-fi
-assert "config: default ORCH_VERIFY_TIMEOUT is 60s" "60" "$timeout_default"
-
-# 5) Per the brief, every agent in the WRAP case must have a banner
-# registered (or fall through cleanly). Sanity check that the four
-# canonical agents are named in the BANNER case.
-banner_table_ok="yes"
-for agent in claude codex pi gemini; do
-    if ! grep -qE "^[[:space:]]*$agent\\)[[:space:]]*BANNER=" "$TMUX_SPAWN_SCRIPT"; then
-        banner_table_ok="missing-$agent"
-        break
-    fi
-done
-assert "config: BANNER table defines claude|codex|pi|gemini" "yes" "$banner_table_ok"
+# Post-#189: the verify/banner config moved from executors/tmux/spawn.sh
+# into Go (internal/tmuxctl/tmuxctl.go). The drift gates live in
+# internal/tmuxctl/tmuxctl_test.go (TestDefaultBackoffMatchesBashContract
+# + TestAgentBannersContractDocumented) — they run under `go test ./...`
+# and assert the same defaults this bash section used to grep for. No
+# bash equivalent here; the section is intentionally empty.
+echo "  SKIP  verify/banner config drift gate covered by go test ./internal/tmuxctl"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

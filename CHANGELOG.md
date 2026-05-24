@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### feat(orch spawn): inline orch-spawn + executors/ into Go (#189 friction point 2)
+
+`bin/orch-spawn` (~1000 LoC bash) and `executors/tmux/spawn.sh` (~316
+LoC bash) have been collapsed into `cmd/orch/spawn.go` +
+`cmd/orch/spawn_tmux.go` (~1000 LoC Go). Operators now invoke
+`orch spawn <agent> [flags...]` — the legacy `orch-spawn` bash entry
+point has been deleted (HARD CUT, no shim).
+
+Helper package `internal/tmuxctl/` houses the readiness-poll loop,
+banner detection, and adapter probe used by the new Go subcommand.
+
+Deleted alongside `bin/orch-spawn`:
+
+- `executors/` directory entirely (was placeholder Wrangler scaffolds
+  for future WASM/CF executors plus the now-superseded
+  `executors/tmux/spawn.sh`). The Executor abstraction returns when a
+  second concrete backend ships.
+- `internal/persistence/tmux/`, `internal/persistence/engine.go`,
+  `internal/layout/`, `internal/instance/` — Phase-A engine
+  scaffolding from #180 that bridged to the deleted bash. The closed
+  `(persistence, layout)` composition registry stays
+  (`internal/persistence/registry.go` is still used by `orch-engines`).
+- `--executor` flag's hybrid discovery (env / PATH / in-tree). The
+  flag still parses but only accepts `tmux`.
+
+### feat(postinstall): absorb install.sh (#189 friction point 2)
+
+`install.sh` has been deleted. Its work — symlinking hooks/skills,
+caching the fleet doctrine, and injecting the doctrine block into
+`~/.codex/AGENTS.md` and `~/.gemini/GEMINI.md` — moved into
+`scripts/postinstall.js` so `npm install -g @agent-ops/orch` is now the
+single install path on every platform.
+
 ### feat(cmd/orch): collapse orch-tell / orch-peek / orch-spy / orch-ask into `orch <subcommand>` (#189 friction points 1 + 3)
 
 The four bash CLIs that used to live at `bin/orch-tell`, `bin/orch-peek`,

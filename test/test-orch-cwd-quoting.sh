@@ -75,13 +75,11 @@ assert_not_contains() {
     fi
 }
 
-# Prefer the repo's bin/orch-spawn over any system install: this test
-# exercises in-tree behavior, and a stale globally-installed orch-spawn
-# would mask new regressions. Operators can still override via
-# ORCH_SPAWN_BIN.
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
-DEFAULT_SPAWN="$SCRIPT_DIR/../bin/orch-spawn"
-SPAWN=${ORCH_SPAWN_BIN:-$DEFAULT_SPAWN}
+# Default to the in-tree test/helpers/orch-spawn adapter (post-#189:
+# bin/orch-spawn was deleted; the adapter execs `orch spawn` via the
+# repo's bin/orch lazy-build wrapper). Operators can still override via
+# ORCH_SPAWN_BIN to point at a system install.
+SPAWN=${ORCH_SPAWN_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/helpers/orch-spawn}
 [ -x "$SPAWN" ] || { echo "orch-spawn not found (set ORCH_SPAWN_BIN to override): $SPAWN"; exit 2; }
 
 echo "Testing $SPAWN — #148 CWD quoting + ORCH_SESH_BIN normalization..."

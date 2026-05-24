@@ -61,7 +61,7 @@ assert_contains() {
 # review, not a stale globally-installed binary.
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd -P)
-SPAWN="${ORCH_SPAWN_BIN:-$REPO_ROOT/bin/orch-spawn}"
+SPAWN=${ORCH_SPAWN_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/helpers/orch-spawn}
 [ -x "$SPAWN" ] || { echo "orch-spawn not found (set ORCH_SPAWN_BIN to override): $SPAWN"; exit 2; }
 
 echo "Testing $SPAWN — SESH_ROLE / SESH_CLASS env propagation + --class flag..."
@@ -70,40 +70,11 @@ echo "Testing $SPAWN — SESH_ROLE / SESH_CLASS env propagation + --class flag..
 echo
 echo "=== Section 1: source declares SESH_ROLE / SESH_CLASS in shim env block ==="
 # ----------------------------------------------------------------------------
-
-# The env-export block that prefixes `orch-agent-shim` MUST include both
-# new vars, threaded from the locally-derived ROLE / CLASS. A grep over
-# the script source is the lightest evidence and matches the
-# test-orch-spawn-no-pause-on-exit.sh convention.
-
-SHIM_BLOCK=$(awk '/ORCH_OWNER="\$SHIM_OWNER"/,/orch-agent-shim \\/' "$SPAWN")
-
-if [ -n "$SHIM_BLOCK" ]; then
-    has_block="yes"
-else
-    has_block="no"
-fi
-assert "shim env block located in source" "yes" "$has_block"
-
-case "$SHIM_BLOCK" in
-    *'SESH_ROLE="$ROLE"'*) has_sesh_role="yes" ;;
-    *)                      has_sesh_role="no"  ;;
-esac
-assert "shim env block exports SESH_ROLE=\$ROLE" "yes" "$has_sesh_role"
-
-case "$SHIM_BLOCK" in
-    *'SESH_CLASS="$CLASS"'*) has_sesh_class="yes" ;;
-    *)                        has_sesh_class="no"  ;;
-esac
-assert "shim env block exports SESH_CLASS=\$CLASS" "yes" "$has_sesh_class"
-
-# Legacy ORCH_ROLE must stay — Phase 3 explicitly preserves it for
-# pre-migration consumers.
-case "$SHIM_BLOCK" in
-    *'ORCH_ROLE="$ROLE"'*) has_orch_role="yes" ;;
-    *)                      has_orch_role="no"  ;;
-esac
-assert "shim env block retains ORCH_ROLE (legacy)" "yes" "$has_orch_role"
+# Source-grep against bin/orch-spawn was the legacy verification. Post-#189
+# the shim env block lives in cmd/orch/spawn_tmux.go (maybeLaunchShim);
+# the assertion is covered by the Go unit tests in cmd/orch/spawn_test.go.
+# Section 1 retained only for human-readable context — no checks fire here.
+echo "  SKIP  shim env block source-grep retired (covered by Go unit tests in cmd/orch/spawn_test.go)"
 
 # ----------------------------------------------------------------------------
 echo
@@ -232,18 +203,16 @@ echo
 echo "=== Section 4: --class appears in usage / source ==="
 # ----------------------------------------------------------------------------
 
-# Operators discover the flag via `orch-spawn` (no args → usage on stderr).
+# Operators discover the flag via `orch spawn` (no args → usage on stderr).
 TMP_ERR=$(mktemp)
 "$SPAWN" >/dev/null 2>"$TMP_ERR" || true
 assert_contains "usage line mentions --class" "--class" "$(cat "$TMP_ERR")"
 rm -f "$TMP_ERR"
 
-# The flag parser handles both --class <val> and --class=<val>.
-grep -q -- '--class)' "$SPAWN" && has_space_form="yes" || has_space_form="no"
-assert "parser handles '--class <val>' form" "yes" "$has_space_form"
-
-grep -q -- '--class=\*)' "$SPAWN" && has_equals_form="yes" || has_equals_form="no"
-assert "parser handles '--class=<val>' form" "yes" "$has_equals_form"
+# Parser handles both --class <val> (space) and --class=<val> (equals) — verified
+# by behaviour, not source-grep. Section 3 already exercises both forms through
+# the validator; an explicit re-check here would be redundant.
+echo "  SKIP  parser-form source-grep retired (covered by Section 3 functional tests)"
 
 # ----------------------------------------------------------------------------
 echo

@@ -114,9 +114,28 @@ func runSpy(args []string) error {
 			return &exitError{code: 1}
 		}
 	}
-	if _, err := exec.LookPath("orch-spawn"); err != nil {
-		fmt.Fprintln(os.Stderr, "orch spy: orch-spawn not on PATH")
-		return &exitError{code: 1}
+	// `orch spy` invokes `orch spawn` via the current orch binary
+	// (cmd/orch/spawn.go in-process is option B, but capturing stdout
+	// across a re-entrant call is awkward when runSpawn writes directly
+	// to os.Stdout). exec'ing ourselves with the "spawn" subcommand keeps
+	// the dispatch clean and the stdout-capture trivial.
+	//
+	// Binary resolution: $ORCH_BIN wins (tests mock orch via this);
+	// otherwise `orch` on PATH; otherwise os.Executable (the binary
+	// currently running us).
+	orchBin := os.Getenv("ORCH_BIN")
+	if orchBin == "" {
+		if p, err := exec.LookPath("orch"); err == nil {
+			orchBin = p
+		}
+	}
+	if orchBin == "" {
+		exe, err := os.Executable()
+		if err == nil {
+			orchBin = exe
+		} else {
+			orchBin = "orch"
+		}
 	}
 
 	// Resolve target via the in-process registry (replaces the bash
@@ -173,22 +192,22 @@ func runSpy(args []string) error {
 		return nil
 	}
 
-	// Spawn the spy pane (claude + stasi/wait-watch). ADR-0002 / orch-spawn
+	// Spawn the spy pane (claude + stasi/wait-watch). ADR-0002 / `orch spawn`
 	// auto-tags role=observer when the outfit is stasi.
-	spawnArgs := []string{"claude", "--outfit", "stasi", "--cut", "wait-watch", "--no-fleet"}
+	spawnArgs := []string{"spawn", "claude", "--outfit", "stasi", "--cut", "wait-watch", "--no-fleet"}
 	// Default to headless unless --headed.
 	if !*headed {
 		spawnArgs = append(spawnArgs, "--headless")
 	}
 	spawnArgs = append(spawnArgs, "--cwd", worker.CWD)
-	out, err := exec.Command("orch-spawn", spawnArgs...).CombinedOutput()
+	out, err := exec.Command(orchBin, spawnArgs...).CombinedOutput()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "orch spy: orch-spawn failed: %s\n", strings.TrimSpace(string(out)))
+		fmt.Fprintf(os.Stderr, "orch spy: orch spawn failed: %s\n", strings.TrimSpace(string(out)))
 		return &exitError{code: 1}
 	}
 	spyPane = strings.TrimSpace(string(out))
 	if !spyPaneRE.MatchString(spyPane) {
-		fmt.Fprintf(os.Stderr, "orch spy: orch-spawn returned non-pane: %s\n", spyPane)
+		fmt.Fprintf(os.Stderr, "orch spy: orch spawn returned non-pane: %s\n", spyPane)
 		return &exitError{code: 1}
 	}
 

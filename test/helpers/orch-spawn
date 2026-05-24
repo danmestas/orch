@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# test/helpers/orch-spawn — adapter so legacy bash tests (which call
+# "$SPAWN" with orch-spawn-style argv) can drive the post-#189 Go subcommand
+# `orch spawn`. Production has no such shim — operators invoke `orch spawn`
+# directly. This file exists ONLY so the bash test corpus survives the
+# hard cut of bin/orch-spawn -> cmd/orch/spawn.go without each test
+# being individually rewritten.
+#
+# Resolution order:
+#   1. $ORCH_BIN              — explicit override (CI / hermetic tests).
+#   2. `bin/orch` from repo   — in-tree (lazy-build wrapper). Preferred
+#                               so tests don't accidentally hit a stale
+#                               globally-installed orch from a prior
+#                               release that still dispatches to the
+#                               retired bin/orch-spawn.
+#   3. `orch` on PATH         — production install via npm.
+set -euo pipefail
+
+if [ -n "${ORCH_BIN:-}" ] && [ -x "$ORCH_BIN" ]; then
+    exec "$ORCH_BIN" spawn "$@"
+fi
+
+# Walk up to find go.mod and run bin/orch from there.
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+pkg_root="$script_dir"
+while [ ! -f "$pkg_root/go.mod" ]; do
+    parent=$(dirname "$pkg_root")
+    if [ "$parent" = "$pkg_root" ]; then
+        break
+    fi
+    pkg_root="$parent"
+done
+
+if [ -x "$pkg_root/bin/orch" ]; then
+    exec "$pkg_root/bin/orch" spawn "$@"
+fi
+
+if command -v orch >/dev/null 2>&1; then
+    exec orch spawn "$@"
+fi
+
+echo "test/helpers/orch-spawn: no orch binary resolved (set ORCH_BIN to override)" >&2
+exit 1

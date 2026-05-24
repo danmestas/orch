@@ -170,7 +170,7 @@ subscribers can filter or aggregate by harness without parsing subject tokens.
 - `pi` — auto-discovered, no merge needed (extensions land in `~/.pi/agent/extensions/`)
 - `gemini` — merge `gemini-settings-snippet.json` into `~/.gemini/settings.json`
 
-`install.sh` / postinstall symlinks every harness's hook files into the right
+The npm postinstall (`scripts/postinstall.js`) symlinks every harness's hook files into the right
 per-harness directory, but only when that harness's home dir already exists —
 no `~/.codex` means no codex symlinks, etc., so installs on machines that
 don't run a given harness stay clean.
@@ -227,7 +227,7 @@ chmod +x bin/orch-nats-bridge-in hooks/orch-nats-publish-*.sh
 Then:
 
 - Add the three publish hooks + the SessionStart entry to `settings-snippet.json`
-- Update `install.sh` / postinstall to symlink the new files (the `for f in bin/*` and `for f in hooks/*` patterns already pick them up automatically — verify)
+- Update `scripts/postinstall.js` to symlink the new files (the `linkDirEntries(hooks)` + `linkDirEntries(skills)` patterns already pick them up automatically — verify)
 - Optionally add a doc-link entry to the README's tooling list
 
 ---
