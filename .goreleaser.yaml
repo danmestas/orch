@@ -16,6 +16,12 @@ version: 2
 
 project_name: orch
 
+# Use a non-default dist dir so `goreleaser release --clean` does NOT delete
+# `dist/schema/*.json` (committed spawnspec wire-format reference). With the
+# default `dist/`, the clean step erases the committed schema files and
+# goreleaser then aborts with "git is in a dirty state".
+dist: .goreleaser-dist
+
 before:
   hooks:
     - go mod tidy

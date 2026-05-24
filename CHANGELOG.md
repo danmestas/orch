@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.2 (2026-05-24)
+
+Release-pipeline fix: the v0.2.1 release attempt failed in goreleaser
+because `goreleaser release --clean` deletes the default `dist/`
+directory, which includes the committed `dist/schema/*.json` files
+(SpawnSpec v1/v2 wire schemas). Goreleaser's dirty-state check then
+aborted before any binaries were built or published.
+
+Fixed by giving goreleaser its own scratch dir via the `dist:` field
+in `.goreleaser.yaml` — schemas in `dist/` are no longer disturbed.
+
+No code or behavior changes — release pipeline only.
+
 ## 0.2.1 (2026-05-24)
 
 Install fix for v0.2.0: `npm install -g @agent-ops/orch` succeeded but
