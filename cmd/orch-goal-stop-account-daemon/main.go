@@ -74,6 +74,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/danmestas/orch/internal/natsurl"
+	"github.com/danmestas/orch/internal/synadia"
 )
 
 const (
@@ -230,7 +231,7 @@ func connectAndWatch(ctx context.Context, cfg config) error {
 
 	subject := promptSubject(cfg.owner)
 	sub, err := nc.Subscribe(subject, func(msg *nats.Msg) {
-		if !isTerminator(msg) {
+		if !synadia.IsTerminator(msg) {
 			return
 		}
 		if err := accountTurn(ctx, cfg); err != nil {
@@ -253,14 +254,6 @@ func connectAndWatch(ctx context.Context, cfg config) error {
 	case <-nc.StatusChanged(nats.CLOSED, nats.DISCONNECTED):
 		return errors.New("NATS connection closed")
 	}
-}
-
-// isTerminator returns true for §6.5 terminators: zero bytes AND no headers.
-// Regular chunks are JSON objects (non-empty); error-path messages carry
-// Nats-Service-Error headers. The §6.4 ack chunk is also JSON and thus
-// non-empty. This guard is both necessary and sufficient.
-func isTerminator(msg *nats.Msg) bool {
-	return len(msg.Data) == 0 && len(msg.Header) == 0
 }
 
 // accountTurn calls sesh-ops goal account with the configured token estimate.
