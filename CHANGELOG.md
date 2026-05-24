@@ -1,6 +1,95 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-05-24)
+
+First minor release after the v0.1.x bash era. Highlights:
+
+- **HARD CUT of bash CLIs** (#189 friction points 1+2+3): `orch-tell`,
+  `orch-peek`, `orch-spy`, `orch-ask`, `orch-spawn`, `orch-claim-operator`,
+  `orch-register` are gone with no shim. All flows now go through
+  `orch <subcommand>` (Go binary). The `package.json` `bin` manifest no
+  longer publishes them; consumers with hardcoded references must
+  migrate. `orch migrate-aliases` prints sed-style rewrites for shell
+  config files.
+- **Synadia Agent Protocol is the only wire** (#94, shipped earlier in
+  the 0.1.x line and now made permanent): the legacy filesystem-marker
+  IPC, the NATS comms bridge daemon, the per-harness publish hooks, and
+  the fswatch-based listener are deleted.
+- **Pluggable engines land** (#180, #207/#208, #209, #210, #211, #212):
+  `internal/persistence.Engine` is a real seam with `tmux`, `cmux`, and
+  `zmx` implementations; `orch spawn --persistence <engine>
+  --layout <layout>` picks the composition; the SpawnSpec v2 wire format
+  carries `executor` (`cmux`/`zmx` join `tmux`) and supports
+  `layout: none` for headless flows.
+- **Workflow YAML CLI lands** (#202, #145, #146): `orch-workflow`
+  parses, validates, compiles, applies, statuses, and cancels workflow
+  DAGs seeded against `sesh-ops`.
+- **Subtree topology phase B** (#201, #145): `orch-subtree apply/
+  status/destroy/watch` wired to the live registry + NATS.
+- **install.sh absorbed** into `scripts/postinstall.js` (#189 friction
+  point 2): `npm install -g @agent-ops/orch` is now the single install
+  path on every platform.
+- **claudecode-subagent-panel extension** (#93): orch panes surface in
+  Claude Code's subagent panel via the `orch-cc-subagent-bridge`
+  sidecar.
+
+Semver minor bump justified by the bash-CLI hard cut (consumers with
+hardcoded references break) plus the new public surface (SpawnSpec v2,
+pluggable engines, workflow/subtree CLIs).
+
+### Breaking changes (summary)
+
+- `bin/orch-tell`, `bin/orch-peek`, `bin/orch-spy`, `bin/orch-ask`,
+  `bin/orch-spawn`, `bin/orch-claim-operator`, `bin/orch-register`,
+  `bin/orch-nats-bridge-in`, `bin/orch-listen`, `bin/orch-current-jsonl`:
+  all deleted. No compatibility shim. Use `orch <subcommand>` instead;
+  see `orch migrate-aliases` for shell-config rewrites.
+- `orch-tell --legacy-keystrokes` and `orch-ask --legacy` paths removed
+  (#96). Panes must be Synadia-registered; discovery failure is now a
+  hard error, not a silent tmux send-keys fallback.
+- `executors/` directory deleted with `orch-spawn` (#206); returns when
+  a second concrete executor backend ships.
+- Per-harness Claude Code hooks (`orch-stop-marker.sh`, etc.) deleted;
+  `~/.claude/settings.json` entries referencing them become dangling
+  and are stripped by `orch down`.
+
+### Release-cycle PRs
+
+#173, #174, #175, #176, #177, #179, #183, #186, #187, #190, #191, #192,
+#193, #194, #195, #196, #197, #198, #200, #201, #202, #203, #204, #205,
+#206, #208, #209, #210, #211, #212.
+
+### feat(spawnspec): v2 wire format — cmux + zmx executors, layout=none (#212)
+
+SpawnSpec gains an explicit `version: 2` and grows the
+`executor: tmux | cmux | zmx` field plus `layout: tmux | cmux | none`.
+Phase-A `executor: tmux` specs continue to validate (the schema treats
+absence of `version` as v1 for backward compat across the boundary),
+but the writers in `cmd/orch/spawn.go` now always emit v2. The shim
+treats `layout: none` as "no surface", letting headless flows
+(API-driven spawns, daemon workers) opt out of pane-allocation
+entirely.
+
+### refactor(subtree): dispatch worker-killer abort + kill through engine handles (#211)
+
+`internal/subtree/worker_killer.go` no longer shells out to
+`tmux kill-pane` directly; it dispatches abort + kill through the
+persistence engine handle, so cmux + zmx workers respect the same
+teardown semantics as tmux.
+
+### feat(orch): add zmx persistence engine — Proposal 0008 Phase C, zmx Phase 2 (#210)
+
+`orch spawn --persistence zmx --layout zmx <agent>` spawns workers
+into zmx (Zellij-multiplexer) sessions, mirroring the tmux + cmux
+shapes. Composition table grows `{zmx, zmx}`. Cross-engine pairs still
+reject at flag-parse with a clear diagnostic.
+
+### refactor(orch): extract persistence.Engine seam around tmux + cmux — zmx Phase 1 (#209)
+
+`internal/persistence/engine.go` is now a real interface (was
+copy-paste between tmux + cmux in #207/#208). Both tmux and cmux
+implementations move behind it; the subsequent zmx engine (#210) lands
+as a third implementation rather than a third copy.
 
 ### feat(orch spawn): cmux persistence engine — Proposal 0008 Phase B (#207)
 
