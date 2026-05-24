@@ -46,7 +46,7 @@ assert_contains() {
     fi
 }
 
-SPAWN=$(command -v orch-spawn)
+SPAWN=${ORCH_SPAWN_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/helpers/orch-spawn}
 ORCH=$(command -v orch)
 [ -x "$SPAWN" ] && [ -x "$ORCH" ] || {
     echo "binaries missing on PATH (need orch-spawn and orch)"; exit 2; }

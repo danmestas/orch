@@ -1,8 +1,6 @@
-// Package tmuxctl provides higher-level tmux helpers that compose on
-// top of internal/persistence/tmux + internal/layout/tmux. The package
-// houses the operations needed by cmd/orch/spawn (the Go subcommand
-// that replaced bin/orch-spawn + executors/tmux/spawn.sh in #189 friction
-// point #2):
+// Package tmuxctl provides the tmux helpers needed by cmd/orch/spawn
+// (the Go subcommand that replaced bin/orch-spawn + executors/tmux/spawn.sh
+// in #189 friction point #2):
 //
 //   - Readiness polling (title-rename + banner detection with
 //     comma-separated backoff sequence, matching the legacy
@@ -12,13 +10,13 @@
 //     internal/synadia.AdapterMissingExitCode).
 //   - Pane-aliveness / capture helpers used by the readiness loop.
 //
-// Intentionally narrow: anything tmux-pane-level (split, kill, title)
-// stays in internal/persistence/tmux or internal/layout/tmux. The
-// boundary keeps the package easy to mock for cmd/orch/spawn_test.go.
-//
 // Per the 2026-05-23 design call: no Executor interface yet (defer until
 // WASM/CF lands a second backend), so tmuxctl is a flat helper package,
-// not an engine.
+// not an engine. The Phase-A engine scaffolding (internal/persistence/tmux,
+// internal/layout/tmux, internal/instance) was deleted along with
+// executors/tmux/spawn.sh in this PR — those packages bridged to bash
+// that no longer exists, and the seam they defined will be re-introduced
+// (with a second concrete implementation) when WASM/CF lands.
 package tmuxctl
 
 import (

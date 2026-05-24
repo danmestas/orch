@@ -39,9 +39,6 @@ jobs:
       - name: shellcheck — hooks
         run: shellcheck --severity=warning hooks/*.sh
 
-      - name: shellcheck — install.sh
-        run: shellcheck --severity=warning install.sh
-
       - name: node --check — scripts
         run: |
           for f in scripts/*.js; do
@@ -207,7 +204,7 @@ jobs:
   adapter-contract:
     name: adapter contract bench (T9/T10/T11)
     runs-on: ubuntu-latest
-    # Hard gate on PRs that touch the shim, executors, or publish hooks.
+    # Hard gate on PRs that touch the shim, orch spawn path, or publish hooks.
     # Both docker bench and sesh bench must exit 0.
     if: |
       github.event_name == 'pull_request'
@@ -230,7 +227,7 @@ jobs:
           HEAD="${{ github.event.pull_request.head.sha }}"
           changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || true)
           if printf '%s\n' "$changed" | grep -qE \
-              '^(cmd/orch-agent-shim/|executors/|internal/adapter/)'; then
+              '^(cmd/orch-agent-shim/|cmd/orch/|internal/adapter/|internal/tmuxctl/|hooks/)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
             echo "relevant=false" >> "$GITHUB_OUTPUT"
@@ -253,7 +250,7 @@ jobs:
   bench:
     name: latency benchmark (soft gate)
     runs-on: ubuntu-latest
-    # Run on PRs that touch the bridge, shim, executors, or hook scripts.
+    # Run on PRs that touch the bridge, shim, orch spawn, or hook scripts.
     # Soft warning only — latency varies on shared runners; never a hard gate.
     if: |
       github.event_name == 'pull_request' && (
@@ -282,7 +279,7 @@ jobs:
           HEAD="${{ github.event.pull_request.head.sha }}"
           changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || true)
           if printf '%s\n' "$changed" | grep -qE \
-              '^(cmd/orch-agent-shim/|executors/|internal/adapter/|hooks/)'; then
+              '^(cmd/orch-agent-shim/|cmd/orch/|internal/adapter/|internal/tmuxctl/|hooks/)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
             echo "relevant=false" >> "$GITHUB_OUTPUT"

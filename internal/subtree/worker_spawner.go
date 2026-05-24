@@ -14,8 +14,9 @@ import (
 )
 
 // OrchSpawnWorkerSpawner implements WorkerSpawner by shelling out to
-// the `orch-spawn` bash dispatcher. Translation rules (per
-// `bin/orch-spawn --help`):
+// the `orch spawn` Go subcommand (cmd/orch/spawn.go — post-#189
+// replacement for the retired bin/orch-spawn bash dispatcher).
+// Translation rules:
 //
 //	Agent              → positional arg
 //	Name               → --instance-id <name>
@@ -30,18 +31,17 @@ import (
 //	Outfit.{Name|Cut|Accessories} → --outfit/--cut/--accessory (explicit)
 //	Env                → exported in the spawner's environment before exec
 //
-// orch-spawn prints the spawned tmux pane id to stdout on success
-// (line 915 of bin/orch-spawn). We capture that and build a
-// WorkerHandle around it. The shim publishes a richer handle to
-// the bus, but for cache-purposes the {pane_id, name, agent}
-// triple is what destroy + status need.
+// `orch spawn` prints the spawned tmux pane id to stdout on success.
+// We capture that and build a WorkerHandle around it. The shim
+// publishes a richer handle to the bus, but for cache-purposes the
+// {pane_id, name, agent} triple is what destroy + status need.
 //
-// Non-tmux executors (cf-worker, cf-durable-object) are not yet
-// supported by the bash orch-spawn — we surface a clear "not
-// implemented for executor=X" error so the operator gets the
-// signal instead of a silent failure.
+// Non-tmux executors (cf-worker, cf-durable-object) aren't supported by
+// `orch spawn` yet — we surface a clear "not implemented for
+// executor=X" error so the operator gets the signal instead of a
+// silent failure.
 type OrchSpawnWorkerSpawner struct {
-	// BinPath is the absolute path to bin/orch-spawn. Empty falls
+	// BinPath is the absolute path to the `orch` binary. Empty falls
 	// back to $PATH lookup at spawn time.
 	BinPath string
 
@@ -68,19 +68,19 @@ func NewOrchSpawnWorkerSpawner() *OrchSpawnWorkerSpawner {
 // dispatcher exits non-zero.
 func (s *OrchSpawnWorkerSpawner) Spawn(ctx context.Context, spec spawnspec.SpawnSpec, sesh ResolvedSesh) (*spawnspec.WorkerHandle, error) {
 	if spec.Tmux == nil {
-		return nil, fmt.Errorf("subtree spawn %q: only executor=tmux is supported by orch-spawn today; received cf-worker/cf-durable-object", spec.Name)
+		return nil, fmt.Errorf("subtree spawn %q: only executor=tmux is supported by orch spawn today; received cf-worker/cf-durable-object", spec.Name)
 	}
 
 	bin := s.BinPath
 	if bin == "" {
-		p, err := exec.LookPath("orch-spawn")
+		p, err := exec.LookPath("orch")
 		if err != nil {
-			return nil, fmt.Errorf("subtree spawn %q: 'orch-spawn' not on PATH: %w", spec.Name, err)
+			return nil, fmt.Errorf("subtree spawn %q: 'orch' not on PATH: %w", spec.Name, err)
 		}
 		bin = p
 	}
 
-	args := []string{string(spec.Agent)}
+	args := []string{"spawn", string(spec.Agent)}
 	args = append(args, "--instance-id", spec.Name, "--force-slug")
 	if spec.Cwd != "" {
 		args = append(args, "--cwd", spec.Cwd)
@@ -141,12 +141,12 @@ func (s *OrchSpawnWorkerSpawner) Spawn(ctx context.Context, spec spawnspec.Spawn
 	cmd.Stdout = &stdout
 	cmd.Stderr = s.Stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("subtree spawn %q: orch-spawn exit: %w", spec.Name, err)
+		return nil, fmt.Errorf("subtree spawn %q: orch spawn exit: %w", spec.Name, err)
 	}
 
 	pane := strings.TrimSpace(stdout.String())
 	if pane == "" {
-		return nil, errors.New("subtree spawn: orch-spawn returned empty pane id (was --quiet set? or did the agent fail to start?)")
+		return nil, errors.New("subtree spawn: orch spawn returned empty pane id (was --quiet set? or did the agent fail to start?)")
 	}
 
 	now := s.Now

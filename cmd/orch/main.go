@@ -81,6 +81,8 @@ func dispatch(sub string, args []string) error {
 		return runSpy(args)
 	case "migrate-aliases":
 		return runMigrateAliases(args)
+	case "spawn":
+		return runSpawn(args)
 	default:
 		return execSibling(sub, args)
 	}
@@ -134,6 +136,7 @@ Built-in subcommands:
                                     chunks back to stdout
   orch peek [--json] [pane...]      Status snapshot of live worker panes
   orch spy  <target> <mission>      Spawn a stasi/wait-watch observer
+  orch spawn <agent> [flags...]     Launch a worker pane (claude|pi|codex|gemini)
   orch migrate-aliases              Print sed-style rewrites to migrate
                                     shell config files off the retired
                                     bin/orch-tell etc. bash CLIs
@@ -141,7 +144,6 @@ Built-in subcommands:
 Forwarded subcommands (look for an "orch-<sub>" binary on PATH):
   orch up                           Complete the install on this machine
   orch down                         Tear down install state
-  orch spawn ...                    Launch a worker pane
   orch version                      Binary version + drift report
   orch <anything else>              exec orch-<anything else>
 

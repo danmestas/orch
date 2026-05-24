@@ -60,7 +60,7 @@ assert_contains() {
 }
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SPAWN="$REPO_ROOT/bin/orch-spawn"
+SPAWN=${ORCH_SPAWN_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/helpers/orch-spawn}
 [ -x "$SPAWN" ] || { echo "in-tree bin/orch-spawn not found at $SPAWN"; exit 2; }
 
 TMUX_SPAWN_SCRIPT="$REPO_ROOT/executors/tmux/spawn.sh"
