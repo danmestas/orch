@@ -34,6 +34,7 @@ Scan this before reaching for a tmux/bash workaround. Each row says: what you're
 | Pick a pane interactively | `orch tell --list` | Don't ask the user "which pane?" — list them |
 | Spawn a worker you'll drive | `orch-spawn <agent> [--outfit X --cut Y] [--headless]` | Don't `tmux split-window` + manual yolo flag — misses the shim, won't appear on the bus |
 | Spawn a spy/observer on a target | `orch spy <target> <mission>` | Don't `orch-spawn claude --outfit stasi` by hand and reconstruct the brief envelope |
+| Worker mid-task needs a skill / hook / accessory it wasn't dressed with | `suit inject --skill <name> --home <worker-project-dir>` (also `--hook`, `--accessory`, `--bundle`; remote `--target` waits on [suit#68](https://github.com/danmestas/suit/issues/68)) | Don't respawn — loses in-session state. Don't hand-copy files into `.claude/skills/` — bypasses suit's lockfile + dirty-detection so `suit current` / `suit off` then lie. |
 | Move a worker between visible / hidden | `orch-show <pane>` / `orch-hide <pane>` | Don't `tmux break-pane`/`join-pane` raw — `orch-show`/`orch-hide` know about the `orch-headless` session |
 | Detect drift between repo and live install | `orch-version [--json]` | Don't `diff -r` the bin dirs manually |
 
@@ -179,6 +180,33 @@ orch-spawn claude --project myapp --outfit reviewer --cut reviewing
 - One bundle per worker, no sharing — keeps cleanup independent. The `subs never inherit` rule means each spawn must specify its own outfit explicitly.
 
 Test battery: `~/projects/orch/test/test-suit-integration.sh` (4 tests, 11 assertions, all green) — covers headed + headless + cleanup + parallel.
+
+### Equipping a running worker via `suit inject`
+
+`suit prepare` locks the worker's outfit AT SPAWN. When a worker is already running and discovers it needs a component it wasn't dressed with — a skill, a hook, an accessory bundle — the runtime answer is `suit inject`, not respawn.
+
+```sh
+# orch-side: inject into a co-located worker (you know its project dir)
+suit inject --skill release-watch     --home ~/projects/<worker-project>
+suit inject --hook  recall            --home ~/projects/<worker-project>
+suit inject --accessory pr-policy     --home ~/projects/<worker-project>
+suit inject --bundle    backend-essentials --home ~/projects/<worker-project>
+
+# worker-side: a hook inside the worker self-injects (no --home; defaults via $CLAUDE_PROJECT_DIR / cwd)
+suit inject --skill release-watch
+```
+
+Properties to know:
+
+- **One kind per call.** Exactly one of `--skill / --hook / --accessory / --bundle`. Multi-kind would muddle the lockfile row.
+- **Idempotent.** Re-injecting unchanged content is a disk no-op.
+- **Refuse-when-dirty.** If the target path is untracked or sha256-edited locally, inject refuses without `--force`. Protects worker-local edits.
+- **Lockfile-truthful.** Appends to `.suit/lock.json` under a distinct `injected:` list. `suit current` shows injected components separately from the up-dressed ones; `suit off` removes them; `suit off --keep-injected` removes only the up-dressing.
+- **Reload semantics, claude-code:** standalone skills/hooks/rules are FILE-WATCHED — the worker picks them up on its NEXT turn with no reload signal needed. Plugin/MCP kinds report `reload: restart-required`.
+- **Reload semantics, codex/gemini/pi:** `reload: restart-required` for all kinds today — per-harness live-reload research is open ([suit#70](https://github.com/danmestas/suit/issues/70)).
+- **Remote target by NATS subject is not yet available.** Today injection is LOCAL: orch-side calls need `--home <worker-project-dir>`; worker-side hooks default to self. `--target <owner>/<session>` discovery is gated on a transport decision ([suit#68](https://github.com/danmestas/suit/issues/68)). Until it lands, an orch driving a worker on the same machine does the `--home` form; cross-machine waits.
+
+Spec: [docs/proposals/2026-05-24-realtime-component-injection.md](https://github.com/danmestas/suit/blob/main/docs/proposals/2026-05-24-realtime-component-injection.md) (on suit main).
 
 ### Fleet-awareness addendum
 
