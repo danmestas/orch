@@ -9,6 +9,8 @@ description: Use when debugging orch-spawn behavior — workers spawning but not
 
 This is reference material: read when something surprises you, not before.
 
+**Scope note — spawn-time only.** This skill covers the BEFORE-spawn outfit / cut / accessory lock-in via `suit prepare`. For AFTER-spawn component additions (worker mid-task needs a skill / hook it wasn't dressed with), see `orch-driver § Equipping a running worker via suit inject` — don't respawn just to add one skill, that loses in-session state.
+
 ## What orch-spawn does, top-down
 
 ```

@@ -102,3 +102,4 @@ nats sub --raw 'agents.>' &
 - Operator names an outfit directly (`--outfit X`): just run `orch-spawn` with their flags, no translation needed.
 - Operator wants a worker without a configuration (`--no-fleet` style, naked claude): pass through to `orch-spawn` without `--outfit`.
 - Spawning the operator session itself (the orchestrator): operator sessions aren't dressed via this skill — they're started plainly. See `orch-driver` skill, "Operator vs worker sessions."
+- A worker is ALREADY RUNNING and the operator wants to add a skill/hook/accessory to it mid-task: that's `suit inject`, not a respawn-with-different-outfit. See `orch-driver § Equipping a running worker via suit inject`.
