@@ -68,8 +68,11 @@ func runSpawn(args []string) error {
 		return err
 	}
 
-	// --sesh-session shells out to `sesh worker-cwd <label>` and uses
-	// the printed path as cwd. ORCH_SESH_BIN overrides the binary path.
+	// --sesh-session resolves the worker cwd. An explicit --cwd takes
+	// precedence (and is the fallback when `sesh worker-cwd` is
+	// unavailable); otherwise it shells out to `sesh worker-cwd <label>`
+	// and uses the printed path as cwd. ORCH_SESH_BIN overrides the
+	// binary path.
 	if err := opts.resolveSeshSession(); err != nil {
 		return err
 	}
@@ -559,14 +562,21 @@ func (o *spawnOpts) resolveSlug() error {
 	return nil
 }
 
-// resolveSeshSession shells out to `sesh worker-cwd <label>`. Mirrors
-// bin/orch-spawn lines 576-626. Mutually exclusive with --cwd.
+// resolveSeshSession resolves the worker cwd for --sesh-session. An
+// explicit --cwd takes precedence and doubles as the fallback for when
+// `sesh worker-cwd` is unavailable (the subcommand is being removed
+// upstream). Otherwise it shells out to `sesh worker-cwd <label>` and
+// uses the printed path. When the shell-out can't produce a cwd it
+// returns a clear, actionable error that names --cwd as the remedy
+// rather than surfacing an opaque shell-out failure.
 func (o *spawnOpts) resolveSeshSession() error {
 	if o.SeshSession == "" {
 		return nil
 	}
+	// Explicit --cwd wins and is the fallback path: when the caller
+	// supplied a cwd we use it directly and never touch the sesh binary.
 	if o.cwdFromFlag {
-		return fmt.Errorf("orch spawn: --cwd and --sesh-session are mutually exclusive (got --cwd=%s, --sesh-session=%s)", o.Cwd, o.SeshSession)
+		return nil
 	}
 	binInput := os.Getenv("ORCH_SESH_BIN")
 	if binInput == "" {
@@ -574,23 +584,21 @@ func (o *spawnOpts) resolveSeshSession() error {
 	}
 	seshBin, err := resolveSeshBin(binInput)
 	if err != nil {
-		return fmt.Errorf("orch spawn: --sesh-session needs the 'sesh' binary on PATH (or set ORCH_SESH_BIN=<absolute-path>) — got '%s' — install from https://github.com/danmestas/sesh", binInput)
+		return fmt.Errorf("orch spawn: --sesh-session could not resolve a worker cwd: the 'sesh' binary isn't on PATH (or set ORCH_SESH_BIN=<absolute-path>) — got '%s'. Pass --cwd=<dir> to set the working directory explicitly, or install sesh from https://github.com/danmestas/sesh", binInput)
 	}
 	out, err := exec.Command(seshBin, "worker-cwd", o.SeshSession).Output()
 	if err != nil {
 		stderrTail := ""
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderrTail = strings.TrimSpace(string(ee.Stderr))
-		}
 		rc := -1
 		if ee, ok := err.(*exec.ExitError); ok {
+			stderrTail = strings.TrimSpace(string(ee.Stderr))
 			rc = ee.ExitCode()
 		}
-		return fmt.Errorf("orch spawn: sesh worker-cwd %s failed (exit %d): %s", o.SeshSession, rc, stderrTail)
+		return fmt.Errorf("orch spawn: `sesh worker-cwd %s` failed (exit %d): %s — this command may have been removed; pass --cwd=<dir> to set the worker's working directory explicitly", o.SeshSession, rc, stderrTail)
 	}
 	path := strings.TrimSpace(string(out))
 	if path == "" {
-		return fmt.Errorf("orch spawn: sesh worker-cwd %s returned empty stdout", o.SeshSession)
+		return fmt.Errorf("orch spawn: `sesh worker-cwd %s` returned empty stdout — pass --cwd=<dir> to set the worker's working directory explicitly", o.SeshSession)
 	}
 	o.Cwd = path
 	return nil
@@ -827,4 +835,3 @@ func slugExports(slug string) string {
 func fleetPromptPath() string {
 	return filepath.Join(os.Getenv("HOME"), ".cache", "orch-fleet-prompt.md")
 }
-
