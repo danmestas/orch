@@ -516,3 +516,43 @@ func TestParseSpawnArgsPersistenceLayoutNameValidation(t *testing.T) {
 		t.Error("layout starting with digit should reject")
 	}
 }
+
+// writeFailingSeshBin writes a fake sesh binary that always exits non-zero,
+// simulating the upcoming removal of the `sesh worker-cwd` subcommand.
+func writeFailingSeshBin(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "sesh")
+	script := "#!/bin/sh\necho 'unknown command: worker-cwd' 1>&2\nexit 1\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
+// When `sesh worker-cwd` is unavailable but the caller supplied an explicit
+// --cwd, resolveSeshSession must fall back to that cwd rather than failing.
+func TestResolveSeshSessionFallsBackToExplicitCwd(t *testing.T) {
+	t.Setenv("ORCH_SESH_BIN", writeFailingSeshBin(t))
+	o := &spawnOpts{SeshSession: "mylabel", Cwd: "/tmp/fallback", cwdFromFlag: true}
+	if err := o.resolveSeshSession(); err != nil {
+		t.Fatalf("want fallback to explicit --cwd, got error: %v", err)
+	}
+	if o.Cwd != "/tmp/fallback" {
+		t.Errorf("want cwd /tmp/fallback, got %q", o.Cwd)
+	}
+}
+
+// When `sesh worker-cwd` is unavailable and no --cwd was supplied, the error
+// must be clear and name --cwd as the remedy (not an opaque shell-out error).
+func TestResolveSeshSessionErrorNamesCwdWhenSeshUnavailable(t *testing.T) {
+	t.Setenv("ORCH_SESH_BIN", writeFailingSeshBin(t))
+	o := &spawnOpts{SeshSession: "mylabel"}
+	err := o.resolveSeshSession()
+	if err == nil {
+		t.Fatal("want error when sesh worker-cwd fails and no --cwd given, got nil")
+	}
+	if !strings.Contains(err.Error(), "--cwd") {
+		t.Errorf("error should name --cwd as the remedy, got: %v", err)
+	}
+}
